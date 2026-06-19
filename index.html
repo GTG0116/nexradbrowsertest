@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AETHER · Live NEXRAD Scope</title>
+    <meta
+      name="description"
+      content="Live WSR-88D NEXRAD radar decoded entirely in your browser — reflectivity, velocity, dual-pol products and more."
+    />
+    <link rel="preconnect" href="https://noaa-nexrad-level2.s3.amazonaws.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Top bar -->
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark"><span></span></div>
+          <div class="brand-text">
+            <h1>AETHER</h1>
+            <p>browser-native NEXRAD scope</p>
+          </div>
+        </div>
+        <div class="topbar-status">
+          <div id="status" class="status">initializing…</div>
+          <div id="clock" class="clock">--:--:-- UTC</div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <!-- Left rail: source -->
+        <aside class="rail rail-left">
+          <section class="panel">
+            <h2 class="panel-title">Source</h2>
+            <label class="field">
+              <span>Radar site</span>
+              <select id="siteSelect"></select>
+            </label>
+            <label class="field">
+              <span>UTC date</span>
+              <input type="date" id="dateInput" />
+            </label>
+            <div class="btn-row">
+              <button id="refreshBtn" class="ghost-btn">↻ Refresh</button>
+              <button id="liveBtn" class="ghost-btn live">○ LIVE</button>
+            </div>
+          </section>
+
+          <section class="panel grow">
+            <h2 class="panel-title">Volume scans</h2>
+            <div id="volumeList" class="vol-list scroll"></div>
+          </section>
+        </aside>
+
+        <!-- Center: the scope -->
+        <section class="stage">
+          <div id="scopeWrap" class="scope-wrap">
+            <canvas id="scope" class="scope-canvas"></canvas>
+            <canvas id="overlay" class="scope-canvas overlay"></canvas>
+            <div class="sweep-line"></div>
+            <div id="readout" class="readout"></div>
+            <div id="progress" class="progress"></div>
+          </div>
+          <div id="legend" class="legend"></div>
+        </section>
+
+        <!-- Right rail: products & metadata -->
+        <aside class="rail rail-right">
+          <section class="panel">
+            <h2 class="panel-title">Product</h2>
+            <div id="productButtons" class="product-grid"></div>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">Elevation tilt</h2>
+            <div id="tiltList" class="tilt-list scroll"></div>
+          </section>
+
+          <section class="panel grow">
+            <h2 class="panel-title">Volume metadata</h2>
+            <div id="meta" class="meta"></div>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="footer">
+        <span>Data: NOAA Open Data · <code>noaa-nexrad-level2</code> (AWS S3)</span>
+        <span>Decoded client-side · bzip2 + WSR-88D Level II Message 31</span>
+      </footer>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>
