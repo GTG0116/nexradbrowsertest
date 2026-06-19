@@ -143,9 +143,13 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Fixed-content panels (Source, Product, etc.) must keep their full height so
+     their controls — like the radar-site picker — never get squeezed away. */
+  flex-shrink: 0;
 }
 .panel.grow {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 80px;
 }
 
 .panel-title {
@@ -316,10 +320,10 @@ input:focus {
 .leaflet-control-attribution a {
   color: var(--accent-2) !important;
 }
-/* Show radar gates crisply: no browser bilinear smoothing on the scaled image */
+/* Gates are drawn as true polar cells in the canvas; let the browser smooth the
+   overlay as Leaflet rescales it so diagonals don't alias into a moiré. */
 .radar-overlay {
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  image-rendering: auto;
 }
 
 .map-readout {
