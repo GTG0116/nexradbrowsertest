@@ -1,12 +1,14 @@
-// renderer.js — polar radar rendering onto a 2D canvas.
+// renderer.js — render a radar sweep into a geographically-referenced canvas
+// that can be draped over a Leaflet map as an image overlay.
 //
-// Strategy: instead of drawing one polygon per gate (millions of them), we walk
-// every screen pixel inside the radar disc and inverse-map it back to a
-// (range, azimuth) pair, then look up the gate value. This is O(pixels) and
-// produces a clean, smooth image. The product's precomputed LUT turns physical
-// values into colors without per-pixel branching on color stops.
+// The canvas spans the radar's bounding box in equirectangular (lat/lon-linear)
+// space. For every output pixel we inverse-map lat/lon back to the radar's
+// (range, azimuth) polar frame and look up the gate value — O(pixels), which is
+// fast and yields a clean, smooth field. Pixels with no echo stay transparent so
+// the basemap shows through.
 
 const BINS = 720; // 0.5° azimuth resolution
+const M_PER_DEG_LAT = 111320;
 
 function buildAzimuthIndex(sweep, moment) {
   const idx = new Array(BINS).fill(null);
@@ -17,57 +19,59 @@ function buildAzimuthIndex(sweep, moment) {
     if (b < 0) b += BINS;
     idx[b] = m;
   }
-  // Fill empty bins with the nearest populated neighbour so the sweep is
-  // continuous even where radials are missing or coarser than 0.5°.
+  // Fill empty bins with the nearest populated neighbour so the sweep stays
+  // continuous where radials are missing or coarser than 0.5°.
   const filled = idx.slice();
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 0; i < BINS; i++) {
       if (filled[i]) continue;
-      const prev = filled[(i - 1 + BINS) % BINS];
-      const next = filled[(i + 1) % BINS];
-      filled[i] = prev || next || null;
+      filled[i] = filled[(i - 1 + BINS) % BINS] || filled[(i + 1) % BINS] || null;
     }
   }
   return filled;
 }
 
-export function renderSweep(canvas, sweep, product, view) {
+// Largest range (metres) actually covered by a moment in this sweep.
+export function sweepMaxRange(sweep, moment) {
+  let maxR = 0;
+  for (const rad of sweep.radials) {
+    const m = rad.moments[moment];
+    if (!m) continue;
+    const end = m.firstGate + m.gateCount * m.gateSpacing;
+    if (end > maxR) maxR = end;
+  }
+  return maxR;
+}
+
+// geo = { siteLat, siteLon, latMin, latMax, lonMin, lonMax }
+export function renderGeo(canvas, sweep, product, geo) {
   const ctx = canvas.getContext('2d');
   const w = canvas.width;
   const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!sweep) return;
+
   const img = ctx.createImageData(w, h);
   const data = img.data;
 
-  if (!sweep) {
-    ctx.clearRect(0, 0, w, h);
-    return;
-  }
-
   const idx = buildAzimuthIndex(sweep, product.moment);
-  const lut = product.scale.lut;
-  const lo = product.scale.lo;
-  const hi = product.scale.hi;
-  const steps = product.scale.steps;
+  const { lut, lo, hi, steps } = product.scale;
   const invRange = (steps - 1) / (hi - lo);
 
-  const cx = w / 2 + view.panX;
-  const cy = h / 2 + view.panY;
-  const radiusPx = (Math.min(w, h) / 2) * view.zoom;
-  const metersPerPixel = view.rangeMeters / radiusPx;
-  const maxRange = view.rangeMeters;
-  const RAD2DEG = 180 / Math.PI;
+  const { siteLat, siteLon, latMin, latMax, lonMin, lonMax } = geo;
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
+  const R2D = 180 / Math.PI;
 
   for (let py = 0; py < h; py++) {
-    const dy = py - cy;
+    const lat = latMax - ((latMax - latMin) * py) / (h - 1);
+    const dNorth = (lat - siteLat) * M_PER_DEG_LAT;
     let row = py * w * 4;
     for (let px = 0; px < w; px++, row += 4) {
-      const dx = px - cx;
-      const rangePx = Math.sqrt(dx * dx + dy * dy);
-      const range = rangePx * metersPerPixel;
-      if (range > maxRange) continue;
+      const lon = lonMin + ((lonMax - lonMin) * px) / (w - 1);
+      const dEast = (lon - siteLon) * mPerDegLon;
 
-      // Azimuth: clockwise from north (up). North component = -dy, east = dx.
-      let az = Math.atan2(dx, -dy) * RAD2DEG;
+      const range = Math.sqrt(dEast * dEast + dNorth * dNorth);
+      let az = Math.atan2(dEast, dNorth) * R2D; // clockwise from north
       if (az < 0) az += 360;
       let b = Math.round(az * 2) % BINS;
       if (b < 0) b += BINS;
@@ -94,65 +98,34 @@ export function renderSweep(canvas, sweep, product, view) {
   ctx.putImageData(img, 0, 0);
 }
 
-// Draw range rings, radials and a compass on the overlay canvas.
-export function renderOverlay(canvas, view, options = {}) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width;
-  const h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
+// Sample the physical value at a geographic point (for the cursor readout).
+// Returns { value, unit, range, az } or null.
+export function sampleAt(sweep, product, lat, lon, site) {
+  if (!sweep) return null;
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((site.lat * Math.PI) / 180);
+  const dNorth = (lat - site.lat) * M_PER_DEG_LAT;
+  const dEast = (lon - site.lon) * mPerDegLon;
+  const range = Math.sqrt(dEast * dEast + dNorth * dNorth);
+  let az = (Math.atan2(dEast, dNorth) * 180) / Math.PI;
+  if (az < 0) az += 360;
 
-  const cx = w / 2 + view.panX;
-  const cy = h / 2 + view.panY;
-  const radiusPx = (Math.min(w, h) / 2) * view.zoom;
-  const maxRangeKm = view.rangeMeters / 1000;
-
-  ctx.save();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(120, 200, 255, 0.18)';
-  ctx.fillStyle = 'rgba(150, 210, 255, 0.6)';
-  ctx.font = '11px "JetBrains Mono", monospace';
-
-  // Range rings every 50 km.
-  const ringStep = 50;
-  for (let km = ringStep; km <= maxRangeKm + 0.1; km += ringStep) {
-    const r = (km / maxRangeKm) * radiusPx;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillText(`${km}km`, cx + 4, cy - r + 12);
+  // Nearest radial carrying this moment.
+  let best = null;
+  let bestDiff = 999;
+  for (const rad of sweep.radials) {
+    const m = rad.moments[product.moment];
+    if (!m) continue;
+    let d = Math.abs(rad.azimuth - az);
+    if (d > 180) d = 360 - d;
+    if (d < bestDiff) {
+      bestDiff = d;
+      best = m;
+    }
   }
-
-  // Radial spokes every 30°.
-  ctx.strokeStyle = 'rgba(120, 200, 255, 0.10)';
-  for (let a = 0; a < 360; a += 30) {
-    const rad = ((a - 90) * Math.PI) / 180; // 0°=N at top
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + Math.cos(rad) * radiusPx, cy + Math.sin(rad) * radiusPx);
-    ctx.stroke();
-  }
-
-  // Cardinal labels.
-  ctx.fillStyle = 'rgba(180, 225, 255, 0.85)';
-  ctx.font = 'bold 13px "JetBrains Mono", monospace';
-  const card = [
-    ['N', 0],
-    ['E', 90],
-    ['S', 180],
-    ['W', 270],
-  ];
-  for (const [label, ang] of card) {
-    const rad = ((ang - 90) * Math.PI) / 180;
-    const x = cx + Math.cos(rad) * (radiusPx + 16);
-    const y = cy + Math.sin(rad) * (radiusPx + 16);
-    ctx.fillText(label, x - 4, y + 4);
-  }
-
-  // Center marker (radar site).
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.beginPath();
-  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.restore();
+  if (!best) return { value: null, range, az };
+  const g = Math.round((range - best.firstGate) / best.gateSpacing);
+  if (g < 0 || g >= best.gateCount) return { value: null, range, az };
+  const code = best.raw[g];
+  if (code < 2) return { value: null, range, az };
+  return { value: (code - best.offset) / best.scale, range, az };
 }
