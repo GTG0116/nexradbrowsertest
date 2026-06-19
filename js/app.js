@@ -2,9 +2,10 @@
 // the UI. Everything runs in the browser; the only network calls are the public
 // S3 list/download requests in s3.js and the Leaflet basemap tiles.
 
-import { listVolumes, fetchVolume, SITES } from './s3.js';
+import { listVolumes, fetchVolume, SITES, nearestSite } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
 import { renderGeo, sampleAt, sweepMaxRange } from './renderer.js';
+import { AlertsController } from './alerts.js';
 
 const M_PER_DEG_LAT = 111320;
 
@@ -47,6 +48,7 @@ const state = {
   ringLayer: null,
   geo: null,
   radarCanvas: null,
+  alerts: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -74,6 +76,11 @@ function cacheEls() {
   el.palInput = $('#palInput');
   el.palReset = $('#palReset');
   el.palName = $('#palName');
+  el.alertList = $('#alertList');
+  el.alertsToggle = $('#alertsToggle');
+  el.alertDetail = $('#alertDetail');
+  el.alertDetailPanel = $('#alertDetailPanel');
+  el.alertClose = $('#alertClose');
 }
 
 function setStatus(text, busy = false) {
@@ -109,6 +116,30 @@ function initMap() {
 
   map.on('mousemove', (e) => updateReadout(e.latlng));
   map.on('mouseout', () => el.readout.classList.remove('show'));
+
+  // Right-click anywhere to jump to the NEXRAD radar nearest that point.
+  map.on('contextmenu', (e) => {
+    if (e.originalEvent) e.originalEvent.preventDefault();
+    const r = nearestSite(e.latlng.lat, e.latlng.lng);
+    if (!r) return;
+    selectSite(r[0], r[1]);
+    setStatus(`nearest radar: ${r[0]} — ${r[1]}`);
+  });
+}
+
+// Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
+// option (so right-click can reach any of the ~160 WSR-88D sites).
+function selectSite(icao, name) {
+  if (!el.siteSelect.querySelector(`option[value="${icao}"]`)) {
+    const opt = document.createElement('option');
+    opt.value = icao;
+    opt.textContent = name ? `${icao} — ${name}` : icao;
+    el.siteSelect.appendChild(opt);
+  }
+  el.siteSelect.value = icao;
+  state.site = icao;
+  state._centered = false;
+  loadVolumeList();
 }
 
 // ---------------------------------------------------------------------------
@@ -379,8 +410,16 @@ function renderRadar() {
   };
   state.geo = geo;
 
-  // Resolution: keep cells near the native gate size without going overboard.
-  const size = 1400;
+  // Resolution: render at the sweep's native gate spacing rather than a forced
+  // pixel grid. The canvas spans 2*maxR metres across, so one pixel ≈ one gate
+  // when size = 2*maxR / gateSpacing. Clamp only to keep memory/encode sane.
+  let gateSpacing = Infinity;
+  for (const rad of sweep.radials) {
+    const m = rad.moments[product.moment];
+    if (m && m.gateSpacing < gateSpacing) gateSpacing = m.gateSpacing;
+  }
+  if (!isFinite(gateSpacing) || gateSpacing <= 0) gateSpacing = 250;
+  const size = Math.max(700, Math.min(4096, Math.ceil((2 * maxR) / gateSpacing)));
   state.radarCanvas.width = size;
   state.radarCanvas.height = size;
   renderGeo(state.radarCanvas, sweep, product, geo);
@@ -529,6 +568,22 @@ function init() {
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
+
+  // Live NWS watches/warnings overlay.
+  state.alerts = new AlertsController(state.map, {
+    listPanel: el.alertList,
+    list: el.alertList,
+    detail: el.alertDetail,
+    detailPanel: el.alertDetailPanel,
+    close: el.alertClose,
+  });
+  state.alerts.start();
+  el.alertsToggle.addEventListener('click', () => {
+    const on = !el.alertsToggle.classList.contains('active');
+    el.alertsToggle.classList.toggle('active', on);
+    el.alertsToggle.textContent = on ? 'ON' : 'OFF';
+    state.alerts.setEnabled(on);
+  });
 
   window.addEventListener('resize', () => state.map && state.map.invalidateSize());
   setTimeout(() => state.map.invalidateSize(), 100);
