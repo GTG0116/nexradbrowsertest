@@ -316,9 +316,10 @@ input:focus {
 .leaflet-control-attribution a {
   color: var(--accent-2) !important;
 }
+/* Show radar gates crisply: no browser bilinear smoothing on the scaled image */
 .radar-overlay {
-  image-rendering: auto;
-  mix-blend-mode: screen;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 .map-readout {
@@ -426,6 +427,41 @@ input[type='range']::-moz-range-thumb {
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
+}
+
+/* .pal upload controls */
+.pal-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.pal-btn {
+  flex: 1;
+  text-align: center;
+  background: rgba(10, 20, 40, 0.6);
+  border: 1px solid var(--panel-edge);
+  color: var(--ink);
+  border-radius: 9px;
+  padding: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.pal-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pal-btn.ghost {
+  flex: 0 0 auto;
+  color: var(--ink-dim);
+}
+.pal-name {
+  margin-top: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  word-break: break-all;
 }
 
 /* ---------------- Legend ---------------- */

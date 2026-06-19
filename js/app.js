@@ -3,7 +3,7 @@
 // S3 list/download requests in s3.js and the Leaflet basemap tiles.
 
 import { listVolumes, fetchVolume, SITES } from './s3.js';
-import { PRODUCTS, PRODUCT_ORDER } from './products.js';
+import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
 import { renderGeo, sampleAt, sweepMaxRange } from './renderer.js';
 
 const M_PER_DEG_LAT = 111320;
@@ -71,6 +71,9 @@ function cacheEls() {
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
+  el.palInput = $('#palInput');
+  el.palReset = $('#palReset');
+  el.palName = $('#palName');
 }
 
 function setStatus(text, busy = false) {
@@ -217,14 +220,14 @@ function buildVolumeList() {
 
 function buildLegend() {
   const p = PRODUCTS[state.productId];
-  const { lo, hi, lut, steps } = p.scale;
-  const segs = 60;
+  const { lo, hi, rgba, steps } = p.scale;
+  const segs = 80;
   const colors = [];
   for (let i = 0; i <= segs; i++) {
     let li = Math.round((i / segs) * (steps - 1));
     if (li >= steps) li = steps - 1;
-    const o = li * 3;
-    colors.push(`rgb(${lut[o]},${lut[o + 1]},${lut[o + 2]}) ${(i / segs) * 100}%`);
+    const o = li * 4;
+    colors.push(`rgb(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]}) ${(i / segs) * 100}%`);
   }
   el.legend.innerHTML = `
     <div class="legend-title">${p.name} <span>(${p.unit})</span></div>
@@ -235,6 +238,53 @@ function buildLegend() {
     (lo + hi) /
     2
   ).toFixed(lo < 0 || hi <= 1 ? 1 : 0)}</span><span>${hi}</span></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Custom .pal color tables (GRLevelX / GR2Analyst format)
+// ---------------------------------------------------------------------------
+async function loadPalFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const pal = parsePal(text);
+    // Apply to the product the file names, falling back to the current one.
+    const targetId = palTargetProduct(pal) || state.productId;
+    const p = PRODUCTS[targetId];
+    p.scale = makeScale(pal.segments);
+    p.range = [p.scale.lo, p.scale.hi];
+    if (pal.units) p.unit = pal.units;
+    p.customPal = file.name;
+
+    state.productId = targetId;
+    document
+      .querySelectorAll('.product-btn')
+      .forEach((b) => b.classList.toggle('active', b.dataset.id === targetId));
+    el.palName.textContent = `${file.name} → ${targetId}`;
+    buildLegend();
+    buildTiltList();
+    renderRadar();
+    updateMeta();
+    setStatus(`palette “${file.name}” applied to ${targetId}`);
+  } catch (err) {
+    setStatus(`pal error: ${err.message}`);
+  } finally {
+    el.palInput.value = '';
+  }
+}
+
+function resetPalettes() {
+  for (const id of PRODUCT_ORDER) {
+    const p = PRODUCTS[id];
+    p.scale = p.defaultScale;
+    p.range = [p.scale.lo, p.scale.hi];
+    p.unit = p.defaultUnit;
+    delete p.customPal;
+  }
+  el.palName.textContent = '';
+  buildLegend();
+  renderRadar();
+  setStatus('color tables reset to defaults');
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +527,8 @@ function init() {
     el.opacityVal.textContent = el.opacity.value + '%';
     if (state.radarOverlay) state.radarOverlay.setOpacity(state.opacity);
   });
+  el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
+  el.palReset.addEventListener('click', resetPalettes);
 
   window.addEventListener('resize', () => state.map && state.map.invalidateSize());
   setTimeout(() => state.map.invalidateSize(), 100);

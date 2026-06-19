@@ -44,6 +44,15 @@ export function sweepMaxRange(sweep, moment) {
 }
 
 // geo = { siteLat, siteLon, latMin, latMax, lonMin, lonMax }
+//
+// The output canvas is destined for a Leaflet (Web Mercator) image overlay, so
+// rows are distributed linearly in Mercator-Y rather than in latitude. If we
+// spaced rows linearly in latitude, Mercator's poleward stretch would push the
+// imagery north of the true radar site; spacing in Mercator-Y keeps the cone of
+// silence centred exactly on the site marker.
+const mercY = (latDeg) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
+const invMercY = (y) => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * (180 / Math.PI);
+
 export function renderGeo(canvas, sweep, product, geo) {
   const ctx = canvas.getContext('2d');
   const w = canvas.width;
@@ -55,15 +64,17 @@ export function renderGeo(canvas, sweep, product, geo) {
   const data = img.data;
 
   const idx = buildAzimuthIndex(sweep, product.moment);
-  const { lut, lo, hi, steps } = product.scale;
+  const { rgba, lo, hi, steps } = product.scale;
   const invRange = (steps - 1) / (hi - lo);
 
   const { siteLat, siteLon, latMin, latMax, lonMin, lonMax } = geo;
   const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
   const R2D = 180 / Math.PI;
+  const yTop = mercY(latMax);
+  const yBot = mercY(latMin);
 
   for (let py = 0; py < h; py++) {
-    const lat = latMax - ((latMax - latMin) * py) / (h - 1);
+    const lat = invMercY(yTop + ((yBot - yTop) * py) / (h - 1));
     const dNorth = (lat - siteLat) * M_PER_DEG_LAT;
     let row = py * w * 4;
     for (let px = 0; px < w; px++, row += 4) {
@@ -87,11 +98,13 @@ export function renderGeo(canvas, sweep, product, geo) {
       let li = Math.round((v - lo) * invRange);
       if (li < 0) li = 0;
       else if (li >= steps) li = steps - 1;
-      const o = li * 3;
-      data[row] = lut[o];
-      data[row + 1] = lut[o + 1];
-      data[row + 2] = lut[o + 2];
-      data[row + 3] = 255;
+      const o = li * 4;
+      const alpha = rgba[o + 3];
+      if (alpha === 0) continue;
+      data[row] = rgba[o];
+      data[row + 1] = rgba[o + 1];
+      data[row + 2] = rgba[o + 2];
+      data[row + 3] = alpha;
     }
   }
 
