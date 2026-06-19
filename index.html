@@ -83,6 +83,12 @@
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
             </label>
+            <div class="pal-row">
+              <label class="pal-btn" for="palInput">⤓ Load .pal</label>
+              <input type="file" id="palInput" accept=".pal,.txt" hidden />
+              <button id="palReset" class="pal-btn ghost">Reset</button>
+            </div>
+            <div id="palName" class="pal-name"></div>
           </section>
 
           <section class="panel">
