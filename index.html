@@ -57,9 +57,17 @@
             </div>
           </section>
 
-          <section class="panel grow">
+          <section class="panel">
             <h2 class="panel-title">Volume scans</h2>
             <div id="volumeList" class="vol-list scroll"></div>
+          </section>
+
+          <section class="panel grow">
+            <h2 class="panel-title alerts-title">
+              Active alerts
+              <button id="alertsToggle" class="alerts-toggle active" title="Toggle NWS alerts">ON</button>
+            </h2>
+            <div id="alertList" class="alert-list scroll"></div>
           </section>
         </aside>
 
@@ -102,6 +110,12 @@
           </section>
         </aside>
       </main>
+
+      <!-- Full-screen alert briefing (NWS-style), shown when an alert is clicked -->
+      <div id="alertDetail" class="alert-detail" hidden>
+        <button id="alertClose" class="alert-close" title="Close (Esc)">✕</button>
+        <div id="alertDetailPanel" class="alert-detail-panel scroll"></div>
+      </div>
 
       <footer class="footer">
         <span>Data: NOAA Open Data · <code>unidata-nexrad-level2</code> (AWS S3)</span>
