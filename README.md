@@ -18,11 +18,18 @@ the radar imagery — entirely client-side.
 - **WSR-88D Level II decoding** of Message 31 (`js/level2.js`): base reflectivity
   (REF), velocity (VEL), spectrum width (SW), correlation coefficient (ρHV),
   differential reflectivity (ZDR) and differential phase (φDP).
-- **Polar rendering** (`js/renderer.js`) via per-pixel inverse mapping into an
-  `ImageData` buffer, with meteorologically conventional color scales
-  (`js/products.js`).
-- A distinctive **radar-operations-console UI**: a glowing circular scope, range
-  rings, live cursor readout, elevation-tilt selection, and a UTC clock.
+- **Geographic rendering** (`js/renderer.js`): each sweep is inverse-mapped
+  per-pixel into an equirectangular `ImageData` buffer and draped over an
+  **interactive Leaflet map** as an image overlay, with meteorologically
+  conventional color scales (`js/products.js`).
+- A distinctive **radar-operations-console UI** over a dark basemap: range rings,
+  a live cursor readout, opacity control, elevation-tilt selection, and a UTC
+  clock. Pan/zoom the map freely.
+- **Split-cut aware product selection**: modern VCPs split the Doppler moments
+  (VEL/SW) and dual-pol moments (ρHV/ZDR/φDP) into separate sweeps at nearly the
+  same elevation. For the chosen product the viewer renders whichever sweep
+  actually carries that moment closest to the selected tilt — so every product,
+  including the dual-pol ones, displays correctly.
 - Heavy decode runs in a **Web Worker** (`js/decoder.worker.js`) so the UI never
   freezes, even on 7 MB+ volumes.
 
@@ -33,7 +40,8 @@ index.html ─ css/style.css        UI shell + console styling
 js/app.js                         controller: UI, state, interaction
  ├─ js/s3.js                      list/download volumes from S3 (CORS)
  ├─ js/products.js                color scales + LUTs per product
- ├─ js/renderer.js                polar → canvas rendering + overlay
+ ├─ js/renderer.js                radar → geo-referenced canvas for the map
+ ├─ Leaflet (CDN)                 interactive basemap + image overlay
  └─ js/decoder.worker.js          off-thread decode
      └─ js/level2.js              Archive II / Message 31 parser
          └─ js/bzip2.js           pure-JS bzip2 decompressor
