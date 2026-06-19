@@ -2,7 +2,7 @@
 // the UI. Everything runs in the browser; the only network calls are the public
 // S3 list/download requests in s3.js and the Leaflet basemap tiles.
 
-import { listVolumes, fetchVolume, SITES, nearestSite } from './s3.js';
+import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
 import { renderGeo, sampleAt, sweepMaxRange } from './renderer.js';
 import { AlertsController } from './alerts.js';
@@ -173,7 +173,9 @@ function currentSweep() {
 // UI construction
 // ---------------------------------------------------------------------------
 function buildSiteSelect() {
-  for (const [code, name] of SITES) {
+  // Every WSR-88D site in the country, alphabetised by ICAO.
+  const sites = [...RADARS].sort((a, b) => a[0].localeCompare(b[0]));
+  for (const [code, name] of sites) {
     const opt = document.createElement('option');
     opt.value = code;
     opt.textContent = `${code} — ${name}`;

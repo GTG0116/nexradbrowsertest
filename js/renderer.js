@@ -7,29 +7,7 @@
 // fast and yields a clean, smooth field. Pixels with no echo stay transparent so
 // the basemap shows through.
 
-const BINS = 720; // 0.5° azimuth resolution
 const M_PER_DEG_LAT = 111320;
-
-function buildAzimuthIndex(sweep, moment) {
-  const idx = new Array(BINS).fill(null);
-  for (const rad of sweep.radials) {
-    const m = rad.moments[moment];
-    if (!m) continue;
-    let b = Math.round(rad.azimuth * 2) % BINS;
-    if (b < 0) b += BINS;
-    idx[b] = m;
-  }
-  // Fill empty bins with the nearest populated neighbour so the sweep stays
-  // continuous where radials are missing or coarser than 0.5°.
-  const filled = idx.slice();
-  for (let pass = 0; pass < 2; pass++) {
-    for (let i = 0; i < BINS; i++) {
-      if (filled[i]) continue;
-      filled[i] = filled[(i - 1 + BINS) % BINS] || filled[(i + 1) % BINS] || null;
-    }
-  }
-  return filled;
-}
 
 // Largest range (metres) actually covered by a moment in this sweep.
 export function sweepMaxRange(sweep, moment) {
@@ -51,7 +29,6 @@ export function sweepMaxRange(sweep, moment) {
 // imagery north of the true radar site; spacing in Mercator-Y keeps the cone of
 // silence centred exactly on the site marker.
 const mercY = (latDeg) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
-const invMercY = (y) => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * (180 / Math.PI);
 
 export function renderGeo(canvas, sweep, product, geo) {
   const ctx = canvas.getContext('2d');
@@ -60,55 +37,99 @@ export function renderGeo(canvas, sweep, product, geo) {
   ctx.clearRect(0, 0, w, h);
   if (!sweep) return;
 
-  const img = ctx.createImageData(w, h);
-  const data = img.data;
-
-  const idx = buildAzimuthIndex(sweep, product.moment);
   const { rgba, lo, hi, steps } = product.scale;
   const invRange = (steps - 1) / (hi - lo);
 
   const { siteLat, siteLon, latMin, latMax, lonMin, lonMax } = geo;
   const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
-  const R2D = 180 / Math.PI;
+  const D2R = Math.PI / 180;
   const yTop = mercY(latMax);
   const yBot = mercY(latMin);
+  const lonSpan = lonMax - lonMin;
+  const ySpan = yBot - yTop;
 
-  for (let py = 0; py < h; py++) {
-    const lat = invMercY(yTop + ((yBot - yTop) * py) / (h - 1));
-    const dNorth = (lat - siteLat) * M_PER_DEG_LAT;
-    let row = py * w * 4;
-    for (let px = 0; px < w; px++, row += 4) {
-      const lon = lonMin + ((lonMax - lonMin) * px) / (w - 1);
-      const dEast = (lon - siteLon) * mPerDegLon;
+  // Project metres (east/north from the site) to canvas pixels, matching the
+  // Mercator row spacing the Leaflet overlay expects.
+  const projX = (dEast) => ((siteLon + dEast / mPerDegLon - lonMin) / lonSpan) * (w - 1);
+  const projY = (dNorth) =>
+    ((mercY(siteLat + dNorth / M_PER_DEG_LAT) - yTop) / ySpan) * (h - 1);
 
-      const range = Math.sqrt(dEast * dEast + dNorth * dNorth);
-      let az = Math.atan2(dEast, dNorth) * R2D; // clockwise from north
-      if (az < 0) az += 360;
-      let b = Math.round(az * 2) % BINS;
-      if (b < 0) b += BINS;
-      const m = idx[b];
-      if (!m) continue;
+  // Beams carrying this moment, sorted by azimuth so each beam can be given a
+  // wedge that meets its neighbours (no radial gaps, no per-pixel aliasing).
+  const beams = [];
+  for (const rad of sweep.radials) {
+    const m = rad.moments[product.moment];
+    if (m) beams.push({ az: rad.azimuth, m });
+  }
+  beams.sort((a, b) => a.az - b.az);
+  const n = beams.length;
+  if (!n) return;
 
-      const g = Math.round((range - m.firstGate) / m.gateSpacing);
-      if (g < 0 || g >= m.gateCount) continue;
-      const code = m.raw[g];
-      if (code < 2) continue; // below threshold / range folded => transparent
-      const v = (code - m.offset) / m.scale;
+  // Render each gate as an actual polar cell (forward rendering). Consecutive
+  // gates of the same colour are merged into one quad both to cut fill count and
+  // to keep cells contiguous. A tiny azimuth/range overlap hides anti-alias
+  // seams between adjacent cells.
+  for (let i = 0; i < n; i++) {
+    const { az, m } = beams[i];
+    let dPrev = az - beams[(i - 1 + n) % n].az;
+    if (dPrev < 0) dPrev += 360;
+    if (dPrev > 2 || dPrev <= 0) dPrev = 1;
+    let dNext = beams[(i + 1) % n].az - az;
+    if (dNext < 0) dNext += 360;
+    if (dNext > 2 || dNext <= 0) dNext = 1;
 
+    const a0 = (az - dPrev / 2 - 0.03) * D2R;
+    const a1 = (az + dNext / 2 + 0.03) * D2R;
+    const s0 = Math.sin(a0),
+      c0 = Math.cos(a0),
+      s1 = Math.sin(a1),
+      c1 = Math.cos(a1);
+
+    const { gateCount, firstGate, gateSpacing, offset, scale, raw } = m;
+    let runStart = -1;
+    let runLi = -1;
+
+    const flush = (gEnd) => {
+      if (runStart < 0) return;
+      const r0 = firstGate + (runStart - 0.5) * gateSpacing;
+      const r1 = firstGate + (gEnd - 0.5) * gateSpacing + gateSpacing * 0.5;
+      const o = runLi * 4;
+      ctx.fillStyle = `rgba(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]},${
+        rgba[o + 3] / 255
+      })`;
+      ctx.beginPath();
+      ctx.moveTo(projX(r0 * s0), projY(r0 * c0));
+      ctx.lineTo(projX(r0 * s1), projY(r0 * c1));
+      ctx.lineTo(projX(r1 * s1), projY(r1 * c1));
+      ctx.lineTo(projX(r1 * s0), projY(r1 * c0));
+      ctx.closePath();
+      ctx.fill();
+      runStart = -1;
+      runLi = -1;
+    };
+
+    for (let g = 0; g < gateCount; g++) {
+      const code = raw[g];
+      if (code < 2) {
+        flush(g);
+        continue;
+      }
+      const v = (code - offset) / scale;
       let li = Math.round((v - lo) * invRange);
       if (li < 0) li = 0;
       else if (li >= steps) li = steps - 1;
-      const o = li * 4;
-      const alpha = rgba[o + 3];
-      if (alpha === 0) continue;
-      data[row] = rgba[o];
-      data[row + 1] = rgba[o + 1];
-      data[row + 2] = rgba[o + 2];
-      data[row + 3] = alpha;
+      if (rgba[li * 4 + 3] === 0) {
+        flush(g);
+        continue;
+      }
+      if (li !== runLi) {
+        flush(g);
+        runStart = g;
+        runLi = li;
+      }
     }
+    flush(gateCount);
   }
-
-  ctx.putImageData(img, 0, 0);
 }
 
 // Sample the physical value at a geographic point (for the cursor readout).

@@ -379,25 +379,9 @@ export class AlertsController {
   }
 
   renderDetail() {
-    // The left briefing column lists every in-view alert, the selected one first,
-    // each as a full section with its tags at the bottom.
-    const visible = this.visibleAlerts();
+    // The briefing shows only the alert that was selected.
     const sel = this.alerts.find((a) => a.id === this.selectedId);
-    const ordered = [];
-    if (sel) ordered.push(sel);
-    for (const a of visible) if (a.id !== this.selectedId) ordered.push(a);
-    if (!ordered.length && sel) ordered.push(sel);
-
-    this.els.detailPanel.innerHTML = ordered
-      .map((a) => this.sectionHTML(a, a.id === this.selectedId))
-      .join('');
-
-    // Clicking a section header re-selects / re-zooms.
-    this.els.detailPanel.querySelectorAll('.alert-sec').forEach((sec) => {
-      sec.querySelector('.alert-sec-head').addEventListener('click', () => {
-        this.openDetail(sec.dataset.id);
-      });
-    });
+    this.els.detailPanel.innerHTML = sel ? this.sectionHTML(sel, true) : '';
   }
 
   sectionHTML(a, selected) {
