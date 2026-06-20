@@ -378,9 +378,15 @@ export class AlertsController {
     // `alerts-line` (above radar) layers that app.js inserts into the basemap
     // stack; this controller just feeds the `alerts` source the features in
     // view and opens the briefing when one is clicked.
+    // A click can land on several overlapping alert polygons at once (e.g. a
+    // Tornado Warning inside a Tornado Watch inside a Flash Flood Warning). Pass
+    // every feature under the cursor so the briefing can offer arrows to cycle
+    // through all the alerts active at that one location.
     const openFromEvent = (e) => {
-      const f = e.features && e.features[0];
-      if (f) this.openDetail(f.properties.id);
+      const feats = e.features || [];
+      if (!feats.length) return;
+      const ids = feats.map((f) => f.properties.id);
+      this.openDetail(ids[0], ids);
     };
     map.on('click', 'alerts-fill', openFromEvent);
     map.on('click', 'alerts-line', openFromEvent);
@@ -393,8 +399,17 @@ export class AlertsController {
     });
     els.close.addEventListener('click', () => this.closeDetail());
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.closeDetail();
+      if (e.key === 'Escape') return this.closeDetail();
+      // Left/right arrows cycle through the alerts stacked at this location.
+      if (this.els.detail.hidden) return;
+      if (e.key === 'ArrowLeft') this.cycle(-1);
+      else if (e.key === 'ArrowRight') this.cycle(1);
     });
+
+    // The alerts currently stacked at the opened location, and which one of
+    // them the briefing is showing.
+    this.group = [];
+    this.groupIndex = 0;
   }
 
   // Push a GeoJSON FeatureCollection to the `alerts` source (no-op until the
@@ -507,39 +522,92 @@ export class AlertsController {
     }
   }
 
-  openDetail(id) {
-    this.selectedId = id;
+  // Open the briefing. `group` (optional) is the list of alert ids found under
+  // the same click, so the panel can offer arrows to step through every alert
+  // active at that location; `id` is the one to show first.
+  openDetail(id, group) {
+    // Keep only ids we still hold, drop duplicates, and put the most
+    // significant alert first (so cycling reads top-down by severity).
+    let ids = (group && group.length ? group : [id]).filter(
+      (gid, i, arr) => arr.indexOf(gid) === i && this.alerts.some((a) => a.id === gid)
+    );
+    if (!ids.includes(id)) ids.unshift(id);
+    ids.sort((x, y) => {
+      const ax = this.alerts.find((a) => a.id === x);
+      const ay = this.alerts.find((a) => a.id === y);
+      return priorityOf(ax.cls.display) - priorityOf(ay.cls.display);
+    });
+    this.group = ids;
+    this.groupIndex = Math.max(0, ids.indexOf(id));
+    this.selectedId = ids[this.groupIndex];
+
     document.querySelector('.app').classList.add('alert-mode');
     this.els.detail.hidden = false;
     this.renderDetail();
-    // Zoom the map to the selected alert. bounds = [minLat, minLon, maxLat,
-    // maxLon]; Mapbox fitBounds wants [[w,s],[e,n]] in [lng,lat] order.
-    const sel = this.alerts.find((a) => a.id === id);
-    if (sel) {
-      const [minLat, minLon, maxLat, maxLon] = sel.bounds;
-      this.map.fitBounds(
-        [
-          [minLon, minLat],
-          [maxLon, maxLat],
-        ],
-        { padding: 80, maxZoom: 11 }
-      );
-    }
+    this._fitTo(this.selectedId);
     setTimeout(() => this.map.resize(), 60);
+  }
+
+  // Step the briefing to another alert at the same location (delta = ±1, wraps).
+  cycle(delta) {
+    if (!this.group || this.group.length < 2) return;
+    this.groupIndex = (this.groupIndex + delta + this.group.length) % this.group.length;
+    this.selectedId = this.group[this.groupIndex];
+    this.renderDetail();
+  }
+
+  // Zoom the map to an alert. bounds = [minLat, minLon, maxLat, maxLon];
+  // Mapbox fitBounds wants [[w,s],[e,n]] in [lng,lat] order.
+  _fitTo(id) {
+    const sel = this.alerts.find((a) => a.id === id);
+    if (!sel) return;
+    const [minLat, minLon, maxLat, maxLon] = sel.bounds;
+    this.map.fitBounds(
+      [
+        [minLon, minLat],
+        [maxLon, maxLat],
+      ],
+      { padding: 80, maxZoom: 11 }
+    );
   }
 
   closeDetail() {
     if (this.els.detail.hidden) return;
     this.selectedId = null;
+    this.group = [];
+    this.groupIndex = 0;
     this.els.detail.hidden = true;
     document.querySelector('.app').classList.remove('alert-mode');
     setTimeout(() => this.map.resize(), 60);
   }
 
   renderDetail() {
-    // The briefing shows only the alert that was selected.
+    // The briefing shows the currently selected alert. When several alerts are
+    // stacked at this location, a nav bar at the top cycles through them.
     const sel = this.alerts.find((a) => a.id === this.selectedId);
-    this.els.detailPanel.innerHTML = sel ? this.sectionHTML(sel, true) : '';
+    if (!sel) {
+      this.els.detailPanel.innerHTML = '';
+      return;
+    }
+    const multi = this.group && this.group.length > 1;
+    const nav = multi
+      ? `<div class="alert-nav">
+           <button class="alert-nav-btn" data-dir="-1" aria-label="Previous alert">‹</button>
+           <span class="alert-nav-count">${this.groupIndex + 1} / ${
+          this.group.length
+        } alerts here</span>
+           <button class="alert-nav-btn" data-dir="1" aria-label="Next alert">›</button>
+         </div>`
+      : '';
+    this.els.detailPanel.innerHTML = nav + this.sectionHTML(sel, true);
+    this.els.detailPanel.scrollTop = 0;
+    if (multi) {
+      this.els.detailPanel
+        .querySelectorAll('.alert-nav-btn')
+        .forEach((b) =>
+          b.addEventListener('click', () => this.cycle(Number(b.dataset.dir)))
+        );
+    }
   }
 
   sectionHTML(a, selected) {
