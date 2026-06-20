@@ -140,8 +140,13 @@ const state = {
   map: null,
   radarLayer: null,
   ringLayer: null,
+  siteLayer: null,
   geo: null,
   alerts: null,
+  shownSweep: null,
+  shownSite: null,
+  inspect: false,
+  playback: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -174,6 +179,33 @@ function cacheEls() {
   el.alertDetail = $('#alertDetail');
   el.alertDetailPanel = $('#alertDetailPanel');
   el.alertClose = $('#alertClose');
+
+  // Mobile control surface.
+  el.railLeft = $('.rail-left');
+  el.railRight = $('.rail-right');
+  el.layout = $('.layout');
+  el.stage = $('.stage');
+  el.mobileDock = $('#mobileDock');
+  el.dockStatus = $('#dockStatus');
+  el.dockProd = $('#dockProd');
+  el.dockSite = $('#dockSite');
+  el.dockTime = $('#dockTime');
+  el.playBtn = $('#playBtn');
+  el.inspectBtn = $('#inspectBtn');
+  el.sheet = $('#mobileSheet');
+  el.sheetBody = $('#sheetBody');
+  el.sheetScrim = $('#sheetScrim');
+  el.sheetGrip = $('#sheetGrip');
+  el.sheetPlayback = $('#sheetPlayback');
+  el.playSpeed = $('#playSpeed');
+  el.playSpeedVal = $('#playSpeedVal');
+  el.crosshair = $('#crosshair');
+  el.crosshairRead = $('#crosshairRead');
+  el.playbackBar = $('#playbackBar');
+  el.playToggle = $('#playToggle');
+  el.playScrub = $('#playScrub');
+  el.playLabel = $('#playLabel');
+  el.playClose = $('#playClose');
 }
 
 function setStatus(text, busy = false) {
@@ -232,8 +264,18 @@ function selectSite(icao, name) {
     el.siteSelect.appendChild(opt);
   }
   el.siteSelect.value = icao;
+  onSiteSwitch(icao);
+}
+
+// Shared housekeeping whenever the active radar changes (picker, dot, long-press
+// or right-click). Always recenters and loads the newest scan automatically.
+function onSiteSwitch(icao) {
+  if (state.playback && state.playback.active) state.playback.stop();
   state.site = icao;
   state._centered = false;
+  state._forceLatest = true; // show the latest frame without needing LIVE
+  refreshSiteDots();
+  closeSheet();
   loadVolumeList();
 }
 
@@ -249,19 +291,26 @@ function sweepsForProduct(productId = state.productId) {
   return state.sweeps.filter((sw) => sw.moments.includes(moment));
 }
 
-function currentSweep() {
-  const list = sweepsForProduct();
+// Pick the sweep from an arbitrary sweeps array that carries the given product's
+// moment closest to the chosen tilt. Shared by the live view and playback.
+function pickSweep(sweeps, productId = state.productId, elev = state.selectedElevation) {
+  const moment = PRODUCTS[productId].moment;
+  const list = sweeps.filter((sw) => sw.moments.includes(moment));
   if (!list.length) return null;
   let best = list[0];
   let bestDiff = Infinity;
   for (const sw of list) {
-    const d = Math.abs(sw.elevation - state.selectedElevation);
+    const d = Math.abs(sw.elevation - elev);
     if (d < bestDiff) {
       bestDiff = d;
       best = sw;
     }
   }
   return best;
+}
+
+function currentSweep() {
+  return pickSweep(state.sweeps);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,11 +326,7 @@ function buildSiteSelect() {
     if (code === state.site) opt.selected = true;
     el.siteSelect.appendChild(opt);
   }
-  el.siteSelect.addEventListener('change', () => {
-    state.site = el.siteSelect.value;
-    state._centered = false; // recenter the map on the new radar
-    loadVolumeList();
-  });
+  el.siteSelect.addEventListener('change', () => onSiteSwitch(el.siteSelect.value));
 }
 
 function buildProductButtons() {
@@ -428,8 +473,9 @@ async function loadVolumeList() {
     setStatus(`${vols.length} scans available`);
     if (!vols.length) return;
     const latest = vols[vols.length - 1].key;
-    if ((!state.volume || state.live) && latest !== state.volumeKey) {
-      loadVolume(latest);
+    if (state._forceLatest || !state.volume || state.live) {
+      state._forceLatest = false;
+      if (latest !== state.volumeKey) loadVolume(latest);
     }
   } catch (e) {
     setStatus(`list error: ${e.message}`);
@@ -464,6 +510,7 @@ async function loadVolume(key) {
       state._centered = true;
     }
 
+    refreshSiteDots();
     buildTiltList();
     updateMeta();
     renderRadar();
@@ -481,24 +528,36 @@ async function loadVolume(key) {
 // Rendering onto the map
 // ---------------------------------------------------------------------------
 function renderRadar() {
+  // While scrubbing/playing, the active frame owns the display; just re-render
+  // it (e.g. after a product or tilt change).
+  if (state.playback && state.playback.active) {
+    state.playback.renderFrame();
+    return;
+  }
+  displaySweep(currentSweep(), state.volume && state.volume.site);
+}
+
+// Draw one sweep (from any volume) onto the map and remember it so the inspect
+// readout and dock can reflect what is actually on screen.
+function displaySweep(sweep, site) {
   const product = PRODUCTS[state.productId];
-  const sweep = currentSweep();
-  const site = state.volume && state.volume.site;
+  state.shownSweep = sweep;
+  state.shownSite = site;
 
   if (!sweep || !site) {
     state.radarLayer.setData(null, null, null);
     state.ringLayer.clearLayers();
+    updateInspect();
     return;
   }
 
-  let maxR = sweepMaxRange(sweep, product.moment) || 300000;
-
+  const maxR = sweepMaxRange(sweep, product.moment) || 300000;
   // Draw the sweep as true polar cells in screen space; the layer re-renders
   // itself on zoom/move so gates stay crisp and physically sized at any scale.
   state.radarLayer.setOpacity(state.opacity);
   state.radarLayer.setData(sweep, product, site);
-
   drawRings(site, maxR);
+  updateInspect();
 }
 
 function drawRings(site, maxR) {
@@ -521,7 +580,274 @@ function drawRings(site, maxR) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// All-radar dots + nearest-site
+// ---------------------------------------------------------------------------
+function buildSiteDots() {
+  state.siteLayer = L.layerGroup().addTo(state.map);
+  for (const [icao, name, lat, lon] of RADARS) {
+    const dot = L.circleMarker([lat, lon], siteDotStyle(icao));
+    dot._icao = icao;
+    dot._name = name;
+    dot.bindTooltip(`${icao} — ${name}`, { direction: 'top', offset: [0, -3] });
+    dot.on('click', () => selectSite(icao, name));
+    state.siteLayer.addLayer(dot);
+  }
+}
+
+function siteDotStyle(icao) {
+  const cur = icao === state.site;
+  return {
+    radius: cur ? 6 : 3.5,
+    color: cur ? '#36e0c8' : 'rgba(150,205,255,0.85)',
+    weight: cur ? 2 : 1,
+    fillColor: cur ? '#36e0c8' : 'rgba(80,140,220,0.85)',
+    fillOpacity: cur ? 1 : 0.6,
+  };
+}
+
+function refreshSiteDots() {
+  if (!state.siteLayer) return;
+  state.siteLayer.eachLayer((dot) => dot.setStyle(siteDotStyle(dot._icao)));
+}
+
+// Long-press anywhere on the map (touch) jumps to the nearest WSR-88D site —
+// the touch equivalent of the desktop right-click.
+function enableLongPress() {
+  const container = state.map.getContainer();
+  let timer = null;
+  let start = null;
+  const cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  container.addEventListener(
+    'touchstart',
+    (e) => {
+      cancel();
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      start = { x: t.clientX, y: t.clientY };
+      timer = setTimeout(() => {
+        timer = null;
+        const rect = container.getBoundingClientRect();
+        const pt = L.point(start.x - rect.left, start.y - rect.top);
+        const ll = state.map.containerPointToLatLng(pt);
+        const r = nearestSite(ll.lat, ll.lng);
+        if (!r) return;
+        if (navigator.vibrate) navigator.vibrate(25);
+        selectSite(r[0], r[1]);
+        setStatus(`nearest radar: ${r[0]} — ${r[1]}`);
+      }, 700);
+    },
+    { passive: true }
+  );
+  container.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!start || !e.touches[0]) return;
+      const t = e.touches[0];
+      if (Math.hypot(t.clientX - start.x, t.clientY - start.y) > 12) cancel();
+    },
+    { passive: true }
+  );
+  container.addEventListener('touchend', cancel, { passive: true });
+  container.addEventListener('touchcancel', cancel, { passive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Inspect tool — a fixed crosshair at screen centre reading the gate under it.
+// ---------------------------------------------------------------------------
+function toggleInspect(on) {
+  state.inspect = on == null ? !state.inspect : on;
+  el.inspectBtn.classList.toggle('active', state.inspect);
+  el.crosshair.hidden = !state.inspect;
+  updateInspect();
+}
+
+function updateInspect() {
+  if (!state.inspect) return;
+  const product = PRODUCTS[state.productId];
+  const sweep = state.shownSweep;
+  const site = state.shownSite;
+  if (!sweep || !site) {
+    el.crosshairRead.textContent = 'no data';
+    return;
+  }
+  const c = state.map.getCenter();
+  const s = sampleAt(sweep, product, c.lat, c.lng, site);
+  if (!s || s.range > sweepMaxRange(sweep, product.moment)) {
+    el.crosshairRead.textContent = 'out of range';
+    return;
+  }
+  const valueStr =
+    s.value == null
+      ? 'no echo'
+      : `${s.value.toFixed(product.id === 'RHO' ? 2 : 1)} ${product.unit}`;
+  el.crosshairRead.innerHTML = `<b>${valueStr}</b> · ${product.id}`;
+}
+
+// ---------------------------------------------------------------------------
+// Mobile dock + settings sheet
+// ---------------------------------------------------------------------------
+function updateDock() {
+  if (!el.dockProd) return;
+  el.dockProd.textContent = state.productId;
+  el.dockSite.textContent = (state.volume && state.volume.icao) || state.site;
+  if (state.playback && state.playback.active) return; // dock time owned by playback
+  const t = state.volumes.find((x) => x.key === state.volumeKey);
+  el.dockTime.textContent = t ? t.label : '—';
+}
+
+function openSheet() {
+  el.sheet.hidden = false;
+  el.sheetScrim.hidden = false;
+  document.querySelector('.app').classList.add('sheet-open');
+}
+
+function closeSheet() {
+  el.sheet.hidden = true;
+  el.sheetScrim.hidden = true;
+  document.querySelector('.app').classList.remove('sheet-open');
+}
+
+const mqMobile = window.matchMedia('(max-width: 900px)');
+function applyResponsiveLayout() {
+  const mobile = mqMobile.matches;
+  document.querySelector('.app').classList.toggle('mobile', mobile);
+  el.mobileDock.hidden = !mobile;
+  if (mobile) {
+    if (el.railLeft.parentElement !== el.sheetBody) {
+      el.sheetBody.appendChild(el.railLeft);
+      el.sheetBody.appendChild(el.railRight);
+    }
+  } else {
+    closeSheet();
+    if (state.inspect) toggleInspect(false);
+    if (el.railLeft.parentElement !== el.layout) {
+      el.layout.insertBefore(el.railLeft, el.stage);
+      el.layout.appendChild(el.railRight);
+    }
+  }
+  setTimeout(() => state.map && state.map.invalidateSize(), 60);
+}
+
+// ---------------------------------------------------------------------------
+// Playback — scrub/animate the last 10 scans of the current radar.
+// ---------------------------------------------------------------------------
+function createPlayback() {
+  return {
+    active: false,
+    playing: false,
+    frames: [],
+    idx: 0,
+    fps: 3,
+    timer: null,
+    cache: new Map(),
+
+    async start() {
+      if (this.active) return;
+      if (!state.volumes.length) {
+        setStatus('no scans to play back');
+        return;
+      }
+      this.active = true;
+      el.playBtn.classList.add('active');
+      el.playbackBar.hidden = false;
+      el.sheetPlayback.hidden = false;
+      el.playLabel.textContent = 'loading…';
+      if (state.live) toggleLive(); // freeze auto-refresh during playback
+
+      const last = state.volumes.slice(-10);
+      setStatus('loading playback…', true);
+      const frames = [];
+      for (const v of last) {
+        let entry = this.cache.get(v.key);
+        if (!entry) {
+          try {
+            const bytes = await fetchVolume(v.key);
+            const volume = await decodeVolume(bytes);
+            entry = { volume, sweeps: volume.sweeps };
+            this.cache.set(v.key, entry);
+          } catch (e) {
+            continue;
+          }
+        }
+        if (!this.active) return; // user bailed mid-load
+        frames.push({ key: v.key, label: v.label, volume: entry.volume });
+      }
+      if (!frames.length) {
+        setStatus('playback unavailable');
+        this.stop();
+        return;
+      }
+      this.frames = frames;
+      this.idx = frames.length - 1;
+      el.playScrub.max = String(frames.length - 1);
+      el.playScrub.value = String(this.idx);
+      setStatus(`playback · ${frames.length} frames`);
+      this.renderFrame();
+      this.play();
+    },
+
+    play() {
+      if (!this.frames.length) return;
+      this.playing = true;
+      el.playToggle.textContent = '⏸';
+      clearInterval(this.timer);
+      this.timer = setInterval(() => {
+        this.idx = (this.idx + 1) % this.frames.length;
+        el.playScrub.value = String(this.idx);
+        this.renderFrame();
+      }, 1000 / this.fps);
+    },
+
+    pause() {
+      this.playing = false;
+      el.playToggle.textContent = '▶';
+      clearInterval(this.timer);
+      this.timer = null;
+    },
+
+    toggle() {
+      this.playing ? this.pause() : this.play();
+    },
+
+    seek(i) {
+      if (!this.frames.length) return;
+      this.pause();
+      this.idx = Math.max(0, Math.min(this.frames.length - 1, i | 0));
+      this.renderFrame();
+    },
+
+    setFps(f) {
+      this.fps = f;
+      if (this.playing) this.play();
+    },
+
+    renderFrame() {
+      const f = this.frames[this.idx];
+      if (!f) return;
+      displaySweep(pickSweep(f.volume.sweeps), f.volume.site);
+      el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}`;
+      el.dockTime.textContent = f.label;
+    },
+
+    stop() {
+      this.pause();
+      this.active = false;
+      this.frames = [];
+      el.playBtn.classList.remove('active');
+      el.playbackBar.hidden = true;
+      el.sheetPlayback.hidden = true;
+      displaySweep(currentSweep(), state.volume && state.volume.site);
+      updateDock();
+    },
+  };
+}
+
 function updateMeta() {
+  updateDock();
   const v = state.volume;
   const sw = currentSweep();
   if (!v) {
@@ -603,10 +929,15 @@ function isoDate(d) {
 function init() {
   cacheEls();
   initMap();
+  buildSiteDots();
+  enableLongPress();
   buildSiteSelect();
   buildProductButtons();
   buildLegend();
   buildTiltList();
+
+  state.playback = createPlayback();
+  state.map.on('move', updateInspect);
 
   el.dateInput.value = isoDate(state.date);
   el.dateInput.max = isoDate(state.date);
@@ -641,6 +972,31 @@ function init() {
     el.alertsToggle.textContent = on ? 'ON' : 'OFF';
     state.alerts.setEnabled(on);
   });
+
+  // ---- Mobile dock + sheet + playback + inspect wiring ----
+  el.dockStatus.addEventListener('click', () =>
+    el.sheet.hidden ? openSheet() : closeSheet()
+  );
+  el.sheetScrim.addEventListener('click', closeSheet);
+  el.sheetGrip.addEventListener('click', closeSheet);
+  el.inspectBtn.addEventListener('click', () => toggleInspect());
+  el.playBtn.addEventListener('click', () => {
+    if (state.playback.active) state.playback.stop();
+    else state.playback.start();
+  });
+  el.playToggle.addEventListener('click', () => state.playback.toggle());
+  el.playClose.addEventListener('click', () => state.playback.stop());
+  el.playScrub.addEventListener('input', () =>
+    state.playback.seek(Number(el.playScrub.value))
+  );
+  el.playSpeed.addEventListener('input', () => {
+    const f = Number(el.playSpeed.value);
+    el.playSpeedVal.textContent = f;
+    state.playback.setFps(f);
+  });
+
+  mqMobile.addEventListener('change', applyResponsiveLayout);
+  applyResponsiveLayout();
 
   window.addEventListener('resize', () => state.map && state.map.invalidateSize());
   setTimeout(() => state.map.invalidateSize(), 100);

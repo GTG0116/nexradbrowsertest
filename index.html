@@ -76,6 +76,14 @@
           <div id="mapWrap" class="map-wrap">
             <div id="map"></div>
             <div id="mapReadout" class="map-readout"></div>
+            <!-- Inspect crosshair: a fixed picker at screen centre that reads the
+                 gate value beneath it as you pan the map. -->
+            <div id="crosshair" class="crosshair" hidden>
+              <div class="cx-line cx-v"></div>
+              <div class="cx-line cx-h"></div>
+              <div class="cx-ring"></div>
+              <div id="crosshairRead" class="cx-read">—</div>
+            </div>
             <div id="progress" class="progress"></div>
             <div id="decoding" class="decoding">DECODING</div>
           </div>
@@ -110,6 +118,45 @@
           </section>
         </aside>
       </main>
+
+      <!-- ============================================================= -->
+      <!-- Mobile control surface: a fullscreen map with a compact dock at  -->
+      <!-- the bottom. The status chip expands a settings sheet; the play   -->
+      <!-- and inspect tools sit beside it.                                 -->
+      <!-- ============================================================= -->
+      <div id="playbackBar" class="playback-bar" hidden>
+        <button id="playToggle" class="pb-play" title="Play / pause">⏸</button>
+        <input type="range" id="playScrub" class="pb-scrub" min="0" max="9" value="9" step="1" />
+        <span id="playLabel" class="pb-label">—</span>
+        <button id="playClose" class="pb-close" title="Exit playback">✕</button>
+      </div>
+
+      <div id="mobileDock" class="mobile-dock" hidden>
+        <button id="dockStatus" class="dock-status" title="Settings">
+          <span id="dockProd" class="dock-prod">REF</span>
+          <span class="dock-meta">
+            <b id="dockSite">—</b>
+            <span id="dockTime">—</span>
+          </span>
+          <span class="dock-caret">▴</span>
+        </button>
+        <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
+        <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
+      </div>
+
+      <div id="sheetScrim" class="sheet-scrim" hidden></div>
+      <div id="mobileSheet" class="mobile-sheet" hidden>
+        <button class="sheet-grip" id="sheetGrip" aria-label="Close settings"></button>
+        <div class="sheet-body scroll" id="sheetBody">
+          <div class="sheet-section" id="sheetPlayback" hidden>
+            <h2 class="panel-title">Playback speed</h2>
+            <label class="field opacity-field">
+              <span>Frames per second <b id="playSpeedVal">3</b></span>
+              <input type="range" id="playSpeed" min="1" max="8" value="3" />
+            </label>
+          </div>
+        </div>
+      </div>
 
       <!-- Full-screen alert briefing (NWS-style), shown when an alert is clicked -->
       <div id="alertDetail" class="alert-detail" hidden>
