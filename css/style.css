@@ -427,6 +427,17 @@ input:focus {
 .opacity-field b {
   color: var(--accent);
 }
+.toggle-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+.toggle-field span {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--ink-dim);
+}
 input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
@@ -724,6 +735,48 @@ input[type='range']::-moz-range-thumb {
   border-right: 1px solid var(--panel-edge);
   box-shadow: 6px 0 40px rgba(0, 0, 0, 0.6);
 }
+/* Cycle bar for stacked alerts at one location. Sticks to the top of the
+   briefing panel so the arrows stay reachable while you scroll the text. */
+.alert-nav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(6, 12, 24, 0.96);
+  border-bottom: 1px solid var(--panel-edge);
+  backdrop-filter: blur(4px);
+}
+.alert-nav-btn {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.7);
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.alert-nav-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.alert-nav-count {
+  flex: 1 1 auto;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+
 .alert-close {
   position: absolute;
   top: 14px;

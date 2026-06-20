@@ -31,11 +31,41 @@ const BASEMAPS = {
 // at the cost of memory and a longer render. A still view renders once so it
 // can afford a big canvas; playback re-renders every frame, so it drops to a
 // lighter resolution to stay smooth.
-const RADAR_RES = () => {
+//
+// The radar is one georeferenced raster that Mapbox keeps sampling with its
+// default *linear* resampling as the map moves. Linear is what we want — it
+// reprojects the polar cells smoothly — but if the canvas is rasterised at a
+// fixed resolution, zooming in past that detail makes the GPU stretch a coarse
+// image and the picture goes soft (the "auto smoothing" the radar suffers).
+// Switching the layer to `raster-resampling: nearest` doesn't fix that: it just
+// trades the blur for the canvas's own square mercator grid showing through,
+// which misrepresents the gates. The real fix is to rasterise at a resolution
+// that keeps up with the zoom so the displayed image stays at (or above) 1:1
+// with the screen — then linear has nothing to invent and the gates stay crisp.
+const RES_MIN = () => (window.matchMedia('(max-width: 900px)').matches ? 1024 : 2048);
+const RES_MAX = () => (window.matchMedia('(max-width: 900px)').matches ? 4096 : 8192);
+
+// Canvas size (px) needed for the radar's coverage box to map ~1:1 onto screen
+// pixels at this zoom, stepped to powers of two so we only re-render when we
+// cross a real detail boundary (not on every pixel of zoom).
+function radarResForZoom(zoom, maxR, siteLat) {
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
+  const spanDeg = ((maxR || 300000) * 1.04 * 2) / mPerDegLon; // E–W span of the canvas
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const want = 256 * Math.pow(2, zoom) * (spanDeg / 360) * dpr; // screen px across the radar
+  let n = 512;
+  while (n < want) n *= 2;
+  return Math.max(RES_MIN(), Math.min(RES_MAX(), n));
+}
+
+// Resolution to rasterise the current still view at. Playback keeps a lighter
+// fixed size so every frame stays cheap.
+function currentRadarRes(maxR, site) {
   const mobile = window.matchMedia('(max-width: 900px)').matches;
   if (state.playback && state.playback.active) return mobile ? 1024 : 2048;
-  return mobile ? 2048 : 4096;
-};
+  const zoom = state.map ? state.map.getZoom() : 6;
+  return radarResForZoom(zoom, maxR, site ? site.lat : 35);
+}
 
 // Find the basemap layer to insert our overlays *below*, so the style's town
 // labels and administrative borders stay on top of the radar. We slot in just
@@ -126,6 +156,7 @@ function setupOverlays(map) {
       id: 'rings',
       type: 'line',
       source: 'rings',
+      layout: { visibility: state.showRings ? 'visible' : 'none' },
       paint: {
         'line-color': 'rgba(120,200,255,0.45)',
         'line-width': 1,
@@ -164,13 +195,15 @@ function setupOverlays(map) {
 // off the old re-render-on-every-pan canvas.
 function setRadarSource(map, sweep, product, site) {
   const maxR = sweepMaxRange(sweep, product.moment) || 300000;
+  const res = currentRadarRes(maxR, site);
+  state.radarRes = res;
   const { coordinates } = renderRadarCanvas(
     el.radarCanvas,
     sweep,
     product,
     site,
     maxR,
-    RADAR_RES()
+    res
   );
   if (map.getLayer('radar')) map.removeLayer('radar');
   if (map.getSource('radar')) map.removeSource('radar');
@@ -185,7 +218,14 @@ function setRadarSource(map, sweep, product, site) {
       id: 'radar',
       type: 'raster',
       source: 'radar',
-      paint: { 'raster-opacity': state.opacity, 'raster-fade-duration': 0 },
+      paint: {
+        'raster-opacity': state.opacity,
+        'raster-fade-duration': 0,
+        // Keep linear resampling (the default): nearest would expose the
+        // mercator pixel grid. Crispness is held by re-rasterising at a
+        // zoom-matched resolution (see currentRadarRes / the zoomend handler).
+        'raster-resampling': 'linear',
+      },
     },
     map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
   );
@@ -233,6 +273,8 @@ const state = {
   liveTimer: null,
   map: null,
   basemap: 'dark',
+  showRings: true,
+  radarRes: 0,
   styleReady: false,
   geo: null,
   alerts: null,
@@ -265,6 +307,7 @@ function cacheEls() {
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
+  el.ringsToggle = $('#ringsToggle');
   el.palInput = $('#palInput');
   el.palReset = $('#palReset');
   el.palName = $('#palName');
@@ -354,6 +397,24 @@ function initMap() {
     });
   });
   map.on('mouseout', () => el.readout.classList.remove('show'));
+
+  // Re-rasterise the radar when a zoom settles at a level that needs more (or
+  // less) canvas detail than what's currently drawn — this is what keeps the
+  // gates crisp as you zoom in without falling back to nearest resampling.
+  // Debounced and bucketed (powers of two) so it fires rarely, never mid-gesture
+  // and never during playback (which owns its own lighter render).
+  let radarZoomTimer = null;
+  map.on('zoomend', () => {
+    if (state.playback && state.playback.active) return;
+    if (!state.shownSweep || !state.shownSite) return;
+    clearTimeout(radarZoomTimer);
+    radarZoomTimer = setTimeout(() => {
+      const product = PRODUCTS[state.productId];
+      const maxR = sweepMaxRange(state.shownSweep, product.moment) || 300000;
+      if (currentRadarRes(maxR, state.shownSite) !== state.radarRes)
+        setRadarSource(map, state.shownSweep, product, state.shownSite);
+    }, 200);
+  });
 
   // Right-click anywhere to jump to the NEXRAD radar nearest that point.
   map.on('contextmenu', (e) => {
@@ -1156,6 +1217,17 @@ function init() {
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
+
+  // Range-ring visibility — toggles the GL layer in place (the geometry is
+  // already built, so there's nothing to recompute).
+  el.ringsToggle.addEventListener('click', () => {
+    const on = !el.ringsToggle.classList.contains('active');
+    el.ringsToggle.classList.toggle('active', on);
+    el.ringsToggle.textContent = on ? 'ON' : 'OFF';
+    state.showRings = on;
+    if (state.map && state.map.getLayer && state.map.getLayer('rings'))
+      state.map.setLayoutProperty('rings', 'visibility', on ? 'visible' : 'none');
+  });
 
   // Live NWS watches/warnings overlay.
   state.alerts = new AlertsController(state.map, {
