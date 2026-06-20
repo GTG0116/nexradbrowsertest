@@ -24,6 +24,35 @@ const BASEMAPS = {
   outdoors: { id: 'outdoors-v12', label: 'Outdoors' },
 };
 
+// Labels-only raster overlay (place names + administrative boundaries) from
+// CARTO. Drawn in the high-z `labels` pane so town names and borders sit on top
+// of the radar. Light-text labels for dark basemaps, dark-text for light ones.
+const LABEL_STYLES = {
+  dark: 'dark_only_labels',
+  satellite: 'dark_only_labels',
+  streets: 'rastertiles/voyager_only_labels',
+  light: 'light_only_labels',
+  outdoors: 'light_only_labels',
+};
+
+function makeLabelLayer(key) {
+  const style = LABEL_STYLES[key] || LABEL_STYLES.dark;
+  return L.tileLayer(
+    `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`,
+    {
+      pane: 'labels',
+      subdomains: 'abcd',
+      maxZoom: 19,
+      detectRetina: true,
+      crossOrigin: true,
+      updateWhenIdle: false,
+      updateWhenZooming: false,
+      keepBuffer: 4,
+      attribution: '&copy; <a href="https://carto.com/attributions">CARTO</a>',
+    }
+  );
+}
+
 function makeBasemapLayer(key) {
   const style = (BASEMAPS[key] || BASEMAPS.dark).id;
   return L.tileLayer(
@@ -67,14 +96,28 @@ function createRadarLayer() {
       canvas.style.position = 'absolute';
       canvas.style.pointerEvents = 'none';
       canvas.style.opacity = this._opacity;
-      map.getPanes().overlayPane.appendChild(canvas);
-      map.on('moveend zoomend resize viewreset', this._reset, this);
+      // Sit in the dedicated radar pane so the alert fill paints beneath the
+      // radar while alert borders and town labels paint above it.
+      (map.getPane('radar') || map.getPanes().overlayPane).appendChild(canvas);
+      this._onReset = () => this._scheduleReset();
+      map.on('moveend zoomend resize viewreset', this._onReset, this);
       this._reset();
     },
 
     onRemove(map) {
+      if (this._raf) cancelAnimationFrame(this._raf);
       L.DomUtil.remove(this._canvas);
-      map.off('moveend zoomend resize viewreset', this._reset, this);
+      map.off('moveend zoomend resize viewreset', this._onReset, this);
+    },
+
+    // Coalesce bursts of map events into a single redraw on the next frame so a
+    // rapid zoom/move can't queue several full-canvas repaints back to back.
+    _scheduleReset() {
+      if (this._raf) return;
+      this._raf = requestAnimationFrame(() => {
+        this._raf = null;
+        this._reset();
+      });
     },
 
     setData(sweep, product, site) {
@@ -95,11 +138,13 @@ function createRadarLayer() {
       if (!map || !canvas) return;
 
       const size = map.getSize();
-      // Oversize the canvas generously so a pan keeps showing already-drawn
-      // radar (the overlay pane translates with the drag) instead of flashing
-      // blank at the edges before the moveend redraw catches up.
-      const padX = Math.round(size.x * 0.6);
-      const padY = Math.round(size.y * 0.6);
+      // Oversize the canvas a touch so a pan keeps showing already-drawn radar
+      // (the pane translates with the drag) instead of flashing blank at the
+      // edges before the moveend redraw catches up. Kept modest — a large pad
+      // multiplies the pixel count (and per-frame fill cost) and was a major
+      // source of the pan/zoom lag.
+      const padX = Math.round(size.x * 0.18);
+      const padY = Math.round(size.y * 0.18);
       const wCss = size.x + 2 * padX;
       const hCss = size.y + 2 * padY;
 
@@ -183,8 +228,12 @@ const state = {
   map: null,
   basemap: 'dark',
   baseLayer: null,
+  labelLayer: null,
   radarLayer: null,
   ringLayer: null,
+  ringRenderer: null,
+  fillRenderer: null,
+  aboveRenderer: null,
   siteLayer: null,
   geo: null,
   alerts: null,
@@ -273,15 +322,50 @@ function initMap() {
     preferCanvas: true,
   }).setView([35.33, -97.27], 7);
 
+  // Explicit stacking order, back to front:
+  //   basemap tiles → alert fill → radar data → alert borders + range rings +
+  //   site dots → town names & boundaries.
+  //
+  // Everything that needs to be clickable above the radar (alert outlines, the
+  // site dots, range rings) shares ONE canvas in the `aboveRadar` pane: stacked
+  // full-map canvases would otherwise swallow each other's clicks, so a single
+  // renderer lets Leaflet hit-test them all together. The translucent alert
+  // fill is the only thing that paints *below* the radar.
+  map.createPane('alertFill').style.zIndex = 350;
+  map.createPane('radar').style.zIndex = 400;
+  map.createPane('aboveRadar').style.zIndex = 450;
+  const labelPane = map.createPane('labels');
+  labelPane.style.zIndex = 500;
+  labelPane.style.pointerEvents = 'none'; // let clicks fall through to the map
+
+  state.fillRenderer = L.canvas({ pane: 'alertFill' });
+  state.aboveRenderer = L.canvas({ pane: 'aboveRadar' });
+
   state.baseLayer = makeBasemapLayer(state.basemap).addTo(map);
+  // Town names + administrative borders, drawn above the radar so place names
+  // stay legible over the reflectivity.
+  state.labelLayer = makeLabelLayer(state.basemap).addTo(map);
 
   state.radarLayer = createRadarLayer();
   state.radarLayer.setOpacity(state.opacity);
   state.radarLayer.addTo(map);
+  state.ringRenderer = state.aboveRenderer;
   state.ringLayer = L.layerGroup().addTo(map);
   state.map = map;
 
-  map.on('mousemove', (e) => updateReadout(e.latlng));
+  // Throttle the gate-sampling readout to one update per frame; sampleAt scans
+  // every radial, so firing it on every raw mousemove event made panning while
+  // hovering feel sticky.
+  let readoutRaf = null;
+  let lastLatLng = null;
+  map.on('mousemove', (e) => {
+    lastLatLng = e.latlng;
+    if (readoutRaf) return;
+    readoutRaf = requestAnimationFrame(() => {
+      readoutRaf = null;
+      updateReadout(lastLatLng);
+    });
+  });
   map.on('mouseout', () => el.readout.classList.remove('show'));
 
   // Right-click anywhere to jump to the NEXRAD radar nearest that point.
@@ -309,6 +393,19 @@ function setBasemap(key) {
     setTimeout(() => state.map.hasLayer(old) && state.map.removeLayer(old), 1500);
   }
   state.baseLayer = next;
+
+  // Swap the town-name/border overlay to one tuned for the new basemap's
+  // brightness (light text on dark maps, dark text on light maps).
+  const nextLabels = makeLabelLayer(key).addTo(state.map);
+  if (state.labelLayer) {
+    const oldLabels = state.labelLayer;
+    nextLabels.once('load', () => state.map.removeLayer(oldLabels));
+    setTimeout(
+      () => state.map.hasLayer(oldLabels) && state.map.removeLayer(oldLabels),
+      1500
+    );
+  }
+  state.labelLayer = nextLabels;
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -619,11 +716,13 @@ function displaySweep(sweep, site) {
 
 function drawRings(site, maxR) {
   state.ringLayer.clearLayers();
+  const renderer = state.ringRenderer;
   L.circleMarker([site.lat, site.lon], {
     radius: 3,
     color: '#36e0c8',
     weight: 2,
     fillOpacity: 1,
+    renderer,
   }).addTo(state.ringLayer);
   const stepKm = 100;
   for (let km = stepKm; km * 1000 <= maxR + 1; km += stepKm) {
@@ -633,6 +732,7 @@ function drawRings(site, maxR) {
       weight: 1,
       fill: false,
       dashArray: '4 6',
+      renderer,
     }).addTo(state.ringLayer);
   }
 }
@@ -643,7 +743,10 @@ function drawRings(site, maxR) {
 function buildSiteDots() {
   state.siteLayer = L.layerGroup().addTo(state.map);
   for (const [icao, name, lat, lon] of RADARS) {
-    const dot = L.circleMarker([lat, lon], siteDotStyle(icao));
+    const dot = L.circleMarker([lat, lon], {
+      ...siteDotStyle(icao),
+      renderer: state.aboveRenderer,
+    });
     dot._icao = icao;
     dot._name = name;
     dot.bindTooltip(`${icao} — ${name}`, { direction: 'top', offset: [0, -3] });
@@ -1101,6 +1204,8 @@ function init() {
     detail: el.alertDetail,
     detailPanel: el.alertDetailPanel,
     close: el.alertClose,
+    fillRenderer: state.fillRenderer,
+    borderRenderer: state.aboveRenderer,
   });
   state.alerts.start();
   el.alertsToggle.addEventListener('click', () => {

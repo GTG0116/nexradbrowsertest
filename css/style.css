@@ -774,6 +774,15 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
   margin-bottom: 4px;
 }
+/* Section titles (LOCATION, WHAT TO DO, …) read as headings: larger and bold,
+   with the body text that follows kept smaller and regular weight. */
+.alert-title {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.6px !important;
+  color: #fff !important;
+  margin-bottom: 7px !important;
+}
 .alert-expires b {
   font-size: 20px;
   font-weight: 700;
@@ -824,6 +833,8 @@ input[type='range']::-moz-range-thumb {
 .alert-loc p,
 .alert-block p {
   margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 400;
   line-height: 1.5;
   color: var(--ink);
   white-space: pre-wrap;
@@ -831,7 +842,39 @@ input[type='range']::-moz-range-thumb {
 .alert-block p {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
+  font-weight: 400;
   color: #b9cbe6;
+}
+
+/* Plain-language safety guidance, shown above the official NWS instruction. */
+.alert-guidance {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-edge);
+  border-left: 3px solid var(--warn);
+  background: rgba(255, 120, 40, 0.08);
+}
+.alert-guidance-lead {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: #fff;
+}
+.alert-guidance-list {
+  margin: 0;
+  padding-left: 18px;
+}
+.alert-guidance-list li {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--ink);
+  margin-bottom: 6px;
+}
+.alert-guidance-list li:last-child {
+  margin-bottom: 0;
 }
 .alert-tags {
   border-top: 1px dashed var(--panel-edge);
