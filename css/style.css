@@ -320,10 +320,13 @@ input:focus {
 .leaflet-control-attribution a {
   color: var(--accent-2) !important;
 }
-/* Gates are drawn as true polar cells in the canvas; let the browser smooth the
-   overlay as Leaflet rescales it so diagonals don't alias into a moiré. */
+/* Gates are drawn as true polar cells in the canvas, so keep them crisp instead
+   of letting the browser blur the overlay when Leaflet rescales it. The forward
+   renderer already produces clean, solid cells, so nearest-neighbour scaling no
+   longer aliases into the diagonal moiré the old per-pixel sampler caused. */
 .radar-overlay {
-  image-rendering: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 .map-readout {
@@ -873,19 +876,110 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------------- Responsive ---------------- */
-@media (max-width: 1100px) {
+/* Tablet: keep all three columns but tighten them. */
+@media (max-width: 1180px) {
   .layout {
-    grid-template-columns: 240px 1fr;
-  }
-  .rail-right {
-    display: none;
+    grid-template-columns: 220px 1fr 220px;
+    gap: 8px;
   }
 }
-@media (max-width: 760px) {
-  .layout {
-    grid-template-columns: 1fr;
+
+/* Phones / narrow tablets: stack everything into one scrollable column so no
+   panel is ever hidden, with the map pinned to a comfortable height up top. */
+@media (max-width: 900px) {
+  html,
+  body {
+    height: auto;
   }
-  .rail-left {
-    display: none;
+  body {
+    overflow-y: auto;
+  }
+  .app {
+    height: auto;
+    min-height: 100dvh;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding: 10px 12px;
+  }
+  .brand-text h1 {
+    font-size: 17px;
+    letter-spacing: 4px;
+  }
+  .topbar-status {
+    text-align: left;
+  }
+
+  .layout {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  /* Both rails are visible again on mobile, just stacked. */
+  .rail,
+  .rail-left,
+  .rail-right {
+    display: flex;
+    flex-direction: column;
+  }
+  .stage {
+    order: -1; /* map first */
+  }
+  .map-wrap {
+    height: 58vh;
+    min-height: 300px;
+    flex: none;
+  }
+
+  /* Let panels flow at natural height; cap the scrolling lists so the page —
+     not a tiny inner box — does the scrolling. */
+  .panel.grow {
+    flex: 0 0 auto;
+  }
+  .vol-list,
+  .alert-list {
+    max-height: 260px;
+  }
+  .tilt-list {
+    max-height: none;
+  }
+
+  /* Roomier touch targets. */
+  .product-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .product-btn,
+  .ghost-btn,
+  .pal-btn,
+  .tilt-btn,
+  .vol-btn,
+  .alert-row {
+    min-height: 42px;
+  }
+
+  /* Full-width alert briefing on small screens. */
+  .alert-detail-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+  .alert-close {
+    left: auto;
+    right: 12px;
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (max-width: 520px) {
+  .product-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .footer {
+    flex-direction: column;
+    gap: 2px;
   }
 }
