@@ -627,6 +627,14 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   justify-content: space-between;
 }
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
 .alerts-toggle {
   background: rgba(10, 20, 40, 0.6);
   border: 1px solid var(--panel-edge);
@@ -742,6 +750,43 @@ input[type='range']::-moz-range-thumb {
 .alert-close:hover {
   border-color: var(--warn);
   color: var(--warn);
+}
+
+/* Cycler shown atop the briefing when several alerts overlap a location. */
+.alert-nav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(6, 12, 24, 0.97);
+  border-bottom: 1px solid var(--panel-edge);
+}
+.alert-nav-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+.alert-nav-btn {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 7px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(12, 22, 40, 0.9);
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.alert-nav-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .alert-sec {
@@ -1018,6 +1063,11 @@ input[type='range']::-moz-range-thumb {
     right: 12px;
     width: 40px;
     height: 40px;
+    z-index: 1300;
+  }
+  /* Keep the cycler's next-arrow clear of the floating close button. */
+  .alert-nav {
+    padding-right: 64px;
   }
 }
 

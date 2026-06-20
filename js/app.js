@@ -185,7 +185,13 @@ function setRadarSource(map, sweep, product, site) {
       id: 'radar',
       type: 'raster',
       source: 'radar',
-      paint: { 'raster-opacity': state.opacity, 'raster-fade-duration': 0 },
+      paint: {
+        'raster-opacity': state.opacity,
+        'raster-fade-duration': 0,
+        // Don't let the GPU bilinear-smooth between gates — keep each gate's
+        // value sharp-edged (true polar cells), not blurred into its neighbour.
+        'raster-resampling': 'nearest',
+      },
     },
     map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
   );
@@ -234,6 +240,7 @@ const state = {
   map: null,
   basemap: 'dark',
   styleReady: false,
+  showRings: true,
   geo: null,
   alerts: null,
   shownSweep: null,
@@ -270,6 +277,7 @@ function cacheEls() {
   el.palName = $('#palName');
   el.alertList = $('#alertList');
   el.alertsToggle = $('#alertsToggle');
+  el.ringsToggle = $('#ringsToggle');
   el.alertDetail = $('#alertDetail');
   el.alertDetailPanel = $('#alertDetailPanel');
   el.alertClose = $('#alertClose');
@@ -712,7 +720,18 @@ function displaySweep(sweep, site) {
 function drawRings(site, maxR) {
   const src = state.map && state.map.getSource('rings');
   if (!src) return;
-  src.setData(site ? ringsGeoJSON(site, maxR) : { type: 'FeatureCollection', features: [] });
+  const show = state.showRings && site;
+  src.setData(show ? ringsGeoJSON(site, maxR) : { type: 'FeatureCollection', features: [] });
+}
+
+// Recompute and (re)draw the rings for whatever sweep is currently on screen —
+// used by the show/hide toggle without forcing a radar re-render.
+function refreshRings() {
+  const site = state.shownSweep && state.shownSite;
+  const maxR = state.shownSweep
+    ? sweepMaxRange(state.shownSweep, PRODUCTS[state.productId].moment) || 300000
+    : 0;
+  drawRings(site ? state.shownSite : null, maxR);
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1190,13 @@ function init() {
     el.alertsToggle.classList.toggle('active', on);
     el.alertsToggle.textContent = on ? 'ON' : 'OFF';
     state.alerts.setEnabled(on);
+  });
+
+  el.ringsToggle.addEventListener('click', () => {
+    state.showRings = !state.showRings;
+    el.ringsToggle.classList.toggle('active', state.showRings);
+    el.ringsToggle.textContent = state.showRings ? 'ON' : 'OFF';
+    refreshRings();
   });
 
   // ---- Mobile dock + sheet + playback + inspect wiring ----
