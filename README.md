@@ -18,10 +18,12 @@ the radar imagery — entirely client-side.
 - **WSR-88D Level II decoding** of Message 31 (`js/level2.js`): base reflectivity
   (REF), velocity (VEL), spectrum width (SW), correlation coefficient (ρHV),
   differential reflectivity (ZDR) and differential phase (φDP).
-- **Geographic rendering** (`js/renderer.js`): each sweep is inverse-mapped
-  per-pixel into an equirectangular `ImageData` buffer and draped over an
-  **interactive Leaflet map** as an image overlay, with meteorologically
-  conventional color scales (`js/products.js`).
+- **Geographic rendering** (`js/renderer.js`): each sweep is drawn as true polar
+  cells into a Web-Mercator canvas and draped over an **interactive Mapbox GL JS
+  map**. The radar is slotted *into* the basemap's own layer stack — beneath the
+  town-name and boundary layers — so place names and borders always draw on top
+  of the reflectivity, with meteorologically conventional color scales
+  (`js/products.js`).
 - A distinctive **radar-operations-console UI** over a dark basemap: range rings,
   a live cursor readout, opacity control, elevation-tilt selection, and a UTC
   clock. Pan/zoom the map freely.
@@ -41,7 +43,7 @@ js/app.js                         controller: UI, state, interaction
  ├─ js/s3.js                      list/download volumes from S3 (CORS)
  ├─ js/products.js                color scales + LUTs per product
  ├─ js/renderer.js                radar → geo-referenced canvas for the map
- ├─ Leaflet (CDN)                 interactive basemap + image overlay
+ ├─ Mapbox GL JS (CDN)            vector basemap; radar/alerts inserted below labels
  └─ js/decoder.worker.js          off-thread decode
      └─ js/level2.js              Archive II / Message 31 parser
          └─ js/bzip2.js           pure-JS bzip2 decompressor

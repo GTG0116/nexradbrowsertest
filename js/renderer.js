@@ -1,14 +1,13 @@
-// renderer.js — render a radar sweep as true polar cells drawn directly in the
-// map's screen space.
+// renderer.js — render a radar sweep as true polar cells in a Web-Mercator
+// pixel space.
 //
-// Rather than rasterising the sweep into a fixed-resolution bitmap and letting
-// Leaflet upscale it (which turns every gate into the same axis-aligned blocky
-// square once you zoom in), we draw each gate as the quadrilateral it actually
-// is in (range, azimuth) space and project its four corners straight to screen
-// pixels. The cells therefore stay crisp and beam-aligned at any zoom, gates
-// close to the radar render small and far gates render large — i.e. their true
-// physical footprint — and a wedge at a 45° azimuth looks like a slanted polar
-// cell instead of a staircase of equal squares.
+// Each gate is drawn as the quadrilateral it actually is in (range, azimuth)
+// space, projecting its four corners to mercator pixels. Gates close to the
+// radar render small and far gates render large — their true physical footprint
+// — and a wedge at a 45° azimuth is a slanted polar cell, not a staircase of
+// equal squares. renderRadarCanvas() uses this to rasterise the whole sweep
+// once into a fixed canvas, which Mapbox GL then draws as a georeferenced
+// CanvasSource and reprojects on the GPU as the map moves.
 
 const M_PER_DEG_LAT = 111320;
 const D2R = Math.PI / 180;
@@ -153,6 +152,75 @@ export function renderScreen(ctx, sweep, product, view) {
     }
     flush(gateCount);
   }
+}
+
+// Rasterise a sweep into a fixed canvas that is *linear in Web Mercator* over
+// the radar's coverage box, and return the geographic corners of that canvas.
+//
+// This is what lets Mapbox GL draw the radar as a georeferenced CanvasSource:
+// because both the canvas pixels and Mapbox's image placement are linear in
+// mercator, the four corners pin the raster to the map exactly. The sweep is
+// drawn ONCE per volume here — Mapbox then reprojects it on the GPU during every
+// pan/zoom, so moving the map costs no JavaScript at all.
+//
+// Returns { coordinates } where coordinates is [[w,n],[e,n],[e,s],[w,s]] (the
+// order a Mapbox canvas/image source expects: TL, TR, BR, BL).
+export function renderRadarCanvas(canvas, sweep, product, site, maxRange, resolution) {
+  const N = resolution || 2048;
+  const maxR = (maxRange || 300000) * 1.04; // a little margin past the last gate
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((site.lat * Math.PI) / 180);
+
+  // Pick a mercator scale so the radar's east–west span fills ~96% of the
+  // canvas, then centre the square canvas on the radar.
+  const halfSpanDegLon = maxR / mPerDegLon;
+  const scale = (N * 0.96 * 180) / halfSpanDegLon; // = N*0.96 * 360 / (2*halfSpanDegLon)
+
+  const kY = scale / (2 * Math.PI);
+  const wxOfLon = (lon) => (scale / 360) * lon + scale / 2;
+  const wyOfLat = (lat) =>
+    scale / 2 - kY * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  const lonOfWx = (x) => ((x - scale / 2) * 360) / scale;
+  const latOfWy = (y) => {
+    const t = (scale / 2 - y) / kY;
+    return ((2 * Math.atan(Math.exp(t)) - Math.PI / 2) * 180) / Math.PI;
+  };
+
+  const cx = wxOfLon(site.lon);
+  const cy = wyOfLat(site.lat);
+  const offX = cx - N / 2;
+  const offY = cy - N / 2;
+
+  if (canvas.width !== N || canvas.height !== N) {
+    canvas.width = N;
+    canvas.height = N;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, N, N);
+
+  renderScreen(ctx, sweep, product, {
+    scale,
+    offX,
+    offY,
+    w: N,
+    h: N,
+    siteLat: site.lat,
+    siteLon: site.lon,
+    mPerDegLon,
+  });
+
+  const west = lonOfWx(offX);
+  const east = lonOfWx(offX + N);
+  const north = latOfWy(offY);
+  const south = latOfWy(offY + N);
+  return {
+    coordinates: [
+      [west, north],
+      [east, north],
+      [east, south],
+      [west, south],
+    ],
+  };
 }
 
 // Sample the physical value at a geographic point (for the cursor readout).

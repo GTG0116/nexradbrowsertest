@@ -301,32 +301,49 @@ input:focus {
   background: #04080f;
 }
 
-/* Leaflet theming to match the console */
-.leaflet-container {
+/* Mapbox GL theming to match the console */
+.mapboxgl-map {
   font-family: 'JetBrains Mono', monospace;
   background: #04080f;
 }
-.leaflet-control-zoom a {
+.mapboxgl-ctrl-group {
   background: rgba(12, 22, 40, 0.9) !important;
-  color: var(--accent) !important;
   border: 1px solid var(--panel-edge) !important;
 }
-.leaflet-control-zoom a:hover {
+.mapboxgl-ctrl-group button {
+  background: transparent !important;
+}
+.mapboxgl-ctrl-group button + button {
+  border-top: 1px solid var(--panel-edge) !important;
+}
+.mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
+  filter: invert(1) hue-rotate(150deg) brightness(1.4);
+}
+.mapboxgl-ctrl-group button:hover {
   background: rgba(30, 50, 90, 0.95) !important;
 }
-.leaflet-control-attribution {
+.mapboxgl-ctrl-attrib {
   background: rgba(6, 12, 24, 0.7) !important;
+}
+.mapboxgl-ctrl-attrib,
+.mapboxgl-ctrl-attrib a {
   color: var(--ink-dim) !important;
 }
-.leaflet-control-attribution a {
+.mapboxgl-ctrl-attrib a {
   color: var(--accent-2) !important;
 }
-/* Radar gates are drawn as true polar quads directly into this canvas in the
-   map's screen space and re-rendered on zoom/move, so they're already at the
-   display's native resolution — no Leaflet bitmap upscaling, no blocky diagonal
-   staircase. The canvas spans the viewport and must not eat map interactions. */
-.radar-canvas {
-  pointer-events: none;
+.site-tip .mapboxgl-popup-content {
+  background: rgba(8, 16, 32, 0.95);
+  color: var(--ink);
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 5px 9px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+.site-tip .mapboxgl-popup-tip {
+  display: none;
 }
 
 .map-readout {
@@ -965,11 +982,11 @@ input[type='range']::-moz-range-thumb {
     margin: 0;
   }
   /* Drop the zoom buttons below the floating legend instead of overlapping it. */
-  .leaflet-top.leaflet-left {
-    top: 96px;
+  .mapboxgl-ctrl-top-left {
+    top: 88px;
   }
   /* Keep the map credits clear of the bottom dock. */
-  .leaflet-control-attribution {
+  .mapboxgl-ctrl-attrib {
     font-size: 9px;
   }
 
