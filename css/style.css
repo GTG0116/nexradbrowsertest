@@ -921,6 +921,14 @@ input[type='range']::-moz-range-thumb {
     z-index: 650;
     margin: 0;
   }
+  /* Drop the zoom buttons below the floating legend instead of overlapping it. */
+  .leaflet-top.leaflet-left {
+    top: 96px;
+  }
+  /* Keep the map credits clear of the bottom dock. */
+  .leaflet-control-attribution {
+    font-size: 9px;
+  }
 
   /* Rails are hidden while docked in .layout; they're relocated into the sheet
      by JS, where the rules below make them visible again. */
@@ -1034,7 +1042,9 @@ input[type='range']::-moz-range-thumb {
   bottom: 0;
   display: flex;
   gap: 8px;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  /* Extra bottom space lifts the controls clear of the map credits that sit at
+     the very bottom edge. */
+  padding: 8px 10px calc(26px + env(safe-area-inset-bottom, 0px));
   background: linear-gradient(180deg, rgba(5, 9, 18, 0) 0%, rgba(5, 9, 18, 0.92) 45%);
   z-index: 700;
 }
@@ -1097,17 +1107,22 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------------- Playback bar ---------------- */
+/* The loop UI replaces the bottom dock in the same place: it sits where the
+   dock's controls were (the dock is hidden while a loop runs). Closing it with
+   the ✕ stops playback and restores the dock. */
 .playback-bar {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+  left: 10px;
+  right: 10px;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  background: rgba(8, 16, 30, 0.95);
-  border-top: 1px solid var(--panel-edge);
+  padding: 8px 10px;
+  background: rgba(14, 24, 44, 0.96);
+  border: 1px solid var(--panel-edge);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
   z-index: 705;
 }
 .pb-play,
@@ -1155,6 +1170,14 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.65);
   padding: 0 12px calc(16px + env(safe-area-inset-bottom, 0px));
 }
+.sheet-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0 2px;
+  touch-action: none; /* let the swipe-down gesture own vertical drags here */
+}
 .sheet-grip {
   display: block;
   width: 44px;
@@ -1164,6 +1187,34 @@ input[type='range']::-moz-range-thumb {
   border: none;
   margin: 10px auto;
   cursor: pointer;
+}
+/* A large, obvious tap target to minimize the sheet (alongside swipe-down). */
+.sheet-min {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: rgba(14, 24, 44, 0.94);
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.sheet-min span {
+  font-size: 14px;
+  line-height: 1;
+}
+.sheet-min:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .sheet-body {
   overflow-y: auto;

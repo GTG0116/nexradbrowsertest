@@ -10,6 +10,41 @@ import { AlertsController } from './alerts.js';
 const M_PER_DEG_LAT = 111320;
 
 // ---------------------------------------------------------------------------
+// Basemap — Mapbox raster tiles, user-switchable between several styles.
+// ---------------------------------------------------------------------------
+const MAPBOX_TOKEN =
+  'pk.eyJ1IjoiZ3RnMDExNiIsImEiOiJjbWxsODV6NXAwNThmM2ZwdWlkYm0xNjFlIn0.vI186twXYzY45nnuV5FucQ';
+
+// key → { id: mapbox style id, label }. "Dark" keeps the original console look.
+const BASEMAPS = {
+  dark: { id: 'dark-v11', label: 'Dark' },
+  satellite: { id: 'satellite-streets-v12', label: 'Satellite' },
+  streets: { id: 'streets-v12', label: 'Streets' },
+  light: { id: 'light-v11', label: 'Light' },
+  outdoors: { id: 'outdoors-v12', label: 'Outdoors' },
+};
+
+function makeBasemapLayer(key) {
+  const style = (BASEMAPS[key] || BASEMAPS.dark).id;
+  return L.tileLayer(
+    `https://api.mapbox.com/styles/v1/mapbox/${style}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
+    {
+      tileSize: 512,
+      zoomOffset: -1,
+      maxZoom: 19,
+      crossOrigin: true,
+      // Keep extra tiles around the viewport so panning doesn't blank the
+      // basemap, and let tiles load during the pan instead of only when idle.
+      keepBuffer: 4,
+      updateWhenIdle: false,
+      updateWhenZooming: false,
+      attribution:
+        '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Radar layer — draws polar cells straight into a canvas in the map's screen
 // space and re-renders on every zoom/move, so gates stay crisp and true-to-size
 // at any zoom instead of being upscaled from a fixed-resolution bitmap.
@@ -60,10 +95,11 @@ function createRadarLayer() {
       if (!map || !canvas) return;
 
       const size = map.getSize();
-      // Oversize the canvas a little so a short pan reveals already-drawn area
-      // before the moveend redraw catches up.
-      const padX = Math.round(size.x * 0.3);
-      const padY = Math.round(size.y * 0.3);
+      // Oversize the canvas generously so a pan keeps showing already-drawn
+      // radar (the overlay pane translates with the drag) instead of flashing
+      // blank at the edges before the moveend redraw catches up.
+      const padX = Math.round(size.x * 0.6);
+      const padY = Math.round(size.y * 0.6);
       const wCss = size.x + 2 * padX;
       const hCss = size.y + 2 * padY;
 
@@ -71,10 +107,17 @@ function createRadarLayer() {
       L.DomUtil.setPosition(canvas, corner);
 
       const dpr = window.devicePixelRatio || 1;
-      canvas.style.width = wCss + 'px';
-      canvas.style.height = hCss + 'px';
-      canvas.width = Math.round(wCss * dpr);
-      canvas.height = Math.round(hCss * dpr);
+      const bw = Math.round(wCss * dpr);
+      const bh = Math.round(hCss * dpr);
+      // Reallocating the backing store on every pan/zoom is expensive and adds
+      // GC churn that makes moving the map feel laggy. Only resize when the
+      // dimensions actually change; otherwise just clear and redraw.
+      if (canvas.width !== bw || canvas.height !== bh) {
+        canvas.style.width = wCss + 'px';
+        canvas.style.height = hCss + 'px';
+        canvas.width = bw;
+        canvas.height = bh;
+      }
 
       const ctx = canvas.getContext('2d');
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -138,6 +181,8 @@ const state = {
   live: false,
   liveTimer: null,
   map: null,
+  basemap: 'dark',
+  baseLayer: null,
   radarLayer: null,
   ringLayer: null,
   siteLayer: null,
@@ -196,6 +241,9 @@ function cacheEls() {
   el.sheetBody = $('#sheetBody');
   el.sheetScrim = $('#sheetScrim');
   el.sheetGrip = $('#sheetGrip');
+  el.sheetClose = $('#sheetClose');
+  el.sheetHeader = $('#sheetHeader');
+  el.basemapSelect = $('#basemapSelect');
   el.sheetPlayback = $('#sheetPlayback');
   el.playSpeed = $('#playSpeed');
   el.playSpeedVal = $('#playSpeedVal');
@@ -225,15 +273,7 @@ function initMap() {
     preferCanvas: true,
   }).setView([35.33, -97.27], 7);
 
-  L.tileLayer(
-    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    {
-      subdomains: 'abcd',
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }
-  ).addTo(map);
+  state.baseLayer = makeBasemapLayer(state.basemap).addTo(map);
 
   state.radarLayer = createRadarLayer();
   state.radarLayer.setOpacity(state.opacity);
@@ -252,6 +292,23 @@ function initMap() {
     selectSite(r[0], r[1]);
     setStatus(`nearest radar: ${r[0]} — ${r[1]}`);
   });
+}
+
+// Swap the Mapbox basemap style, keeping the radar overlay and rings on top.
+function setBasemap(key) {
+  if (!BASEMAPS[key] || !state.map) return;
+  state.basemap = key;
+  const next = makeBasemapLayer(key).addTo(state.map);
+  next.on('add', () => next.bringToBack());
+  next.bringToBack();
+  if (state.baseLayer) {
+    const old = state.baseLayer;
+    // Drop the old layer once the new one has had a chance to paint, so the
+    // switch doesn't flash the empty map background.
+    next.once('load', () => state.map.removeLayer(old));
+    setTimeout(() => state.map.hasLayer(old) && state.map.removeLayer(old), 1500);
+  }
+  state.baseLayer = next;
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -597,8 +654,11 @@ function buildSiteDots() {
 
 function siteDotStyle(icao) {
   const cur = icao === state.site;
+  // Bigger dots on touch screens so a finger can actually land on one. The
+  // marker's clickable area is its radius, so this also enlarges the hit target.
+  const mobile = mqMobile.matches;
   return {
-    radius: cur ? 6 : 3.5,
+    radius: cur ? (mobile ? 9 : 6) : mobile ? 7 : 3.5,
     color: cur ? '#36e0c8' : 'rgba(150,205,255,0.85)',
     weight: cur ? 2 : 1,
     fillColor: cur ? '#36e0c8' : 'rgba(80,140,220,0.85)',
@@ -701,25 +761,83 @@ function updateDock() {
 
 function openSheet() {
   el.sheet.hidden = false;
+  el.sheet.style.transition = 'none';
+  el.sheet.style.transform = 'translateY(0)';
   el.sheetScrim.hidden = false;
   document.querySelector('.app').classList.add('sheet-open');
 }
 
 function closeSheet() {
   el.sheet.hidden = true;
+  el.sheet.style.transform = '';
+  el.sheet.style.transition = '';
   el.sheetScrim.hidden = true;
   document.querySelector('.app').classList.remove('sheet-open');
+}
+
+// Drag the settings sheet down to dismiss it — a more discoverable close than
+// tapping the scrim. A short flick or a drag past ~90px closes; otherwise it
+// springs back. Dragging starts from the header (grip / minimize) so list
+// scrolling inside the body isn't hijacked.
+function enableSheetSwipe() {
+  const handle = el.sheetHeader || el.sheetGrip;
+  if (!handle) return;
+  let startY = null;
+  let dy = 0;
+  let t0 = 0;
+
+  handle.addEventListener(
+    'touchstart',
+    (e) => {
+      if (!e.touches[0]) return;
+      startY = e.touches[0].clientY;
+      dy = 0;
+      t0 = Date.now();
+      el.sheet.style.transition = 'none';
+    },
+    { passive: true }
+  );
+  handle.addEventListener(
+    'touchmove',
+    (e) => {
+      if (startY == null || !e.touches[0]) return;
+      dy = Math.max(0, e.touches[0].clientY - startY);
+      el.sheet.style.transform = `translateY(${dy}px)`;
+    },
+    { passive: true }
+  );
+  const end = () => {
+    if (startY == null) return;
+    const fast = dy > 24 && Date.now() - t0 < 250;
+    el.sheet.style.transition = 'transform 0.18s ease';
+    if (dy > 90 || fast) {
+      el.sheet.style.transform = 'translateY(110%)';
+      setTimeout(closeSheet, 160);
+    } else {
+      el.sheet.style.transform = 'translateY(0)';
+    }
+    startY = null;
+  };
+  handle.addEventListener('touchend', end, { passive: true });
+  handle.addEventListener('touchcancel', end, { passive: true });
 }
 
 const mqMobile = window.matchMedia('(max-width: 900px)');
 function applyResponsiveLayout() {
   const mobile = mqMobile.matches;
   document.querySelector('.app').classList.toggle('mobile', mobile);
-  el.mobileDock.hidden = !mobile;
+  // While a loop is running its UI owns the dock's space, so keep the dock
+  // hidden until playback stops.
+  const playing = state.playback && state.playback.active;
+  el.mobileDock.hidden = !mobile || playing;
+  refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
-    if (el.railLeft.parentElement !== el.sheetBody) {
-      el.sheetBody.appendChild(el.railLeft);
+    // In the sheet, stack Product/tilt/basemap first, then Source/volumes and
+    // Active alerts as their own full-width sections below — so the alerts list
+    // is no longer crowded out of view by the product grid.
+    if (el.railRight.parentElement !== el.sheetBody) {
       el.sheetBody.appendChild(el.railRight);
+      el.sheetBody.appendChild(el.railLeft);
     }
   } else {
     closeSheet();
@@ -753,12 +871,20 @@ function createPlayback() {
       }
       this.active = true;
       el.playBtn.classList.add('active');
+      // The loop UI takes over the dock's space: hide the dock while playing
+      // and reveal it again on stop (the ✕ on the bar).
+      el.mobileDock.hidden = true;
       el.playbackBar.hidden = false;
       el.sheetPlayback.hidden = false;
+      document.querySelector('.app').classList.add('playing');
       el.playLabel.textContent = 'loading…';
       if (state.live) toggleLive(); // freeze auto-refresh during playback
 
-      const last = state.volumes.slice(-10);
+      // Decoding ten full Level II volumes and holding them all in memory at
+      // once can exhaust a phone and crash the tab. On mobile, loop fewer,
+      // recent frames so the working set stays small.
+      const frameCount = mqMobile.matches ? 5 : 10;
+      const last = state.volumes.slice(-frameCount);
       setStatus('loading playback…', true);
       const frames = [];
       for (const v of last) {
@@ -781,6 +907,11 @@ function createPlayback() {
         this.stop();
         return;
       }
+      // Drop any cached volumes that aren't part of this loop so the cache
+      // can't grow without bound as new scans arrive over a long session.
+      const keep = new Set(frames.map((f) => f.key));
+      for (const k of [...this.cache.keys()]) if (!keep.has(k)) this.cache.delete(k);
+
       this.frames = frames;
       this.idx = frames.length - 1;
       el.playScrub.max = String(frames.length - 1);
@@ -840,6 +971,12 @@ function createPlayback() {
       el.playBtn.classList.remove('active');
       el.playbackBar.hidden = true;
       el.sheetPlayback.hidden = true;
+      document.querySelector('.app').classList.remove('playing');
+      // Restore the normal bottom dock that the loop UI replaced.
+      if (mqMobile.matches) el.mobileDock.hidden = false;
+      // Release the decoded-volume cache on phones so playback memory is freed
+      // as soon as the loop is dismissed.
+      if (mqMobile.matches) this.cache.clear();
       displaySweep(currentSweep(), state.volume && state.volume.site);
       updateDock();
     },
@@ -979,6 +1116,13 @@ function init() {
   );
   el.sheetScrim.addEventListener('click', closeSheet);
   el.sheetGrip.addEventListener('click', closeSheet);
+  el.sheetClose.addEventListener('click', closeSheet);
+  enableSheetSwipe();
+
+  el.basemapSelect.value = state.basemap;
+  el.basemapSelect.addEventListener('change', () =>
+    setBasemap(el.basemapSelect.value)
+  );
   el.inspectBtn.addEventListener('click', () => toggleInspect());
   el.playBtn.addEventListener('click', () => {
     if (state.playback.active) state.playback.stop();

@@ -108,6 +108,20 @@
           </section>
 
           <section class="panel">
+            <h2 class="panel-title">Basemap</h2>
+            <label class="field" style="margin-bottom: 0">
+              <span>Map style</span>
+              <select id="basemapSelect">
+                <option value="dark">Dark</option>
+                <option value="satellite">Satellite</option>
+                <option value="streets">Streets</option>
+                <option value="light">Light</option>
+                <option value="outdoors">Outdoors</option>
+              </select>
+            </label>
+          </section>
+
+          <section class="panel">
             <h2 class="panel-title">Elevation tilt</h2>
             <div id="tiltList" class="tilt-list scroll"></div>
           </section>
@@ -146,7 +160,12 @@
 
       <div id="sheetScrim" class="sheet-scrim" hidden></div>
       <div id="mobileSheet" class="mobile-sheet" hidden>
-        <button class="sheet-grip" id="sheetGrip" aria-label="Close settings"></button>
+        <div class="sheet-header" id="sheetHeader">
+          <button class="sheet-grip" id="sheetGrip" aria-label="Close settings"></button>
+          <button class="sheet-min" id="sheetClose" aria-label="Minimize settings">
+            <span>▾</span> Minimize
+          </button>
+        </div>
         <div class="sheet-body scroll" id="sheetBody">
           <div class="sheet-section" id="sheetPlayback" hidden>
             <h2 class="panel-title">Playback speed</h2>
