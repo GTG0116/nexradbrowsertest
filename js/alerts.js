@@ -378,9 +378,14 @@ export class AlertsController {
     // `alerts-line` (above radar) layers that app.js inserts into the basemap
     // stack; this controller just feeds the `alerts` source the features in
     // view and opens the briefing when one is clicked.
+    // The set of alerts stacked at the location currently being briefed, plus
+    // which one of them is showing — drives the prev/next cycler.
+    this.detailGroup = [];
+    this.detailIndex = 0;
+
     const openFromEvent = (e) => {
       const f = e.features && e.features[0];
-      if (f) this.openDetail(f.properties.id);
+      if (f) this.openDetail(f.properties.id, e.point);
     };
     map.on('click', 'alerts-fill', openFromEvent);
     map.on('click', 'alerts-line', openFromEvent);
@@ -393,7 +398,10 @@ export class AlertsController {
     });
     els.close.addEventListener('click', () => this.closeDetail());
     document.addEventListener('keydown', (e) => {
+      if (this.els.detail.hidden) return;
       if (e.key === 'Escape') this.closeDetail();
+      else if (e.key === 'ArrowRight') this.cycle(1);
+      else if (e.key === 'ArrowLeft') this.cycle(-1);
     });
   }
 
@@ -507,7 +515,51 @@ export class AlertsController {
     }
   }
 
-  openDetail(id) {
+  // Gather every alert stacked at a location, so the briefing can cycle through
+  // them. `point` is an optional screen pixel (from a map click); without one we
+  // probe the centre of the chosen alert. queryRenderedFeatures returns all the
+  // overlapping polygons currently drawn there.
+  buildDetailGroup(id, point) {
+    let qp = point;
+    const sel = this.alerts.find((a) => a.id === id);
+    if (!qp && sel && this.map.project) {
+      const cx = (sel.bounds[1] + sel.bounds[3]) / 2;
+      const cy = (sel.bounds[0] + sel.bounds[2]) / 2;
+      qp = this.map.project([cx, cy]);
+    }
+    const ids = [];
+    if (qp && this.map.queryRenderedFeatures) {
+      try {
+        const feats = this.map.queryRenderedFeatures(qp, { layers: ['alerts-fill'] });
+        const seen = new Set();
+        for (const f of feats) {
+          const fid = f.properties.id;
+          if (!seen.has(fid)) {
+            seen.add(fid);
+            ids.push(fid);
+          }
+        }
+      } catch {
+        /* layer not ready */
+      }
+    }
+    if (!ids.includes(id)) ids.unshift(id);
+    // Most-significant alerts first, matching the side list's ordering.
+    ids.sort((x, y) => {
+      const ax = this.alerts.find((a) => a.id === x);
+      const ay = this.alerts.find((a) => a.id === y);
+      if (!ax || !ay) return 0;
+      return (
+        priorityOf(ax.cls.display) - priorityOf(ay.cls.display) ||
+        ax.cls.display.localeCompare(ay.cls.display)
+      );
+    });
+    return ids;
+  }
+
+  openDetail(id, point) {
+    this.detailGroup = this.buildDetailGroup(id, point);
+    this.detailIndex = Math.max(0, this.detailGroup.indexOf(id));
     this.selectedId = id;
     document.querySelector('.app').classList.add('alert-mode');
     this.els.detail.hidden = false;
@@ -528,6 +580,16 @@ export class AlertsController {
     setTimeout(() => this.map.resize(), 60);
   }
 
+  // Step through the alerts stacked at this location without moving the map.
+  cycle(delta) {
+    const n = this.detailGroup.length;
+    if (n < 2) return;
+    this.detailIndex = (this.detailIndex + delta + n) % n;
+    this.selectedId = this.detailGroup[this.detailIndex];
+    this.renderDetail();
+    this.els.detailPanel.scrollTop = 0;
+  }
+
   closeDetail() {
     if (this.els.detail.hidden) return;
     this.selectedId = null;
@@ -537,9 +599,29 @@ export class AlertsController {
   }
 
   renderDetail() {
-    // The briefing shows only the alert that was selected.
     const sel = this.alerts.find((a) => a.id === this.selectedId);
-    this.els.detailPanel.innerHTML = sel ? this.sectionHTML(sel, true) : '';
+    if (!sel) {
+      this.els.detailPanel.innerHTML = '';
+      return;
+    }
+    // When several alerts overlap this spot, top the briefing with a cycler.
+    const n = this.detailGroup.length;
+    const nav =
+      n > 1
+        ? `<div class="alert-nav">
+             <button class="alert-nav-btn" data-dir="-1" aria-label="Previous alert">‹</button>
+             <span class="alert-nav-count">${this.detailIndex + 1} / ${n} alerts here</span>
+             <button class="alert-nav-btn" data-dir="1" aria-label="Next alert">›</button>
+           </div>`
+        : '';
+    this.els.detailPanel.innerHTML = nav + this.sectionHTML(sel, true);
+    if (n > 1) {
+      this.els.detailPanel
+        .querySelectorAll('.alert-nav-btn')
+        .forEach((btn) =>
+          btn.addEventListener('click', () => this.cycle(Number(btn.dataset.dir)))
+        );
+    }
   }
 
   sectionHTML(a, selected) {
