@@ -1,13 +1,18 @@
-// renderer.js — render a radar sweep into a geographically-referenced canvas
-// that can be draped over a Leaflet map as an image overlay.
+// renderer.js — render a radar sweep as true polar cells drawn directly in the
+// map's screen space.
 //
-// The canvas spans the radar's bounding box in equirectangular (lat/lon-linear)
-// space. For every output pixel we inverse-map lat/lon back to the radar's
-// (range, azimuth) polar frame and look up the gate value — O(pixels), which is
-// fast and yields a clean, smooth field. Pixels with no echo stay transparent so
-// the basemap shows through.
+// Rather than rasterising the sweep into a fixed-resolution bitmap and letting
+// Leaflet upscale it (which turns every gate into the same axis-aligned blocky
+// square once you zoom in), we draw each gate as the quadrilateral it actually
+// is in (range, azimuth) space and project its four corners straight to screen
+// pixels. The cells therefore stay crisp and beam-aligned at any zoom, gates
+// close to the radar render small and far gates render large — i.e. their true
+// physical footprint — and a wedge at a 45° azimuth looks like a slanted polar
+// cell instead of a staircase of equal squares.
 
 const M_PER_DEG_LAT = 111320;
+const D2R = Math.PI / 180;
+const LAT2MY = Math.PI / 360; // degrees latitude → mercator-y argument
 
 // Largest range (metres) actually covered by a moment in this sweep.
 export function sweepMaxRange(sweep, moment) {
@@ -21,41 +26,41 @@ export function sweepMaxRange(sweep, moment) {
   return maxR;
 }
 
-// geo = { siteLat, siteLon, latMin, latMax, lonMin, lonMax }
+// Draw a sweep into a 2D context using a Web-Mercator screen projection.
 //
-// The output canvas is destined for a Leaflet (Web Mercator) image overlay, so
-// rows are distributed linearly in Mercator-Y rather than in latitude. If we
-// spaced rows linearly in latitude, Mercator's poleward stretch would push the
-// imagery north of the true radar site; spacing in Mercator-Y keeps the cone of
-// silence centred exactly on the site marker.
-const mercY = (latDeg) => Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
-
-export function renderGeo(canvas, sweep, product, geo) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width;
-  const h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
+// view = {
+//   scale,            // 256 * 2^zoom  (world pixels across at this zoom)
+//   offX, offY,       // pixel offset of the canvas top-left in world-pixel space
+//   w, h,             // canvas size in CSS px (for off-screen culling)
+//   siteLat, siteLon, // radar location
+//   mPerDegLon,       // metres per degree longitude at the site latitude
+// }
+//
+// screen-x(lon) = scale*(lon/360 + 0.5) - offX
+// screen-y(lat) = scale*(0.5 - ln(tan(π/4 + lat*π/360))/(2π)) - offY
+export function renderScreen(ctx, sweep, product, view) {
   if (!sweep) return;
 
   const { rgba, lo, hi, steps } = product.scale;
   const invRange = (steps - 1) / (hi - lo);
 
-  const { siteLat, siteLon, latMin, latMax, lonMin, lonMax } = geo;
-  const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
-  const D2R = Math.PI / 180;
-  const yTop = mercY(latMax);
-  const yBot = mercY(latMin);
-  const lonSpan = lonMax - lonMin;
-  const ySpan = yBot - yTop;
+  const { scale, offX, offY, w, h, siteLat, siteLon, mPerDegLon } = view;
+  const invLat = 1 / M_PER_DEG_LAT;
+  const invLon = 1 / mPerDegLon;
+  const kX = scale / 360;
+  const kY = scale / (2 * Math.PI);
+  const baseX = scale * 0.5 - offX;
+  const baseY = scale * 0.5 - offY;
+  const PI4 = Math.PI / 4;
 
-  // Project metres (east/north from the site) to canvas pixels, matching the
-  // Mercator row spacing the Leaflet overlay expects.
-  const projX = (dEast) => ((siteLon + dEast / mPerDegLon - lonMin) / lonSpan) * (w - 1);
-  const projY = (dNorth) =>
-    ((mercY(siteLat + dNorth / M_PER_DEG_LAT) - yTop) / ySpan) * (h - 1);
+  // Project a polar offset (range r, with precomputed sin/cos of an azimuth
+  // edge) to a canvas pixel.
+  const sxOf = (r, s) => kX * (siteLon + r * s * invLon) + baseX;
+  const syOf = (r, c) =>
+    baseY - kY * Math.log(Math.tan(PI4 + (siteLat + r * c * invLat) * LAT2MY));
 
-  // Beams carrying this moment, sorted by azimuth so each beam can be given a
-  // wedge that meets its neighbours (no radial gaps, no per-pixel aliasing).
+  // Beams carrying this moment, sorted by azimuth so each beam gets a wedge that
+  // meets its neighbours (no radial gaps).
   const beams = [];
   for (const rad of sweep.radials) {
     const m = rad.moments[product.moment];
@@ -65,10 +70,6 @@ export function renderGeo(canvas, sweep, product, geo) {
   const n = beams.length;
   if (!n) return;
 
-  // Render each gate as an actual polar cell (forward rendering). Consecutive
-  // gates of the same colour are merged into one quad both to cut fill count and
-  // to keep cells contiguous. A tiny azimuth/range overlap hides anti-alias
-  // seams between adjacent cells.
   for (let i = 0; i < n; i++) {
     const { az, m } = beams[i];
     let dPrev = az - beams[(i - 1 + n) % n].az;
@@ -78,14 +79,15 @@ export function renderGeo(canvas, sweep, product, geo) {
     if (dNext < 0) dNext += 360;
     if (dNext > 2 || dNext <= 0) dNext = 1;
 
-    const a0 = (az - dPrev / 2 - 0.03) * D2R;
-    const a1 = (az + dNext / 2 + 0.03) * D2R;
+    // A hair of azimuth overlap hides anti-alias seams between adjacent wedges.
+    const a0 = (az - dPrev / 2 - 0.04) * D2R;
+    const a1 = (az + dNext / 2 + 0.04) * D2R;
     const s0 = Math.sin(a0),
       c0 = Math.cos(a0),
       s1 = Math.sin(a1),
       c1 = Math.cos(a1);
 
-    const { gateCount, firstGate, gateSpacing, offset, scale, raw } = m;
+    const { gateCount, firstGate, gateSpacing, offset, scale: mScale, raw } = m;
     let runStart = -1;
     let runLi = -1;
 
@@ -93,15 +95,36 @@ export function renderGeo(canvas, sweep, product, geo) {
       if (runStart < 0) return;
       const r0 = firstGate + (runStart - 0.5) * gateSpacing;
       const r1 = firstGate + (gEnd - 0.5) * gateSpacing + gateSpacing * 0.5;
+
+      const x00 = sxOf(r0, s0),
+        y00 = syOf(r0, c0),
+        x01 = sxOf(r0, s1),
+        y01 = syOf(r0, c1),
+        x11 = sxOf(r1, s1),
+        y11 = syOf(r1, c1),
+        x10 = sxOf(r1, s0),
+        y10 = syOf(r1, c0);
+
+      // Skip cells entirely outside the canvas.
+      const minX = Math.min(x00, x01, x11, x10);
+      const maxX = Math.max(x00, x01, x11, x10);
+      const minY = Math.min(y00, y01, y11, y10);
+      const maxY = Math.max(y00, y01, y11, y10);
+      if (maxX < 0 || minX > w || maxY < 0 || minY > h) {
+        runStart = -1;
+        runLi = -1;
+        return;
+      }
+
       const o = runLi * 4;
       ctx.fillStyle = `rgba(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]},${
         rgba[o + 3] / 255
       })`;
       ctx.beginPath();
-      ctx.moveTo(projX(r0 * s0), projY(r0 * c0));
-      ctx.lineTo(projX(r0 * s1), projY(r0 * c1));
-      ctx.lineTo(projX(r1 * s1), projY(r1 * c1));
-      ctx.lineTo(projX(r1 * s0), projY(r1 * c0));
+      ctx.moveTo(x00, y00);
+      ctx.lineTo(x01, y01);
+      ctx.lineTo(x11, y11);
+      ctx.lineTo(x10, y10);
       ctx.closePath();
       ctx.fill();
       runStart = -1;
@@ -114,7 +137,7 @@ export function renderGeo(canvas, sweep, product, geo) {
         flush(g);
         continue;
       }
-      const v = (code - offset) / scale;
+      const v = (code - offset) / mScale;
       let li = Math.round((v - lo) * invRange);
       if (li < 0) li = 0;
       else if (li >= steps) li = steps - 1;

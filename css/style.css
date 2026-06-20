@@ -320,13 +320,12 @@ input:focus {
 .leaflet-control-attribution a {
   color: var(--accent-2) !important;
 }
-/* Gates are drawn as true polar cells in the canvas, so keep them crisp instead
-   of letting the browser blur the overlay when Leaflet rescales it. The forward
-   renderer already produces clean, solid cells, so nearest-neighbour scaling no
-   longer aliases into the diagonal moiré the old per-pixel sampler caused. */
-.radar-overlay {
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+/* Radar gates are drawn as true polar quads directly into this canvas in the
+   map's screen space and re-rendered on zoom/move, so they're already at the
+   display's native resolution — no Leaflet bitmap upscaling, no blocky diagonal
+   staircase. The canvas spans the viewport and must not eat map interactions. */
+.radar-canvas {
+  pointer-events: none;
 }
 
 .map-readout {

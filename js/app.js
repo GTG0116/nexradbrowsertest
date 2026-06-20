@@ -4,10 +4,104 @@
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
-import { renderGeo, sampleAt, sweepMaxRange } from './renderer.js';
+import { renderScreen, sampleAt, sweepMaxRange } from './renderer.js';
 import { AlertsController } from './alerts.js';
 
 const M_PER_DEG_LAT = 111320;
+
+// ---------------------------------------------------------------------------
+// Radar layer — draws polar cells straight into a canvas in the map's screen
+// space and re-renders on every zoom/move, so gates stay crisp and true-to-size
+// at any zoom instead of being upscaled from a fixed-resolution bitmap.
+// ---------------------------------------------------------------------------
+function createRadarLayer() {
+  const RadarLayer = L.Layer.extend({
+    initialize() {
+      this._sweep = null;
+      this._product = null;
+      this._site = null;
+      this._opacity = 0.85;
+    },
+
+    onAdd(map) {
+      this._map = map;
+      const canvas = (this._canvas = L.DomUtil.create(
+        'canvas',
+        'radar-canvas leaflet-zoom-hide'
+      ));
+      canvas.style.position = 'absolute';
+      canvas.style.pointerEvents = 'none';
+      canvas.style.opacity = this._opacity;
+      map.getPanes().overlayPane.appendChild(canvas);
+      map.on('moveend zoomend resize viewreset', this._reset, this);
+      this._reset();
+    },
+
+    onRemove(map) {
+      L.DomUtil.remove(this._canvas);
+      map.off('moveend zoomend resize viewreset', this._reset, this);
+    },
+
+    setData(sweep, product, site) {
+      this._sweep = sweep;
+      this._product = product;
+      this._site = site;
+      if (this._map) this._reset();
+    },
+
+    setOpacity(o) {
+      this._opacity = o;
+      if (this._canvas) this._canvas.style.opacity = o;
+    },
+
+    _reset() {
+      const map = this._map;
+      const canvas = this._canvas;
+      if (!map || !canvas) return;
+
+      const size = map.getSize();
+      // Oversize the canvas a little so a short pan reveals already-drawn area
+      // before the moveend redraw catches up.
+      const padX = Math.round(size.x * 0.3);
+      const padY = Math.round(size.y * 0.3);
+      const wCss = size.x + 2 * padX;
+      const hCss = size.y + 2 * padY;
+
+      const corner = map.containerPointToLayerPoint([-padX, -padY]);
+      L.DomUtil.setPosition(canvas, corner);
+
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.width = wCss + 'px';
+      canvas.style.height = hCss + 'px';
+      canvas.width = Math.round(wCss * dpr);
+      canvas.height = Math.round(hCss * dpr);
+
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, wCss, hCss);
+
+      if (!this._sweep || !this._site) return;
+
+      // screen pixel = world-pixel(latlng) - (pixelOrigin + canvasCorner)
+      const pixelOrigin = map.getPixelOrigin();
+      const scale = 256 * Math.pow(2, map.getZoom());
+      const mPerDegLon =
+        M_PER_DEG_LAT * Math.cos((this._site.lat * Math.PI) / 180);
+
+      renderScreen(ctx, this._sweep, this._product, {
+        scale,
+        offX: pixelOrigin.x + corner.x,
+        offY: pixelOrigin.y + corner.y,
+        w: wCss,
+        h: hCss,
+        siteLat: this._site.lat,
+        siteLon: this._site.lon,
+        mPerDegLon,
+      });
+    },
+  });
+  return new RadarLayer();
+}
 
 // Decode volumes off the main thread.
 const worker = new Worker(new URL('./decoder.worker.js', import.meta.url), {
@@ -44,10 +138,9 @@ const state = {
   live: false,
   liveTimer: null,
   map: null,
-  radarOverlay: null,
+  radarLayer: null,
   ringLayer: null,
   geo: null,
-  radarCanvas: null,
   alerts: null,
 };
 
@@ -92,7 +185,6 @@ function setStatus(text, busy = false) {
 // Map
 // ---------------------------------------------------------------------------
 function initMap() {
-  state.radarCanvas = document.createElement('canvas');
   const map = L.map('map', {
     zoomControl: true,
     attributionControl: true,
@@ -111,6 +203,9 @@ function initMap() {
     }
   ).addTo(map);
 
+  state.radarLayer = createRadarLayer();
+  state.radarLayer.setOpacity(state.opacity);
+  state.radarLayer.addTo(map);
   state.ringLayer = L.layerGroup().addTo(map);
   state.map = map;
 
@@ -391,57 +486,17 @@ function renderRadar() {
   const site = state.volume && state.volume.site;
 
   if (!sweep || !site) {
-    if (state.radarOverlay) {
-      state.radarOverlay.remove();
-      state.radarOverlay = null;
-    }
+    state.radarLayer.setData(null, null, null);
     state.ringLayer.clearLayers();
     return;
   }
 
   let maxR = sweepMaxRange(sweep, product.moment) || 300000;
-  const latR = maxR / M_PER_DEG_LAT;
-  const lonR = maxR / (M_PER_DEG_LAT * Math.cos((site.lat * Math.PI) / 180));
-  const geo = {
-    siteLat: site.lat,
-    siteLon: site.lon,
-    latMin: site.lat - latR,
-    latMax: site.lat + latR,
-    lonMin: site.lon - lonR,
-    lonMax: site.lon + lonR,
-  };
-  state.geo = geo;
 
-  // Resolution: render at the sweep's native gate spacing rather than a forced
-  // pixel grid. The canvas spans 2*maxR metres across, so one pixel ≈ one gate
-  // when size = 2*maxR / gateSpacing. Clamp only to keep memory/encode sane.
-  let gateSpacing = Infinity;
-  for (const rad of sweep.radials) {
-    const m = rad.moments[product.moment];
-    if (m && m.gateSpacing < gateSpacing) gateSpacing = m.gateSpacing;
-  }
-  if (!isFinite(gateSpacing) || gateSpacing <= 0) gateSpacing = 250;
-  const size = Math.max(700, Math.min(4096, Math.ceil((2 * maxR) / gateSpacing)));
-  state.radarCanvas.width = size;
-  state.radarCanvas.height = size;
-  renderGeo(state.radarCanvas, sweep, product, geo);
-  const url = state.radarCanvas.toDataURL();
-
-  const bounds = [
-    [geo.latMin, geo.lonMin],
-    [geo.latMax, geo.lonMax],
-  ];
-  if (!state.radarOverlay) {
-    state.radarOverlay = L.imageOverlay(url, bounds, {
-      opacity: state.opacity,
-      interactive: false,
-      className: 'radar-overlay',
-    }).addTo(state.map);
-  } else {
-    state.radarOverlay.setBounds(bounds);
-    state.radarOverlay.setUrl(url);
-    state.radarOverlay.setOpacity(state.opacity);
-  }
+  // Draw the sweep as true polar cells in screen space; the layer re-renders
+  // itself on zoom/move so gates stay crisp and physically sized at any scale.
+  state.radarLayer.setOpacity(state.opacity);
+  state.radarLayer.setData(sweep, product, site);
 
   drawRings(site, maxR);
 }
@@ -566,7 +621,7 @@ function init() {
   el.opacity.addEventListener('input', () => {
     state.opacity = el.opacity.value / 100;
     el.opacityVal.textContent = el.opacity.value + '%';
-    if (state.radarOverlay) state.radarOverlay.setOpacity(state.opacity);
+    if (state.radarLayer) state.radarLayer.setOpacity(state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
