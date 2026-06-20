@@ -1,194 +1,200 @@
 // app.js — application controller: ties the data, decode, and render layers to
 // the UI. Everything runs in the browser; the only network calls are the public
-// S3 list/download requests in s3.js and the Leaflet basemap tiles.
+// S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
-import { renderScreen, sampleAt, sweepMaxRange } from './renderer.js';
+import { renderRadarCanvas, sampleAt, sweepMaxRange } from './renderer.js';
 import { AlertsController } from './alerts.js';
 
 const M_PER_DEG_LAT = 111320;
 
 // ---------------------------------------------------------------------------
-// Basemap — Mapbox raster tiles, user-switchable between several styles.
+// Basemap — Mapbox GL JS vector styles. Rendering with GL (rather than raster
+// tiles) is what lets us slot the radar and alert layers *into* the basemap's
+// own layer stack, beneath its town-name and boundary layers, so place names
+// and borders always draw on top of the radar — natively, no second label set.
 // ---------------------------------------------------------------------------
 const MAPBOX_TOKEN =
   'pk.eyJ1IjoiZ3RnMDExNiIsImEiOiJjbWxsODV6NXAwNThmM2ZwdWlkYm0xNjFlIn0.vI186twXYzY45nnuV5FucQ';
 
-// key → { id: mapbox style id, label }. "Dark" keeps the original console look.
+// key → { url: mapbox style url, label }. "Dark" keeps the original console look.
 const BASEMAPS = {
-  dark: { id: 'dark-v11', label: 'Dark' },
-  satellite: { id: 'satellite-streets-v12', label: 'Satellite' },
-  streets: { id: 'streets-v12', label: 'Streets' },
-  light: { id: 'light-v11', label: 'Light' },
-  outdoors: { id: 'outdoors-v12', label: 'Outdoors' },
+  dark: { url: 'mapbox://styles/mapbox/dark-v11', label: 'Dark' },
+  satellite: { url: 'mapbox://styles/mapbox/satellite-streets-v12', label: 'Satellite' },
+  streets: { url: 'mapbox://styles/mapbox/streets-v12', label: 'Streets' },
+  light: { url: 'mapbox://styles/mapbox/light-v11', label: 'Light' },
+  outdoors: { url: 'mapbox://styles/mapbox/outdoors-v12', label: 'Outdoors' },
 };
 
-// Labels-only raster overlay (place names + administrative boundaries) from
-// CARTO. Drawn in the high-z `labels` pane so town names and borders sit on top
-// of the radar. Light-text labels for dark basemaps, dark-text for light ones.
-const LABEL_STYLES = {
-  dark: 'dark_only_labels',
-  satellite: 'dark_only_labels',
-  streets: 'rastertiles/voyager_only_labels',
-  light: 'light_only_labels',
-  outdoors: 'light_only_labels',
+// Canvas resolution for the rasterised radar. Higher = crisper when zoomed in,
+// at the cost of memory and a longer render. A still view renders once so it
+// can afford a big canvas; playback re-renders every frame, so it drops to a
+// lighter resolution to stay smooth.
+const RADAR_RES = () => {
+  const mobile = window.matchMedia('(max-width: 900px)').matches;
+  if (state.playback && state.playback.active) return mobile ? 1024 : 2048;
+  return mobile ? 2048 : 4096;
 };
 
-function makeLabelLayer(key) {
-  const style = LABEL_STYLES[key] || LABEL_STYLES.dark;
-  return L.tileLayer(
-    `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`,
-    {
-      pane: 'labels',
-      subdomains: 'abcd',
-      maxZoom: 19,
-      detectRetina: true,
-      crossOrigin: true,
-      updateWhenIdle: false,
-      updateWhenZooming: false,
-      keepBuffer: 4,
-      attribution: '&copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }
-  );
-}
-
-function makeBasemapLayer(key) {
-  const style = (BASEMAPS[key] || BASEMAPS.dark).id;
-  return L.tileLayer(
-    `https://api.mapbox.com/styles/v1/mapbox/${style}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
-    {
-      tileSize: 512,
-      zoomOffset: -1,
-      maxZoom: 19,
-      crossOrigin: true,
-      // Keep extra tiles around the viewport so panning doesn't blank the
-      // basemap, and let tiles load during the pan instead of only when idle.
-      keepBuffer: 4,
-      updateWhenIdle: false,
-      updateWhenZooming: false,
-      attribution:
-        '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }
-  );
+// Find the basemap layer to insert our overlays *below*, so the style's town
+// labels and administrative borders stay on top of the radar. We slot in just
+// under the first label (symbol) or boundary line layer.
+function firstLabelLayerId(map) {
+  const layers = map.getStyle().layers || [];
+  for (const ly of layers) {
+    if (ly.type === 'symbol') return ly.id;
+    if (ly.type === 'line' && /admin|boundary|border/i.test(ly.id)) return ly.id;
+  }
+  return undefined; // nothing matched → overlays go on top
 }
 
 // ---------------------------------------------------------------------------
-// Radar layer — draws polar cells straight into a canvas in the map's screen
-// space and re-renders on every zoom/move, so gates stay crisp and true-to-size
-// at any zoom instead of being upscaled from a fixed-resolution bitmap.
+// Overlay layers (radar, alerts, rings, radar-site dots)
+//
+// Everything is slotted into the Mapbox style's own layer stack, beneath the
+// first label/boundary layer, so town names and borders draw on top. Back to
+// front: basemap fills → alert fill → radar → alert borders → range rings →
+// site dots → [basemap labels & boundaries].
 // ---------------------------------------------------------------------------
-function createRadarLayer() {
-  const RadarLayer = L.Layer.extend({
-    initialize() {
-      this._sweep = null;
-      this._product = null;
-      this._site = null;
-      this._opacity = 0.85;
+
+// Build the dashed range-ring geometry (and skip the centre marker — the
+// current-site dot already marks the radar).
+function ringsGeoJSON(site, maxR) {
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((site.lat * Math.PI) / 180);
+  const features = [];
+  const stepKm = 100;
+  for (let km = stepKm; km * 1000 <= maxR + 1; km += stepKm) {
+    const dLat = (km * 1000) / M_PER_DEG_LAT;
+    const dLon = (km * 1000) / mPerDegLon;
+    const ring = [];
+    for (let a = 0; a <= 72; a++) {
+      const t = (a / 72) * 2 * Math.PI;
+      ring.push([site.lon + dLon * Math.sin(t), site.lat + dLat * Math.cos(t)]);
+    }
+    features.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: ring }, properties: {} });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function sitesGeoJSON() {
+  return {
+    type: 'FeatureCollection',
+    features: RADARS.map(([icao, name, lat, lon]) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+      properties: { icao, name, current: icao === state.site ? 1 : 0 },
+    })),
+  };
+}
+
+// (Re)create all overlay sources and layers in the correct order. Called on
+// every style load — including after a basemap switch, which wipes custom
+// layers — and then repopulated with whatever data we currently hold.
+function setupOverlays(map) {
+  const anchor = firstLabelLayerId(map);
+
+  if (!map.getSource('alerts'))
+    map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getSource('rings'))
+    map.addSource('rings', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getSource('sites'))
+    map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
+
+  // Translucent alert fill — sits below the radar.
+  map.addLayer(
+    {
+      id: 'alerts-fill',
+      type: 'fill',
+      source: 'alerts',
+      paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
     },
-
-    onAdd(map) {
-      this._map = map;
-      const canvas = (this._canvas = L.DomUtil.create(
-        'canvas',
-        'radar-canvas leaflet-zoom-hide'
-      ));
-      canvas.style.position = 'absolute';
-      canvas.style.pointerEvents = 'none';
-      canvas.style.opacity = this._opacity;
-      // Sit in the dedicated radar pane so the alert fill paints beneath the
-      // radar while alert borders and town labels paint above it.
-      (map.getPane('radar') || map.getPanes().overlayPane).appendChild(canvas);
-      this._onReset = () => this._scheduleReset();
-      map.on('moveend zoomend resize viewreset', this._onReset, this);
-      this._reset();
+    anchor
+  );
+  // Alert outline — above the radar (the radar layer is inserted before this).
+  map.addLayer(
+    {
+      id: 'alerts-line',
+      type: 'line',
+      source: 'alerts',
+      paint: { 'line-color': ['get', 'color'], 'line-width': 2.5, 'line-opacity': 0.95 },
     },
-
-    onRemove(map) {
-      if (this._raf) cancelAnimationFrame(this._raf);
-      L.DomUtil.remove(this._canvas);
-      map.off('moveend zoomend resize viewreset', this._onReset, this);
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'rings',
+      type: 'line',
+      source: 'rings',
+      paint: {
+        'line-color': 'rgba(120,200,255,0.45)',
+        'line-width': 1,
+        'line-dasharray': [2, 3],
+      },
     },
-
-    // Coalesce bursts of map events into a single redraw on the next frame so a
-    // rapid zoom/move can't queue several full-canvas repaints back to back.
-    _scheduleReset() {
-      if (this._raf) return;
-      this._raf = requestAnimationFrame(() => {
-        this._raf = null;
-        this._reset();
-      });
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'sites',
+      type: 'circle',
+      source: 'sites',
+      paint: {
+        'circle-radius': ['case', ['==', ['get', 'current'], 1], 6, 3.5],
+        'circle-color': ['case', ['==', ['get', 'current'], 1], '#36e0c8', 'rgba(80,140,220,0.85)'],
+        'circle-stroke-color': ['case', ['==', ['get', 'current'], 1], '#36e0c8', 'rgba(150,205,255,0.85)'],
+        'circle-stroke-width': ['case', ['==', ['get', 'current'], 1], 2, 1],
+        'circle-opacity': ['case', ['==', ['get', 'current'], 1], 1, 0.6],
+      },
     },
+    anchor
+  );
 
-    setData(sweep, product, site) {
-      this._sweep = sweep;
-      this._product = product;
-      this._site = site;
-      if (this._map) this._reset();
-    },
+  refreshSiteDots();
 
-    setOpacity(o) {
-      this._opacity = o;
-      if (this._canvas) this._canvas.style.opacity = o;
-    },
+  // Repaint the radar (if we have a sweep) into its place between fill and line.
+  if (state.shownSweep && state.shownSite)
+    setRadarSource(map, state.shownSweep, PRODUCTS[state.productId], state.shownSite);
+  if (state.alerts) state.alerts.refreshVisible();
+}
 
-    _reset() {
-      const map = this._map;
-      const canvas = this._canvas;
-      if (!map || !canvas) return;
-
-      const size = map.getSize();
-      // Oversize the canvas a touch so a pan keeps showing already-drawn radar
-      // (the pane translates with the drag) instead of flashing blank at the
-      // edges before the moveend redraw catches up. Kept modest — a large pad
-      // multiplies the pixel count (and per-frame fill cost) and was a major
-      // source of the pan/zoom lag.
-      const padX = Math.round(size.x * 0.18);
-      const padY = Math.round(size.y * 0.18);
-      const wCss = size.x + 2 * padX;
-      const hCss = size.y + 2 * padY;
-
-      const corner = map.containerPointToLayerPoint([-padX, -padY]);
-      L.DomUtil.setPosition(canvas, corner);
-
-      const dpr = window.devicePixelRatio || 1;
-      const bw = Math.round(wCss * dpr);
-      const bh = Math.round(hCss * dpr);
-      // Reallocating the backing store on every pan/zoom is expensive and adds
-      // GC churn that makes moving the map feel laggy. Only resize when the
-      // dimensions actually change; otherwise just clear and redraw.
-      if (canvas.width !== bw || canvas.height !== bh) {
-        canvas.style.width = wCss + 'px';
-        canvas.style.height = hCss + 'px';
-        canvas.width = bw;
-        canvas.height = bh;
-      }
-
-      const ctx = canvas.getContext('2d');
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, wCss, hCss);
-
-      if (!this._sweep || !this._site) return;
-
-      // screen pixel = world-pixel(latlng) - (pixelOrigin + canvasCorner)
-      const pixelOrigin = map.getPixelOrigin();
-      const scale = 256 * Math.pow(2, map.getZoom());
-      const mPerDegLon =
-        M_PER_DEG_LAT * Math.cos((this._site.lat * Math.PI) / 180);
-
-      renderScreen(ctx, this._sweep, this._product, {
-        scale,
-        offX: pixelOrigin.x + corner.x,
-        offY: pixelOrigin.y + corner.y,
-        w: wCss,
-        h: hCss,
-        siteLat: this._site.lat,
-        siteLon: this._site.lon,
-        mPerDegLon,
-      });
-    },
+// Rasterise the current sweep and (re)bind it as a georeferenced CanvasSource
+// beneath the alert outline. Mapbox then reprojects this single image on the
+// GPU as the map moves — no per-frame JS, which is the whole point of the move
+// off the old re-render-on-every-pan canvas.
+function setRadarSource(map, sweep, product, site) {
+  const maxR = sweepMaxRange(sweep, product.moment) || 300000;
+  const { coordinates } = renderRadarCanvas(
+    el.radarCanvas,
+    sweep,
+    product,
+    site,
+    maxR,
+    RADAR_RES()
+  );
+  if (map.getLayer('radar')) map.removeLayer('radar');
+  if (map.getSource('radar')) map.removeSource('radar');
+  map.addSource('radar', {
+    type: 'canvas',
+    canvas: el.radarCanvas,
+    coordinates,
+    animate: false,
   });
-  return new RadarLayer();
+  map.addLayer(
+    {
+      id: 'radar',
+      type: 'raster',
+      source: 'radar',
+      paint: { 'raster-opacity': state.opacity, 'raster-fade-duration': 0 },
+    },
+    map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
+  );
+}
+
+function clearRadarSource(map) {
+  if (!map) return;
+  if (map.getLayer('radar')) map.removeLayer('radar');
+  if (map.getSource('radar')) map.removeSource('radar');
 }
 
 // Decode volumes off the main thread.
@@ -227,14 +233,7 @@ const state = {
   liveTimer: null,
   map: null,
   basemap: 'dark',
-  baseLayer: null,
-  labelLayer: null,
-  radarLayer: null,
-  ringLayer: null,
-  ringRenderer: null,
-  fillRenderer: null,
-  aboveRenderer: null,
-  siteLayer: null,
+  styleReady: false,
   geo: null,
   alerts: null,
   shownSweep: null,
@@ -248,6 +247,7 @@ const el = {};
 
 function cacheEls() {
   el.map = $('#map');
+  el.radarCanvas = $('#radarCanvas');
   el.mapWrap = $('#mapWrap');
   el.siteSelect = $('#siteSelect');
   el.dateInput = $('#dateInput');
@@ -314,44 +314,31 @@ function setStatus(text, busy = false) {
 // Map
 // ---------------------------------------------------------------------------
 function initMap() {
-  const map = L.map('map', {
-    zoomControl: true,
-    attributionControl: true,
+  mapboxgl.accessToken = MAPBOX_TOKEN;
+  const map = new mapboxgl.Map({
+    container: 'map',
+    style: (BASEMAPS[state.basemap] || BASEMAPS.dark).url,
+    center: [-97.27, 35.33], // Mapbox is [lng, lat]
+    zoom: 6,
     minZoom: 4,
     maxZoom: 14,
-    preferCanvas: true,
-  }).setView([35.33, -97.27], 7);
-
-  // Explicit stacking order, back to front:
-  //   basemap tiles → alert fill → radar data → alert borders + range rings +
-  //   site dots → town names & boundaries.
-  //
-  // Everything that needs to be clickable above the radar (alert outlines, the
-  // site dots, range rings) shares ONE canvas in the `aboveRadar` pane: stacked
-  // full-map canvases would otherwise swallow each other's clicks, so a single
-  // renderer lets Leaflet hit-test them all together. The translucent alert
-  // fill is the only thing that paints *below* the radar.
-  map.createPane('alertFill').style.zIndex = 350;
-  map.createPane('radar').style.zIndex = 400;
-  map.createPane('aboveRadar').style.zIndex = 450;
-  const labelPane = map.createPane('labels');
-  labelPane.style.zIndex = 500;
-  labelPane.style.pointerEvents = 'none'; // let clicks fall through to the map
-
-  state.fillRenderer = L.canvas({ pane: 'alertFill' });
-  state.aboveRenderer = L.canvas({ pane: 'aboveRadar' });
-
-  state.baseLayer = makeBasemapLayer(state.basemap).addTo(map);
-  // Town names + administrative borders, drawn above the radar so place names
-  // stay legible over the reflectivity.
-  state.labelLayer = makeLabelLayer(state.basemap).addTo(map);
-
-  state.radarLayer = createRadarLayer();
-  state.radarLayer.setOpacity(state.opacity);
-  state.radarLayer.addTo(map);
-  state.ringRenderer = state.aboveRenderer;
-  state.ringLayer = L.layerGroup().addTo(map);
+    attributionControl: true,
+    // Flat Web Mercator (not the v3 default globe): the radar CanvasSource and
+    // its corner math assume a flat mercator plane.
+    projection: 'mercator',
+    // The vector basemap renders on its own; our radar/alert layers slot into
+    // its layer stack beneath the labels (set up in setupOverlays).
+    renderWorldCopies: true,
+  });
+  map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-left');
   state.map = map;
+
+  // (Re)build overlays on every style load — the initial load and after any
+  // basemap switch (setStyle drops custom layers).
+  map.on('style.load', () => {
+    state.styleReady = true;
+    setupOverlays(map);
+  });
 
   // Throttle the gate-sampling readout to one update per frame; sampleAt scans
   // every radial, so firing it on every raw mousemove event made panning while
@@ -359,7 +346,7 @@ function initMap() {
   let readoutRaf = null;
   let lastLatLng = null;
   map.on('mousemove', (e) => {
-    lastLatLng = e.latlng;
+    lastLatLng = e.lngLat;
     if (readoutRaf) return;
     readoutRaf = requestAnimationFrame(() => {
       readoutRaf = null;
@@ -370,42 +357,44 @@ function initMap() {
 
   // Right-click anywhere to jump to the NEXRAD radar nearest that point.
   map.on('contextmenu', (e) => {
-    if (e.originalEvent) e.originalEvent.preventDefault();
-    const r = nearestSite(e.latlng.lat, e.latlng.lng);
+    const r = nearestSite(e.lngLat.lat, e.lngLat.lng);
     if (!r) return;
     selectSite(r[0], r[1]);
     setStatus(`nearest radar: ${r[0]} — ${r[1]}`);
   });
+
+  // Click / hover for the radar-site dots.
+  map.on('click', 'sites', (e) => {
+    const f = e.features && e.features[0];
+    if (f) selectSite(f.properties.icao, f.properties.name);
+  });
+  for (const layer of ['sites', 'alerts-fill', 'alerts-line']) {
+    map.on('mouseenter', layer, () => (map.getCanvas().style.cursor = 'pointer'));
+    map.on('mouseleave', layer, () => (map.getCanvas().style.cursor = ''));
+  }
+
+  // Hover tooltip on the radar-site dots (the old bindTooltip equivalent).
+  const siteTip = new mapboxgl.Popup({
+    closeButton: false,
+    closeOnClick: false,
+    offset: 8,
+    className: 'site-tip',
+  });
+  map.on('mousemove', 'sites', (e) => {
+    const f = e.features && e.features[0];
+    if (!f) return;
+    siteTip.setLngLat(e.lngLat).setHTML(`${f.properties.icao} — ${f.properties.name}`).addTo(map);
+  });
+  map.on('mouseleave', 'sites', () => siteTip.remove());
 }
 
-// Swap the Mapbox basemap style, keeping the radar overlay and rings on top.
+// Swap the Mapbox basemap style. setStyle wipes custom layers, so the
+// 'style.load' handler rebuilds and repopulates the overlays afterward.
 function setBasemap(key) {
   if (!BASEMAPS[key] || !state.map) return;
   state.basemap = key;
-  const next = makeBasemapLayer(key).addTo(state.map);
-  next.on('add', () => next.bringToBack());
-  next.bringToBack();
-  if (state.baseLayer) {
-    const old = state.baseLayer;
-    // Drop the old layer once the new one has had a chance to paint, so the
-    // switch doesn't flash the empty map background.
-    next.once('load', () => state.map.removeLayer(old));
-    setTimeout(() => state.map.hasLayer(old) && state.map.removeLayer(old), 1500);
-  }
-  state.baseLayer = next;
-
-  // Swap the town-name/border overlay to one tuned for the new basemap's
-  // brightness (light text on dark maps, dark text on light maps).
-  const nextLabels = makeLabelLayer(key).addTo(state.map);
-  if (state.labelLayer) {
-    const oldLabels = state.labelLayer;
-    nextLabels.once('load', () => state.map.removeLayer(oldLabels));
-    setTimeout(
-      () => state.map.hasLayer(oldLabels) && state.map.removeLayer(oldLabels),
-      1500
-    );
-  }
-  state.labelLayer = nextLabels;
+  state.styleReady = false;
+  state.map.setStyle(BASEMAPS[key].url);
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -660,7 +649,7 @@ async function loadVolume(key) {
 
     // Centre the map on the radar the first time we get a site fix.
     if (volume.site && !state._centered) {
-      state.map.setView([volume.site.lat, volume.site.lon], 8);
+      state.map.jumpTo({ center: [volume.site.lon, volume.site.lat], zoom: 8 });
       state._centered = true;
     }
 
@@ -698,80 +687,52 @@ function displaySweep(sweep, site) {
   state.shownSweep = sweep;
   state.shownSite = site;
 
+  const map = state.map;
+  // Until the GL style has loaded its layers, just remember the sweep —
+  // setupOverlays() repaints it once the style is ready.
+  if (!map || !state.styleReady) {
+    updateInspect();
+    return;
+  }
+
   if (!sweep || !site) {
-    state.radarLayer.setData(null, null, null);
-    state.ringLayer.clearLayers();
+    clearRadarSource(map);
+    drawRings(null, 0);
     updateInspect();
     return;
   }
 
   const maxR = sweepMaxRange(sweep, product.moment) || 300000;
-  // Draw the sweep as true polar cells in screen space; the layer re-renders
-  // itself on zoom/move so gates stay crisp and physically sized at any scale.
-  state.radarLayer.setOpacity(state.opacity);
-  state.radarLayer.setData(sweep, product, site);
+  setRadarSource(map, sweep, product, site);
+  if (map.getLayer('radar')) map.setPaintProperty('radar', 'raster-opacity', state.opacity);
   drawRings(site, maxR);
   updateInspect();
 }
 
 function drawRings(site, maxR) {
-  state.ringLayer.clearLayers();
-  const renderer = state.ringRenderer;
-  L.circleMarker([site.lat, site.lon], {
-    radius: 3,
-    color: '#36e0c8',
-    weight: 2,
-    fillOpacity: 1,
-    renderer,
-  }).addTo(state.ringLayer);
-  const stepKm = 100;
-  for (let km = stepKm; km * 1000 <= maxR + 1; km += stepKm) {
-    L.circle([site.lat, site.lon], {
-      radius: km * 1000,
-      color: 'rgba(120, 200, 255, 0.25)',
-      weight: 1,
-      fill: false,
-      dashArray: '4 6',
-      renderer,
-    }).addTo(state.ringLayer);
-  }
+  const src = state.map && state.map.getSource('rings');
+  if (!src) return;
+  src.setData(site ? ringsGeoJSON(site, maxR) : { type: 'FeatureCollection', features: [] });
 }
 
 // ---------------------------------------------------------------------------
 // All-radar dots + nearest-site
+//
+// The dots live in a single GL `sites` circle layer (built in setupOverlays);
+// refreshing just repushes the source (to update which dot is the active site)
+// and bumps the touch-friendly radius on small screens.
 // ---------------------------------------------------------------------------
-function buildSiteDots() {
-  state.siteLayer = L.layerGroup().addTo(state.map);
-  for (const [icao, name, lat, lon] of RADARS) {
-    const dot = L.circleMarker([lat, lon], {
-      ...siteDotStyle(icao),
-      renderer: state.aboveRenderer,
-    });
-    dot._icao = icao;
-    dot._name = name;
-    dot.bindTooltip(`${icao} — ${name}`, { direction: 'top', offset: [0, -3] });
-    dot.on('click', () => selectSite(icao, name));
-    state.siteLayer.addLayer(dot);
-  }
-}
-
-function siteDotStyle(icao) {
-  const cur = icao === state.site;
-  // Bigger dots on touch screens so a finger can actually land on one. The
-  // marker's clickable area is its radius, so this also enlarges the hit target.
-  const mobile = mqMobile.matches;
-  return {
-    radius: cur ? (mobile ? 9 : 6) : mobile ? 7 : 3.5,
-    color: cur ? '#36e0c8' : 'rgba(150,205,255,0.85)',
-    weight: cur ? 2 : 1,
-    fillColor: cur ? '#36e0c8' : 'rgba(80,140,220,0.85)',
-    fillOpacity: cur ? 1 : 0.6,
-  };
-}
-
 function refreshSiteDots() {
-  if (!state.siteLayer) return;
-  state.siteLayer.eachLayer((dot) => dot.setStyle(siteDotStyle(dot._icao)));
+  const map = state.map;
+  if (!map || !map.getSource('sites')) return;
+  map.getSource('sites').setData(sitesGeoJSON());
+  const mobile = mqMobile.matches;
+  map.setPaintProperty('sites', 'circle-radius', [
+    'case',
+    ['==', ['get', 'current'], 1],
+    mobile ? 9 : 6,
+    mobile ? 7 : 3.5,
+  ]);
 }
 
 // Long-press anywhere on the map (touch) jumps to the nearest WSR-88D site —
@@ -794,8 +755,7 @@ function enableLongPress() {
       timer = setTimeout(() => {
         timer = null;
         const rect = container.getBoundingClientRect();
-        const pt = L.point(start.x - rect.left, start.y - rect.top);
-        const ll = state.map.containerPointToLatLng(pt);
+        const ll = state.map.unproject([start.x - rect.left, start.y - rect.top]);
         const r = nearestSite(ll.lat, ll.lng);
         if (!r) return;
         if (navigator.vibrate) navigator.vibrate(25);
@@ -950,7 +910,7 @@ function applyResponsiveLayout() {
       el.layout.appendChild(el.railRight);
     }
   }
-  setTimeout(() => state.map && state.map.invalidateSize(), 60);
+  setTimeout(() => state.map && state.map.resize(), 60);
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,7 +1129,6 @@ function isoDate(d) {
 function init() {
   cacheEls();
   initMap();
-  buildSiteDots();
   enableLongPress();
   buildSiteSelect();
   buildProductButtons();
@@ -1192,7 +1151,8 @@ function init() {
   el.opacity.addEventListener('input', () => {
     state.opacity = el.opacity.value / 100;
     el.opacityVal.textContent = el.opacity.value + '%';
-    if (state.radarLayer) state.radarLayer.setOpacity(state.opacity);
+    if (state.map && state.map.getLayer && state.map.getLayer('radar'))
+      state.map.setPaintProperty('radar', 'raster-opacity', state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
@@ -1204,8 +1164,6 @@ function init() {
     detail: el.alertDetail,
     detailPanel: el.alertDetailPanel,
     close: el.alertClose,
-    fillRenderer: state.fillRenderer,
-    borderRenderer: state.aboveRenderer,
   });
   state.alerts.start();
   el.alertsToggle.addEventListener('click', () => {
@@ -1247,8 +1205,8 @@ function init() {
   mqMobile.addEventListener('change', applyResponsiveLayout);
   applyResponsiveLayout();
 
-  window.addEventListener('resize', () => state.map && state.map.invalidateSize());
-  setTimeout(() => state.map.invalidateSize(), 100);
+  window.addEventListener('resize', () => state.map && state.map.resize());
+  setTimeout(() => state.map.resize(), 100);
 
   tickClock();
   setInterval(tickClock, 1000);

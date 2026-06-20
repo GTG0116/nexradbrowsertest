@@ -1,7 +1,7 @@
 // alerts.js — live NWS watches/warnings layer.
 //
 // Pulls the active alert feed from the public api.weather.gov endpoint, draws
-// the storm-based polygons over the Leaflet map, and (because the request asked
+// the storm-based polygons over the map, and (because the request asked
 // for "only the alerts in the screenshot") shows only the alerts whose polygon
 // actually intersects the current map view in both the side list and on the
 // map. Clicking an alert opens a full-screen briefing panel.
@@ -371,22 +371,23 @@ export class AlertsController {
     this.map = map;
     this.els = els; // { listPanel, list, detail, detailPanel, close }
     this.alerts = []; // [{ id, feature, cls, bounds }]
-    this.layers = new Map(); // id -> { fill, border } (only the visible ones)
-    // Two render targets, supplied by the app: the translucent fill paints into
-    // a pane beneath the radar, while the coloured outline shares the
-    // above-radar canvas (with the site dots and rings) so the warning boundary
-    // stays sharp on top of the reflectivity and every layer stays clickable.
-    this.fillRenderer = els.fillRenderer || L.canvas({ pane: 'alertFill' });
-    this.borderRenderer = els.borderRenderer || L.canvas({ pane: 'aboveRadar' });
-    this.fillGroup = L.layerGroup().addTo(map);
-    this.borderGroup = L.layerGroup().addTo(map);
     this.enabled = true;
     this.selectedId = null;
 
-    // Debounce so a pan/zoom doesn't rebuild every polygon layer mid-gesture,
-    // which is a big contributor to the map feeling laggy while moving.
+    // The polygons are drawn by the GL `alerts-fill` (below radar) and
+    // `alerts-line` (above radar) layers that app.js inserts into the basemap
+    // stack; this controller just feeds the `alerts` source the features in
+    // view and opens the briefing when one is clicked.
+    const openFromEvent = (e) => {
+      const f = e.features && e.features[0];
+      if (f) this.openDetail(f.properties.id);
+    };
+    map.on('click', 'alerts-fill', openFromEvent);
+    map.on('click', 'alerts-line', openFromEvent);
+
+    // Debounce so a pan/zoom doesn't rebuild the feature set mid-gesture.
     this._refreshTimer = null;
-    map.on('moveend zoomend', () => {
+    map.on('moveend', () => {
       clearTimeout(this._refreshTimer);
       this._refreshTimer = setTimeout(() => this.refreshVisible(), 120);
     });
@@ -396,12 +397,17 @@ export class AlertsController {
     });
   }
 
+  // Push a GeoJSON FeatureCollection to the `alerts` source (no-op until the
+  // style/layers exist).
+  _setSourceData(features) {
+    const src = this.map.getSource && this.map.getSource('alerts');
+    if (src) src.setData({ type: 'FeatureCollection', features });
+  }
+
   setEnabled(on) {
     this.enabled = on;
     if (!on) {
-      this.fillGroup.clearLayers();
-      this.borderGroup.clearLayers();
-      this.layers.clear();
+      this._setSourceData([]);
       this.els.list.innerHTML = '<div class="empty">Alerts hidden.</div>';
       this.closeDetail();
     } else {
@@ -445,11 +451,18 @@ export class AlertsController {
   }
 
   visibleAlerts() {
+    if (!this.map.getBounds) return [];
     const b = this.map.getBounds();
+    const w = b.getWest(),
+      s = b.getSouth(),
+      e = b.getEast(),
+      n = b.getNorth();
     return this.alerts
       .filter((a) => {
-        const ab = L.latLngBounds([a.bounds[0], a.bounds[1]], [a.bounds[2], a.bounds[3]]);
-        return b.intersects(ab);
+        // a.bounds = [minLat, minLon, maxLat, maxLon]; reject when the alert's
+        // bbox is entirely outside the current view.
+        const [minLat, minLon, maxLat, maxLon] = a.bounds;
+        return !(maxLon < w || minLon > e || maxLat < s || minLat > n);
       })
       .sort(
         (x, y) =>
@@ -461,52 +474,16 @@ export class AlertsController {
   refreshVisible() {
     if (!this.enabled) return;
     const visible = this.visibleAlerts();
-    const wantIds = new Set(visible.map((a) => a.id));
-
-    // Drop polygons that scrolled out of view.
-    for (const [id, pair] of this.layers) {
-      if (!wantIds.has(id)) {
-        this.fillGroup.removeLayer(pair.fill);
-        this.borderGroup.removeLayer(pair.border);
-        this.layers.delete(id);
-      }
-    }
-    // Add polygons that scrolled into view, as a fill (under the radar) and a
-    // separate outline (over the radar). Both open the briefing on click.
-    for (const a of visible) {
-      if (this.layers.has(a.id)) continue;
-      const fill = L.geoJSON(a.feature, {
-        renderer: this.fillRenderer,
-        interactive: false, // clicks are handled by the outline above the radar
-        style: () => ({
-          stroke: false,
-          fill: true,
-          fillColor: a.cls.color,
-          fillOpacity: 0.18,
-        }),
-      });
-      const border = L.geoJSON(a.feature, {
-        renderer: this.borderRenderer,
-        style: () => ({
-          color: a.cls.color,
-          weight: 2.5,
-          opacity: 0.95,
-          // A fully transparent fill keeps the whole polygon interior clickable
-          // (so a tap anywhere in the warning opens it) while the visible fill
-          // comes from the layer beneath the radar.
-          fill: true,
-          fillOpacity: 0,
-        }),
-      });
-      border.on('click', () => this.openDetail(a.id));
-      fill.addTo(this.fillGroup);
-      border.addTo(this.borderGroup);
-      this.layers.set(a.id, { fill, border });
-    }
+    // Feed the GL source one feature per visible alert, carrying its colour and
+    // id so the fill/line layers can style and the click handler can identify
+    // it. Most-significant alerts are pushed last so they render on top.
+    const features = [...visible].reverse().map((a) => ({
+      type: 'Feature',
+      geometry: a.feature.geometry,
+      properties: { id: a.id, color: a.cls.color, display: a.cls.display },
+    }));
+    this._setSourceData(features);
     this.renderList(visible);
-    if (this.selectedId && !wantIds.has(this.selectedId)) {
-      // keep detail open; selected alert may still be valid even if off-view
-    }
   }
 
   renderList(visible) {
@@ -535,13 +512,20 @@ export class AlertsController {
     document.querySelector('.app').classList.add('alert-mode');
     this.els.detail.hidden = false;
     this.renderDetail();
-    // Zoom the map to the selected alert.
+    // Zoom the map to the selected alert. bounds = [minLat, minLon, maxLat,
+    // maxLon]; Mapbox fitBounds wants [[w,s],[e,n]] in [lng,lat] order.
     const sel = this.alerts.find((a) => a.id === id);
     if (sel) {
-      const b = L.latLngBounds([sel.bounds[0], sel.bounds[1]], [sel.bounds[2], sel.bounds[3]]);
-      this.map.fitBounds(b.pad(0.6));
+      const [minLat, minLon, maxLat, maxLon] = sel.bounds;
+      this.map.fitBounds(
+        [
+          [minLon, minLat],
+          [maxLon, maxLat],
+        ],
+        { padding: 80, maxZoom: 11 }
+      );
     }
-    setTimeout(() => this.map.invalidateSize(), 60);
+    setTimeout(() => this.map.resize(), 60);
   }
 
   closeDetail() {
@@ -549,7 +533,7 @@ export class AlertsController {
     this.selectedId = null;
     this.els.detail.hidden = true;
     document.querySelector('.app').classList.remove('alert-mode');
-    setTimeout(() => this.map.invalidateSize(), 60);
+    setTimeout(() => this.map.resize(), 60);
   }
 
   renderDetail() {
