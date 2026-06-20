@@ -240,7 +240,13 @@ export class AlertsController {
     this.enabled = true;
     this.selectedId = null;
 
-    map.on('moveend zoomend', () => this.refreshVisible());
+    // Debounce so a pan/zoom doesn't rebuild every polygon layer mid-gesture,
+    // which is a big contributor to the map feeling laggy while moving.
+    this._refreshTimer = null;
+    map.on('moveend zoomend', () => {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = setTimeout(() => this.refreshVisible(), 120);
+    });
     els.close.addEventListener('click', () => this.closeDetail());
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.closeDetail();
@@ -265,10 +271,14 @@ export class AlertsController {
       const features = await fetchActiveAlerts();
       this.alerts = features
         .filter((f) => f.geometry) // storm-based polygons only
-        // Hide areal/river Flood Warnings — they clutter the map — while keeping
-        // Flash Flood Warnings, the storm-scale alerts that matter next to the
-        // radar. ("Flash Flood Warning" is a distinct event name, so it stays.)
-        .filter((f) => (f.properties && f.properties.event) !== 'Flood Warning')
+        // Hide areal/river Flood Warnings and the low-end Flood Advisory tier —
+        // they clutter the map — while keeping Flash Flood Warnings, the
+        // storm-scale alerts that matter next to the radar. ("Flash Flood
+        // Warning" is a distinct event name, so it stays.)
+        .filter((f) => {
+          const ev = (f.properties && f.properties.event) || '';
+          return ev !== 'Flood Warning' && ev !== 'Flood Advisory';
+        })
         .map((f) => ({
           id: f.properties.id || f.id,
           feature: f,
