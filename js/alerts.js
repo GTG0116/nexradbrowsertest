@@ -265,6 +265,10 @@ export class AlertsController {
       const features = await fetchActiveAlerts();
       this.alerts = features
         .filter((f) => f.geometry) // storm-based polygons only
+        // Hide river/areal Flood Warnings — they clutter the map — while keeping
+        // Flash Flood Warnings, the storm-scale alerts that matter next to the
+        // radar. (Note: "Flash Flood Warning" !== "Flood Warning", so it stays.)
+        .filter((f) => (f.properties && f.properties.event) !== 'Flood Warning')
         .map((f) => ({
           id: f.properties.id || f.id,
           feature: f,
