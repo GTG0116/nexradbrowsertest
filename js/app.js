@@ -3,7 +3,7 @@
 // S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
-import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals } from './products.js';
+import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals, reflectivityProduct } from './products.js';
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
@@ -12,7 +12,16 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScen
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
+import { MODELS, MODEL_PRODUCTS, MODEL_ORDER, listModels, loadModel } from './models.js';
 import { createGridLayer } from './gridLayer.js';
+
+// Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
+// radar reflectivity color table, so all reflectivity is colored identically and
+// a user-loaded reflectivity .pal applies everywhere. Resolved at use, never
+// cached, so it always reflects REF's current (possibly custom) scale.
+function resolveGridProduct(p) {
+  return p && p.reflectivity ? reflectivityProduct(p) : p;
+}
 
 const M_PER_DEG_LAT = 111320;
 
@@ -160,6 +169,7 @@ function setupOverlays(map) {
     setRadarSource(map, state.shownSweep, PRODUCTS[state.productId], state.shownSite);
   else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
   else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
+  else if (state.mode === 'models' && state.models.grid) renderModels();
   if (state.alerts) state.alerts.refreshVisible();
 }
 
@@ -230,7 +240,7 @@ const state = {
   inspect: false,
   playback: null,
 
-  // Source mode: 'radar' | 'satellite' | 'mrms'.
+  // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
   // Satellite (GOES ABI) state.
   sat: {
@@ -245,6 +255,15 @@ const state = {
   },
   // MRMS state.
   mrms: {
+    productId: 'REFC',
+    frames: [],
+    frameKey: null,
+    grid: null,
+    layer: null,
+  },
+  // Weather-model state (HRRR for now).
+  models: {
+    modelKey: 'hrrr',
     productId: 'REFC',
     frames: [],
     frameKey: null,
@@ -296,6 +315,8 @@ function cacheEls() {
   el.conusViewField = $('#conusViewField');
   el.conusViewSelect = $('#conusViewSelect');
   el.mrmsFields = $('#mrmsFields');
+  el.modelFields = $('#modelFields');
+  el.modelSelect = $('#modelSelect');
   el.volumeTitle = $('#volumeTitle');
   el.tiltPanel = $('#tiltPanel');
   el.satOptsPanel = $('#satOptsPanel');
@@ -505,6 +526,7 @@ function buildSiteSelect() {
 function buildProductButtons() {
   if (state.mode === 'satellite') return buildSatProductButtons();
   if (state.mode === 'mrms') return buildMrmsProductButtons();
+  if (state.mode === 'models') return buildModelProductButtons();
   el.productButtons.innerHTML = '';
   for (const id of PRODUCT_ORDER) {
     const p = PRODUCTS[id];
@@ -571,6 +593,7 @@ function buildVolumeList() {
 function buildLegend() {
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
+  if (state.mode === 'models') return buildModelLegend();
   const p = PRODUCTS[state.productId];
   el.legend.innerHTML = legendHTML(p, p.scale);
 }
@@ -648,15 +671,22 @@ async function loadPalFile(file) {
     store[targetId] = { name: file.name, text };
     writePalStore(store);
 
-    state.productId = targetId;
-    document
-      .querySelectorAll('.product-btn')
-      .forEach((b) => b.classList.toggle('active', b.dataset.id === targetId));
     el.palName.textContent = `${file.name} → ${targetId}`;
-    buildLegend();
-    buildTiltList();
-    renderRadar();
-    updateMeta();
+    // Update the radar product menu only while radar is the active source; in a
+    // grid mode the product buttons belong to MRMS/models, not the radar set.
+    if (state.mode === 'radar') {
+      state.productId = targetId;
+      document
+        .querySelectorAll('.product-btn')
+        .forEach((b) => b.classList.toggle('active', b.dataset.id === targetId));
+      buildLegend();
+      buildTiltList();
+      renderRadar();
+      updateMeta();
+    } else {
+      // A reflectivity .pal recolors MRMS/models too — repaint the live grid.
+      refreshGridReflectivity();
+    }
     setStatus(`palette “${file.name}” applied to ${targetId}`);
   } catch (err) {
     setStatus(`pal error: ${err.message}`);
@@ -695,8 +725,16 @@ function resetPalettes() {
   writePalStore({}); // forget the saved palettes too
   el.palName.textContent = '';
   buildLegend();
-  renderRadar();
+  if (state.mode === 'radar') renderRadar();
+  else refreshGridReflectivity();
   setStatus('color tables reset to defaults');
+}
+
+// Repaint the live MRMS/model grid after the shared reflectivity table changes
+// (a .pal load or reset), so grid reflectivity tracks the radar color table.
+function refreshGridReflectivity() {
+  if (state.mode === 'mrms' && state.mrms.grid) { buildMrmsLegend(); renderMrms(); }
+  else if (state.mode === 'models' && state.models.grid) { buildModelLegend(); renderModels(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -837,13 +875,15 @@ function applyModePanels() {
   el.siteField.hidden = state.mode !== 'radar';
   el.satFields.hidden = state.mode !== 'satellite';
   el.mrmsFields.hidden = state.mode !== 'mrms';
+  if (el.modelFields) el.modelFields.hidden = state.mode !== 'models';
   el.tiltPanel.hidden = state.mode !== 'radar';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
     state.mode === 'radar' ? 'Volume scans'
-    : state.mode === 'satellite' ? 'Satellite scans' : 'MRMS frames';
+    : state.mode === 'satellite' ? 'Satellite scans'
+    : state.mode === 'mrms' ? 'MRMS frames' : 'Model runs';
   document.querySelectorAll('.mode-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
 }
@@ -855,6 +895,7 @@ function setMode(mode) {
   if (mode !== 'radar') clearRadarSource(state.map);
   if (mode !== 'satellite') clearSatellite();
   if (mode !== 'mrms') clearMrms();
+  if (mode !== 'models') clearModels();
   applyModePanels();
   buildProductButtons();
   buildLegend();
@@ -869,6 +910,8 @@ function setMode(mode) {
     loadSatScenes();
   } else if (mode === 'mrms') {
     loadMrmsList();
+  } else if (mode === 'models') {
+    loadModelList();
   }
   updateMeta();
 }
@@ -877,7 +920,8 @@ function setMode(mode) {
 function refreshActive() {
   if (state.mode === 'radar') return loadVolumeList();
   if (state.mode === 'satellite') return loadSatScenes();
-  return loadMrmsList();
+  if (state.mode === 'mrms') return loadMrmsList();
+  return loadModelList();
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,13 +1230,157 @@ function renderMrms() {
   const grid = state.mrms.grid;
   if (!grid) { clearMrms(); return; }
   setMrmsSource(map);
-  state.mrms.layer.setGrid(grid, grid.product);
+  state.mrms.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.mrms.layer.setOpacity(state.opacity);
 }
 
 function buildMrmsLegend() {
-  const p = MRMS_PRODUCTS[state.mrms.productId];
+  const p = resolveGridProduct(MRMS_PRODUCTS[state.mrms.productId]);
   el.legend.innerHTML = legendHTML(p, p.scale);
+}
+
+// ---------------------------------------------------------------------------
+// Weather models (HRRR)
+//
+// Models reuse the lat/lon grid layer and the time-list / opacity / playback
+// chrome. A model field is decoded straight from a Range request against the
+// HRRR GRIB2 on S3 (see models.js), resampled from its Lambert grid to lat/lon,
+// then drawn through the same GPU path as MRMS.
+// ---------------------------------------------------------------------------
+function initModelSelects() {
+  if (!el.modelSelect) return;
+  el.modelSelect.innerHTML = '';
+  for (const [key, m] of Object.entries(MODELS)) {
+    const o = document.createElement('option');
+    o.value = key; o.textContent = m.label;
+    if (key === state.models.modelKey) o.selected = true;
+    el.modelSelect.appendChild(o);
+  }
+  el.modelSelect.addEventListener('change', () => {
+    state.models.modelKey = el.modelSelect.value;
+    state._forceLatest = true;
+    loadModelList();
+  });
+}
+
+function buildModelProductButtons() {
+  el.productButtons.innerHTML = '';
+  for (const id of MODEL_ORDER) {
+    const p = MODEL_PRODUCTS[id];
+    const btn = document.createElement('button');
+    btn.className = 'product-btn';
+    btn.dataset.id = id;
+    btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+    if (id === state.models.productId) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      state.models.productId = id;
+      document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      buildModelLegend();
+      loadModelList(); // each field is pulled separately from the GRIB index
+    });
+    el.productButtons.appendChild(btn);
+  }
+}
+
+function buildModelList() {
+  el.volumeList.innerHTML = '';
+  if (!state.models.frames.length) {
+    el.volumeList.innerHTML = '<div class="empty">No model runs found for this day.</div>';
+    return;
+  }
+  [...state.models.frames].reverse().forEach((v) => {
+    const btn = document.createElement('button');
+    btn.className = 'vol-btn';
+    if (v.key === state.models.frameKey) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.addEventListener('click', () => loadModelFrame(v.key));
+    el.volumeList.appendChild(btn);
+  });
+}
+
+async function loadModelList() {
+  if (state.mode !== 'models') return;
+  setStatus('listing HRRR…', true);
+  buildModelList();
+  try {
+    const when = state.live ? new Date() : state.date;
+    const frames = await listModels(state.models.modelKey, state.models.productId, when);
+    state.models.frames = frames;
+    buildModelList();
+    setStatus(`${frames.length} model runs`);
+    if (!frames.length) return;
+    const latest = frames[frames.length - 1].key;
+    if (state._forceLatest || !state.models.grid || state.live) {
+      state._forceLatest = false;
+      if (latest !== state.models.frameKey) loadModelFrame(latest);
+    }
+  } catch (e) {
+    setStatus(`HRRR list error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+async function loadModelFrame(key) {
+  const frame = state.models.frames.find((f) => f.key === key);
+  if (!frame) return;
+  state.models.frameKey = key;
+  buildModelList();
+  setStatus('downloading HRRR…', true);
+  el.progress.style.width = '0%';
+  el.progress.classList.add('show');
+  try {
+    const grid = await loadModel(state.models.modelKey, state.models.productId, frame, (p) => {
+      el.progress.style.width = Math.round(p * 100) + '%';
+    });
+    setStatus('decoding HRRR…', true);
+    el.decoding.classList.add('show');
+    state.models.grid = grid;
+    renderModels();
+    setStatus(`HRRR ${grid.product.name} loaded`);
+  } catch (e) {
+    setStatus(`HRRR error: ${e.message}`);
+    console.error(e);
+  } finally {
+    el.progress.classList.remove('show');
+    el.decoding.classList.remove('show');
+  }
+}
+
+function setModelSource(map) {
+  if (!state.models.layer) state.models.layer = createGridLayer('models');
+  if (!map.getLayer('models'))
+    map.addLayer(state.models.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+}
+
+function clearModels() {
+  if (state.models.layer) state.models.layer.clear();
+}
+
+function renderModels() {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  const grid = state.models.grid;
+  if (!grid) { clearModels(); return; }
+  setModelSource(map);
+  state.models.layer.setGrid(grid, resolveGridProduct(grid.product));
+  state.models.layer.setOpacity(state.opacity);
+}
+
+function buildModelLegend() {
+  const p = resolveGridProduct(MODEL_PRODUCTS[state.models.productId]);
+  el.legend.innerHTML = legendHTML(p, p.scale);
+}
+
+function sampleModelAt(lat, lon) {
+  const grid = state.models.grid;
+  if (!grid) return null;
+  const p = resolveGridProduct(grid.product);
+  const i = Math.floor((lon - grid.lon1) / grid.di);
+  const j = Math.floor((grid.lat1 - lat) / grid.dj);
+  if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
+  const v = grid.values[j * grid.ni + i];
+  if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no echo', sub: p.id };
+  return { main: fmtValue(p, v), sub: p.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1461,7 @@ function toggleInspect(on) {
 function sampleActive(lat, lon) {
   if (state.mode === 'satellite') return sampleSatAt(lat, lon);
   if (state.mode === 'mrms') return sampleMrmsAt(lat, lon);
+  if (state.mode === 'models') return sampleModelAt(lat, lon);
   return sampleRadarAt(lat, lon);
 }
 
@@ -1310,7 +1499,7 @@ function sampleSatAt(lat, lon) {
 function sampleMrmsAt(lat, lon) {
   const grid = state.mrms.grid;
   if (!grid) return null;
-  const p = grid.product;
+  const p = resolveGridProduct(grid.product);
   const i = Math.floor((lon - grid.lon1) / grid.di);
   const j = Math.floor((grid.lat1 - lat) / grid.dj);
   if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
@@ -1666,6 +1855,7 @@ function init() {
 
   // Source-mode switch + satellite controls.
   initSatSelects();
+  initModelSelects();
   applyModePanels();
   el.modeSwitch.addEventListener('click', (e) => {
     const btn = e.target.closest('.mode-btn');
@@ -1689,6 +1879,7 @@ function init() {
     if (state.radarLayer) state.radarLayer.setOpacity(state.opacity);
     if (state.sat.layer) state.sat.layer.setOpacity(state.opacity);
     if (state.mrms.layer) state.mrms.layer.setOpacity(state.opacity);
+    if (state.models.layer) state.models.layer.setOpacity(state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);

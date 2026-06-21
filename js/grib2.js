@@ -103,16 +103,120 @@ async function decodePNG(png) {
   return { W, H, samples: out };
 }
 
-// Decode a GRIB2 message (optionally gzipped) into a lat/lon grid of physical
-// values. Returns { ni, nj, lon1, lat1, di, dj, scanMode, values: Float32Array }
-// with missing entries set to NaN.
+// GRIB2 stores signed integers in sign-magnitude form (the high bit is the sign,
+// the remaining bits the magnitude) — NOT two's complement. So a raw 0x8004 in a
+// 16-bit field is −4, not −32764. Every signed template value goes through here.
+function signMag(raw, nbits) {
+  const signBit = 1 << (nbits - 1);
+  return raw & signBit ? -(raw & (signBit - 1)) : raw;
+}
+function readSignMag(dv, off, nbytes) {
+  let raw = 0;
+  for (let k = 0; k < nbytes; k++) raw = raw * 256 + dv.getUint8(off + k);
+  return signMag(raw, nbytes * 8);
+}
+
+// A continuous MSB-first bit reader over a byte buffer, used by the complex
+// packing decoder. `align()` advances to the next byte boundary — NCEP's encoder
+// byte-aligns the group-reference, group-width and group-length sub-arrays.
+class BitReader {
+  constructor(buf) { this.buf = buf; this.pos = 0; }
+  read(nbits) {
+    let v = 0, pos = this.pos;
+    const buf = this.buf;
+    for (let k = 0; k < nbits; k++) {
+      v = v * 2 + ((buf[pos >> 3] >> (7 - (pos & 7))) & 1);
+      pos++;
+    }
+    this.pos = pos;
+    return v;
+  }
+  readSigned(nbits) { return signMag(this.read(nbits), nbits); }
+  align() { if (this.pos & 7) this.pos = (this.pos + 7) & ~7; }
+}
+
+// Complex packing (DRT 5.2) and complex packing with spatial differencing
+// (DRT 5.3) — the NCEP scheme used by HRRR and most other model output. The
+// field is split into NG groups; each group carries its own reference value and
+// bit width, and (for 5.3) the values are 1st- or 2nd-order spatial differences
+// that we integrate back. Decodes straight into the destination `values` array.
+function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values) {
+  const g32 = (o) => dv.getUint32(p5 + o);
+  const nbitsRef = dv.getUint8(p5 + 19);          // bits per group reference value
+  const ng = g32(31);                             // number of groups
+  const refGW = dv.getUint8(p5 + 35);             // group-width reference
+  const bitsGW = dv.getUint8(p5 + 36);            // bits per group width
+  const refGL = g32(37);                          // group-length reference
+  const incGL = dv.getUint8(p5 + 41);             // group-length increment
+  const lastGL = g32(42);                         // true length of the last group
+  const bitsGL = dv.getUint8(p5 + 46);            // bits per scaled group length
+  const order = drt === 3 ? dv.getUint8(p5 + 47) : 0;       // spatial-diff order
+  const nbytesd = drt === 3 ? dv.getUint8(p5 + 48) : 0;     // octets per extra descriptor
+
+  const br = new BitReader(dataSection);
+
+  // Spatial-differencing extras come first: the first `order` field values, then
+  // the overall minimum of the differences — each a sign-magnitude integer.
+  let ival1 = 0, ival2 = 0, minsd = 0;
+  if (drt === 3 && nbytesd > 0) {
+    const nbitsd = nbytesd * 8;
+    ival1 = br.readSigned(nbitsd);
+    if (order === 2) ival2 = br.readSigned(nbitsd);
+    minsd = br.readSigned(nbitsd);
+  }
+
+  // Group references, then widths, then lengths — each sub-array byte-aligned.
+  const refs = new Int32Array(ng);
+  for (let i = 0; i < ng; i++) refs[i] = br.read(nbitsRef);
+  br.align();
+  const widths = new Int32Array(ng);
+  for (let i = 0; i < ng; i++) widths[i] = refGW + (bitsGW ? br.read(bitsGW) : 0);
+  br.align();
+  const lengths = new Int32Array(ng);
+  for (let i = 0; i < ng; i++) lengths[i] = refGL + (bitsGL ? br.read(bitsGL) : 0) * incGL;
+  lengths[ng - 1] = lastGL;
+  br.align();
+
+  // The packed values: each group contributes `length` values of `width` bits,
+  // each offset by the group reference. A zero-width group is a run of its ref.
+  const X = new Float64Array(npts);
+  let k = 0;
+  for (let gi = 0; gi < ng; gi++) {
+    const w = widths[gi], L = lengths[gi], ref = refs[gi];
+    if (w === 0) {
+      for (let n = 0; n < L && k < npts; n++) X[k++] = ref;
+    } else {
+      for (let n = 0; n < L && k < npts; n++) X[k++] = ref + br.read(w);
+    }
+  }
+
+  // Undo the spatial differencing, then scale to physical units.
+  if (drt === 3) {
+    if (order === 1) {
+      X[0] = ival1;
+      for (let n = 1; n < npts; n++) X[n] = X[n] + minsd + X[n - 1];
+    } else if (order === 2) {
+      X[0] = ival1; X[1] = ival2;
+      for (let n = 2; n < npts; n++) X[n] = X[n] + minsd + 2 * X[n - 1] - X[n - 2];
+    }
+  }
+  for (let n = 0; n < npts; n++) values[n] = (R + X[n] * scaleE) / scaleD;
+}
+
+// Decode a GRIB2 message (optionally gzipped) into a grid of physical values.
+// For a plain lat/lon grid (GDT 3.0) returns
+//   { proj:'latlon', ni, nj, lon1, lat1, di, dj, scanMode, values }
+// For a Lambert Conformal grid (GDT 3.30, used by HRRR) returns
+//   { proj:'lambert', ni, nj, la1, lo1, lov, lad, latin1, latin2, dx, dy,
+//     shape, scanMode, values }
+// `values` is a Float32Array in scan order, NaN where data is missing.
 export async function decodeGrib2(input) {
   const b = await gunzip(input instanceof Uint8Array ? input : new Uint8Array(input));
   const dv = new DataView(b.buffer, b.byteOffset, b.length);
   if (String.fromCharCode(b[0], b[1], b[2], b[3]) !== 'GRIB') throw new Error('not GRIB2');
 
-  let ni = 0, nj = 0, lon1 = 0, lat1 = 0, di = 0, dj = 0, scanMode = 0;
-  let R = 0, E = 0, D = 0, bits = 0, drt = -1, npts = 0;
+  let grid = null;
+  let R = 0, E = 0, D = 0, bits = 0, drt = -1, npts = 0, p5 = 0;
   let dataSection = null;
 
   let p = 16; // after section 0
@@ -121,58 +225,75 @@ export async function decodeGrib2(input) {
     const len = dv.getUint32(p);
     const sec = b[p + 4];
     if (sec === 3) {
-      ni = dv.getUint32(p + 30);
-      nj = dv.getUint32(p + 34);
-      lat1 = dv.getInt32(p + 46) / 1e6;
-      lon1 = dv.getInt32(p + 50) / 1e6;
-      if (lon1 > 180) lon1 -= 360;
-      di = dv.getUint32(p + 63) / 1e6;
-      dj = dv.getUint32(p + 67) / 1e6;
-      scanMode = b[p + 71];
+      const gdt = dv.getUint16(p + 12); // grid definition template number
+      const ni = dv.getUint32(p + 30);
+      const nj = dv.getUint32(p + 34);
+      if (gdt === 30) {
+        // Lambert Conformal Conic (HRRR & most NCEP CONUS model grids).
+        grid = {
+          proj: 'lambert',
+          ni, nj,
+          shape: dv.getUint8(p + 14),
+          la1: readSignMag(dv, p + 38, 4) / 1e6,
+          lo1: readSignMag(dv, p + 42, 4) / 1e6,
+          lad: readSignMag(dv, p + 47, 4) / 1e6,
+          lov: readSignMag(dv, p + 51, 4) / 1e6,
+          dx: dv.getUint32(p + 55) / 1e3,   // metres
+          dy: dv.getUint32(p + 59) / 1e3,
+          scanMode: dv.getUint8(p + 64),
+          latin1: readSignMag(dv, p + 65, 4) / 1e6,
+          latin2: readSignMag(dv, p + 69, 4) / 1e6,
+        };
+        if (grid.lo1 > 180) grid.lo1 -= 360;
+        if (grid.lov > 180) grid.lov -= 360;
+      } else {
+        // Plain lat/lon grid (GDT 3.0) — MRMS and similar.
+        let lon1 = readSignMag(dv, p + 50, 4) / 1e6;
+        if (lon1 > 180) lon1 -= 360;
+        grid = {
+          proj: 'latlon',
+          ni, nj, lon1,
+          lat1: readSignMag(dv, p + 46, 4) / 1e6,
+          di: dv.getUint32(p + 63) / 1e6,
+          dj: dv.getUint32(p + 67) / 1e6,
+          scanMode: dv.getUint8(p + 71),
+        };
+      }
     } else if (sec === 5) {
+      p5 = p;
       npts = dv.getUint32(p + 5);
       drt = dv.getUint16(p + 9);
       R = dv.getFloat32(p + 11);
-      E = dv.getInt16(p + 15);
-      D = dv.getInt16(p + 17);
+      E = readSignMag(dv, p + 15, 2);
+      D = readSignMag(dv, p + 17, 2);
       bits = b[p + 19];
     } else if (sec === 7) {
       dataSection = b.subarray(p + 5, p + len);
     }
     p += len;
   }
+  if (!grid) throw new Error('GRIB2: no grid definition section');
 
   const scaleE = Math.pow(2, E);
   const scaleD = Math.pow(10, D);
-  const values = new Float32Array(ni * nj);
+  const values = new Float32Array(grid.ni * grid.nj);
 
   if (drt === 41 || drt === 40) {
     const { samples } = await decodePNG(dataSection);
-    for (let i = 0; i < values.length; i++) {
-      const Y = (R + samples[i] * scaleE) / scaleD;
-      values[i] = Y;
-    }
+    for (let i = 0; i < values.length; i++) values[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 0) {
     // simple packing: big-endian bit field of `bits` per point.
-    const data = dataSection;
-    let bitPos = 0;
-    const read = (nbits) => {
-      let v = 0;
-      for (let k = 0; k < nbits; k++) {
-        const byte = data[(bitPos >> 3)];
-        const bit = (byte >> (7 - (bitPos & 7))) & 1;
-        v = (v << 1) | bit;
-        bitPos++;
-      }
-      return v;
-    };
+    const br = new BitReader(dataSection);
     for (let i = 0; i < values.length; i++) {
-      const X = bits === 0 ? 0 : read(bits);
+      const X = bits === 0 ? 0 : br.read(bits);
       values[i] = (R + X * scaleE) / scaleD;
     }
+  } else if (drt === 2 || drt === 3) {
+    unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values);
   } else {
     throw new Error('unsupported GRIB2 data template ' + drt);
   }
 
-  return { ni, nj, lon1, lat1, di, dj, scanMode, values };
+  grid.values = values;
+  return grid;
 }

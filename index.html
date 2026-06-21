@@ -45,6 +45,7 @@
               <button class="mode-btn active" data-mode="radar">RADAR</button>
               <button class="mode-btn" data-mode="satellite">SAT</button>
               <button class="mode-btn" data-mode="mrms">MRMS</button>
+              <button class="mode-btn" data-mode="models">MODELS</button>
             </div>
             <label class="field" id="siteField">
               <span>Radar site</span>
@@ -69,6 +70,10 @@
               <select id="mrmsDomainSelect">
                 <option value="CONUS">CONUS</option>
               </select>
+            </label>
+            <label class="field" id="modelFields" hidden>
+              <span>Model</span>
+              <select id="modelSelect"></select>
             </label>
             <label class="field">
               <span>UTC date</span>
