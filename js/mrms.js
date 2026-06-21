@@ -67,6 +67,11 @@ export const MRMS_PRODUCTS = {
   QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 200, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
 };
 
+// Composite reflectivity shares the single-site radar reflectivity color table
+// (resolved at render time in app.js), so all reflectivity looks the same and a
+// user-loaded reflectivity .pal applies here too.
+MRMS_PRODUCTS.REFC.reflectivity = true;
+
 export const MRMS_ORDER = [
   'REFC', 'AZSHEAR', 'ROT1H', 'ROT6H', 'ROT24H',
   'MESH', 'POSH', 'LTG30', 'QPE1H', 'QPE6H', 'QPE24H',

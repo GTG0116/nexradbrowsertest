@@ -94,9 +94,9 @@ function buildTexture(grid, product) {
   return { data, W, H, lon1, lat1, di: di * factor, dj: dj * factor };
 }
 
-export function createGridLayer() {
+export function createGridLayer(id = 'mrms') {
   return {
-    id: 'mrms',
+    id,
     type: 'custom',
     renderingMode: '2d',
 

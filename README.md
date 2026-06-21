@@ -83,6 +83,26 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **GPU plate-carrée layer** (`js/gridLayer.js`) draws the 7000×3500 CONUS grid
   (max-pooled to a GPU-friendly texture) with per-product colour tables.
 
+### Weather models — HRRR (`noaa-hrrr-bdp-pds`)
+
+- **HRRR composite reflectivity**, read straight from the operational High-
+  Resolution Rapid Refresh GRIB2 on S3. Rather than pull the ~150 MB cycle file,
+  the viewer reads the tiny sidecar `.idx` byte index, finds the composite-
+  reflectivity record, and issues a single HTTP **Range** request for just that
+  message (a few hundred KB).
+- **GRIB2 complex packing** decoded in pure JS (`js/grib2.js`): NCEP's complex
+  packing with 2nd-order **spatial differencing** (Data Representation Template
+  5.3) — group references/widths/lengths and the integrated spatial differences
+  — which is how HRRR (and most model output) is stored. Sign-magnitude integers
+  throughout, as the GRIB2 standard requires.
+- **Lambert Conformal → lat/lon** (`js/models.js`): HRRR rides a 3 km Lambert
+  Conformal Conic grid, so each field is resampled onto a plain lat/lon grid via
+  a forward LCC projection and then drawn through the **same GPU grid layer**
+  (`js/gridLayer.js`) and inspect path as the lat/lon MRMS products.
+- Composite reflectivity uses the **shared reflectivity color table** — the same
+  one as MRMS and single-site radar — so a `.pal` loaded for single-site
+  reflectivity recolours all three at once.
+
 ## Architecture
 
 ```

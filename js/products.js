@@ -184,6 +184,25 @@ export function dispUnitOf(product) {
 
 export const PRODUCT_ORDER = ['REF', 'VEL', 'SW', 'RHO', 'ZDR', 'PHI'];
 
+// The reflectivity color table is shared across single-site radar, MRMS and the
+// weather models, so they all draw dBZ identically — and a user-loaded
+// reflectivity .pal (which targets REF) recolours every one of them. A grid
+// product flagged `reflectivity:true` borrows REF's *live* scale and range here
+// (keeping its own `floor`), so it always tracks whatever REF currently uses.
+export function reflectivityProduct(base) {
+  const ref = PRODUCTS.REF;
+  return {
+    ...base,
+    scale: ref.scale,
+    lo: ref.scale.lo,
+    hi: ref.scale.hi,
+    unit: ref.unit,
+    dispUnit: ref.dispUnit,
+    dispFactor: ref.dispFactor,
+    dispOffset: ref.dispOffset,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // GRLevelX / GR2Analyst ".pal" color table parser.
 //
