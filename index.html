@@ -143,6 +143,10 @@
               <span>Playback loop</span>
               <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
             </div>
+            <label class="field opacity-field" id="playFramesField">
+              <span>Playback frames <b id="playFramesVal">5</b></span>
+              <input type="range" id="playFrames" min="2" max="20" value="5" />
+            </label>
             <div class="pal-row">
               <label class="pal-btn" for="palInput">⤓ Load .pal</label>
               <input type="file" id="palInput" accept=".pal,.txt" hidden />
