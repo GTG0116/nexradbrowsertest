@@ -123,6 +123,7 @@
           <section class="panel">
             <h2 class="panel-title">Product</h2>
             <div id="productButtons" class="product-grid"></div>
+            <button id="soundingBtn" class="sounding-btn" hidden>⊙ Sounding at map center</button>
             <label class="field opacity-field">
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
@@ -218,6 +219,7 @@
         </button>
         <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
         <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
+        <button id="dockSoundingBtn" class="dock-tool" title="HRRR sounding at map center" hidden>⊙</button>
       </div>
 
       <div id="sheetScrim" class="sheet-scrim" hidden></div>
@@ -233,6 +235,34 @@
               <input type="range" id="playSpeed" min="1" max="8" value="3" />
             </label>
           </div>
+        </div>
+      </div>
+
+      <!-- Full-screen HRRR point sounding: Skew-T, storm-relative hodograph and
+           the severe-weather parameters. Mobile-first: a scrollable sheet that
+           stacks the diagrams above the parameter grid; widens to two columns on
+           larger screens. -->
+      <div id="sounding" class="sounding" hidden>
+        <div class="snd-head">
+          <div class="snd-title">
+            <h2>HRRR Sounding</h2>
+            <div id="sndMeta" class="snd-meta">—</div>
+          </div>
+          <button id="sndClose" class="snd-close" title="Close (Esc)">✕</button>
+        </div>
+        <div id="sndBody" class="snd-body scroll">
+          <div id="sndStatus" class="snd-status">Loading sounding…</div>
+          <div id="sndCharts" class="snd-charts" hidden>
+            <figure class="snd-chart snd-skewt">
+              <figcaption>Skew-T / log-P</figcaption>
+              <canvas id="sndSkewt"></canvas>
+            </figure>
+            <figure class="snd-chart snd-hodo">
+              <figcaption>Hodograph (kt) · storm motion</figcaption>
+              <canvas id="sndHodo"></canvas>
+            </figure>
+          </div>
+          <div id="sndParams" class="snd-params" hidden></div>
         </div>
       </div>
 
