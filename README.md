@@ -85,11 +85,17 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 
 ### Weather models — HRRR (`noaa-hrrr-bdp-pds`)
 
-- **HRRR composite reflectivity**, read straight from the operational High-
-  Resolution Rapid Refresh GRIB2 on S3. Rather than pull the ~150 MB cycle file,
-  the viewer reads the tiny sidecar `.idx` byte index, finds the composite-
-  reflectivity record, and issues a single HTTP **Range** request for just that
-  message (a few hundred KB).
+- **A range of HRRR surface fields**, read straight from the operational High-
+  Resolution Rapid Refresh GRIB2 on S3: composite reflectivity, 2 m temperature
+  and dew point, 10 m wind speed and gusts, relative humidity, total cloud cover,
+  and 1/6/24-hr and run-total precipitation. Rather than pull the ~150 MB cycle
+  file, the viewer reads the tiny sidecar `.idx` byte index, finds the requested
+  record(s), and issues a single HTTP **Range** request for just that message (a
+  few hundred KB).
+- **Derived fields**: wind speed is the magnitude of the 10 m U/V components, and
+  6/24-hr precip is the difference of two run-total accumulations (`APCP` only
+  ships as a run total plus the latest 1-hr bucket) — each pulled with the same
+  targeted Range requests and combined after decoding.
 - **GRIB2 complex packing** decoded in pure JS (`js/grib2.js`): NCEP's complex
   packing with 2nd-order **spatial differencing** (Data Representation Template
   5.3) — group references/widths/lengths and the integrated spatial differences
@@ -101,7 +107,9 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   (`js/gridLayer.js`) and inspect path as the lat/lon MRMS products.
 - Composite reflectivity uses the **shared reflectivity color table** — the same
   one as MRMS and single-site radar — so a `.pal` loaded for single-site
-  reflectivity recolours all three at once.
+  reflectivity recolours all three at once; the other fields carry their own
+  meteorologically conventional color scales with imperial-unit readouts (°F,
+  mph, inches).
 - **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
   hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
   the right rail like radar elevation tilts.
