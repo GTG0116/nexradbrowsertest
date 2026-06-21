@@ -1,0 +1,226 @@
+// satelliteLayer.js — a Mapbox GL custom WebGL layer that drapes a decoded GOES
+// ABI scene over the map. Like the radar layer, it never rasterises to a fixed
+// canvas: a fragment shader runs for every screen pixel, inverts the web-mercator
+// projection to lon/lat, then runs the GOES fixed-grid navigation *backwards*
+// (lon/lat → satellite scan angles → grid column/row) and samples the precomputed
+// RGBA image with NEAREST. So the imagery stays crisp at any zoom and pan/zoom
+// cost no JavaScript.
+//
+// The colour science (single-channel enhancement or RGB recipe) is baked into
+// the RGBA texture on the CPU by satProducts.buildRGBA; this layer only does the
+// geometry.
+
+const VERT_SRC = `
+attribute vec2 a_pos;
+uniform mat4 u_matrix;
+varying vec2 v_merc;
+void main() {
+  v_merc = a_pos;
+  gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0);
+}`;
+
+const FRAG_SRC = `
+precision highp float;
+varying vec2 v_merc;
+uniform sampler2D u_tex;
+uniform float u_W, u_H;
+uniform float u_xScale, u_xOffset, u_yScale, u_yOffset;
+uniform float u_lon0, u_satH, u_rEq, u_rPol;
+uniform float u_sweepY;
+uniform float u_opacity;
+const float PI = 3.141592653589793;
+
+void main() {
+  // web-mercator [0,1] -> lon/lat (radians)
+  float lon = (v_merc.x * 360.0 - 180.0) * PI / 180.0;
+  float lat = (2.0 * atan(exp((1.0 - 2.0 * v_merc.y) * PI)) - PI * 0.5);
+
+  float req2 = u_rEq * u_rEq;
+  float rpol2 = u_rPol * u_rPol;
+  // geocentric latitude
+  float phic = atan((rpol2 / req2) * tan(lat));
+  float cphic = cos(phic);
+  float e2 = 1.0 - rpol2 / req2;
+  float rc = u_rPol / sqrt(1.0 - e2 * cphic * cphic);
+
+  float dlon = lon - u_lon0;
+  float sx = u_satH - rc * cphic * cos(dlon);
+  float sy = -rc * cphic * sin(dlon);
+  float sz = rc * sin(phic);
+
+  // visible-disk test (point must be on the Earth side facing the satellite)
+  if (u_satH * (u_satH - sx) < sy * sy + (req2 / rpol2) * sz * sz) discard;
+
+  float sxyz = sqrt(sx * sx + sy * sy + sz * sz);
+  float scanX, scanY;
+  if (u_sweepY > 0.5) {
+    scanX = atan(sy / sx);
+    scanY = asin(-sz / sxyz);
+  } else {
+    scanY = atan(sz / sx);
+    scanX = asin(-sy / sxyz);
+  }
+
+  float col = (scanX - u_xOffset) / u_xScale;
+  float row = (scanY - u_yOffset) / u_yScale;
+  if (col < 0.0 || col >= u_W || row < 0.0 || row >= u_H) discard;
+
+  vec4 c = texture2D(u_tex, vec2((col + 0.5) / u_W, (row + 0.5) / u_H));
+  if (c.a == 0.0) discard;
+  float a = c.a * u_opacity;
+  gl_FragColor = vec4(c.rgb * a, a); // premultiplied alpha
+}`;
+
+function compile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+    throw new Error('satellite shader: ' + gl.getShaderInfoLog(sh));
+  return sh;
+}
+
+function mercX(lon) { return (lon + 180) / 360; }
+function mercY(lat) {
+  const s = Math.sin((lat * Math.PI) / 180);
+  return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+}
+
+export function createSatelliteLayer() {
+  return {
+    id: 'satellite',
+    type: 'custom',
+    renderingMode: '2d',
+
+    map: null,
+    gl: null,
+    program: null,
+    quad: null,
+    tex: null,
+    has: false,
+    pending: null,
+    uni: null,
+    quadVerts: null,
+    opacity: 0.95,
+
+    onAdd(map, gl) {
+      this.map = map;
+      this.gl = gl;
+      const vs = compile(gl, gl.VERTEX_SHADER, VERT_SRC);
+      const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+      const p = gl.createProgram();
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+        throw new Error('satellite program: ' + gl.getProgramInfoLog(p));
+      this.program = p;
+      this.aPos = gl.getAttribLocation(p, 'a_pos');
+      this.u = {};
+      for (const name of [
+        'u_matrix', 'u_tex', 'u_W', 'u_H', 'u_xScale', 'u_xOffset', 'u_yScale',
+        'u_yOffset', 'u_lon0', 'u_satH', 'u_rEq', 'u_rPol', 'u_sweepY', 'u_opacity',
+      ]) this.u[name] = gl.getUniformLocation(p, name);
+      this.quad = gl.createBuffer();
+      this.tex = gl.createTexture();
+      if (this.pending) this._upload(this.pending);
+    },
+
+    // scene: from goes.loadScene; rgba: Uint8Array(W*H*4) from buildRGBA;
+    // bbox: [w,s,e,n] from goes.sceneBBox.
+    setScene(scene, rgba, bbox) {
+      const w = mercX(bbox[0]);
+      const e = mercX(bbox[2]);
+      const n = mercY(bbox[3]);
+      const s = mercY(bbox[1]);
+      const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
+
+      this.pending = {
+        rgba, W: scene.width, H: scene.height, verts,
+        uni: {
+          W: scene.width, H: scene.height,
+          xScale: scene.xScale, xOffset: scene.xOffset,
+          yScale: scene.yScale, yOffset: scene.yOffset,
+          lon0: scene.proj.lon0, satH: scene.proj.H,
+          rEq: scene.proj.rEq, rPol: scene.proj.rPol,
+          sweepY: scene.proj.sweep === 'y' ? 1 : 0,
+        },
+      };
+      if (this.gl) this._upload(this.pending);
+      this.has = true;
+      if (this.map) this.map.triggerRepaint();
+    },
+
+    _upload(payload) {
+      const gl = this.gl;
+      const { rgba, W, H, verts, uni } = payload;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+      this.quadVerts = verts;
+
+      gl.bindTexture(gl.TEXTURE_2D, this.tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+
+      this.uni = uni;
+    },
+
+    setOpacity(o) { this.opacity = o; if (this.map) this.map.triggerRepaint(); },
+
+    clear() {
+      this.has = false;
+      this.pending = null;
+      if (this.map) this.map.triggerRepaint();
+    },
+
+    render(gl, matrix) {
+      if (!this.has || !this.uni || !this.quadVerts) return;
+      const mat = matrix && matrix.length === 16
+        ? matrix
+        : matrix && matrix.defaultProjectionData
+        ? matrix.defaultProjectionData.mainMatrix
+        : matrix;
+
+      gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.u.u_matrix, false, mat);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+      gl.enableVertexAttribArray(this.aPos);
+      gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex);
+      gl.uniform1i(this.u.u_tex, 0);
+
+      const U = this.uni;
+      gl.uniform1f(this.u.u_W, U.W);
+      gl.uniform1f(this.u.u_H, U.H);
+      gl.uniform1f(this.u.u_xScale, U.xScale);
+      gl.uniform1f(this.u.u_xOffset, U.xOffset);
+      gl.uniform1f(this.u.u_yScale, U.yScale);
+      gl.uniform1f(this.u.u_yOffset, U.yOffset);
+      gl.uniform1f(this.u.u_lon0, U.lon0);
+      gl.uniform1f(this.u.u_satH, U.satH);
+      gl.uniform1f(this.u.u_rEq, U.rEq);
+      gl.uniform1f(this.u.u_rPol, U.rPol);
+      gl.uniform1f(this.u.u_sweepY, U.sweepY);
+      gl.uniform1f(this.u.u_opacity, this.opacity);
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.disable(gl.DEPTH_TEST);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    },
+
+    onRemove(map, gl) {
+      if (this.program) gl.deleteProgram(this.program);
+      if (this.quad) gl.deleteBuffer(this.quad);
+      if (this.tex) gl.deleteTexture(this.tex);
+      this.program = this.quad = this.tex = null;
+      this.gl = null;
+    },
+  };
+}

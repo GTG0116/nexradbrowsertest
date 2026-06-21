@@ -38,6 +38,42 @@ the radar imagery — entirely client-side.
 - Heavy decode runs in a **Web Worker** (`js/decoder.worker.js`) so the UI never
   freezes, even on 7 MB+ volumes.
 
+## Beyond radar: Satellite and MRMS
+
+The same browser-native, decode-it-yourself approach now drives two more data
+sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
+
+### Satellite — GOES-R ABI (`noaa-goes16/18/19`)
+
+- **GOES ABI Level-2** multi-band cloud/moisture imagery, read straight from the
+  open GOES buckets. A single `MCMIP` file carries all 16 ABI channels, so every
+  channel *and* every RGB composite comes from one download.
+- **A from-scratch HDF5 / NetCDF-4 reader** (`js/hdf5.js`): superblock v2/v3,
+  object-header v2 with continuation blocks, dense link/attribute storage via
+  **fractal heaps**, chunked data indexed by a v1 B-tree, and the **shuffle +
+  deflate** filter pipeline (deflate via the platform `DecompressionStream`). No
+  HDF5 library — just the bytes.
+- **Sectors**: full-disk, CONUS, and both mesoscale floaters, plus a set of
+  familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
+- **All 16 ABI channels** (visible/near-IR as reflectance, IR as brightness
+  temperature, with an optional IR colour enhancement) and **RGB composites**:
+  True Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and
+  Night Microphysics.
+- **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
+  inverts web-mercator to lon/lat and runs the GOES fixed-grid navigation
+  *backwards* per pixel, so the imagery stays crisp at any zoom.
+
+### MRMS (`noaa-mrms-pds`)
+
+- **GRIB2 decoded in pure JS** (`js/grib2.js`): gunzip via `DecompressionStream`,
+  GRIB2 section parsing, and an in-house PNG reader for the PNG-packed values
+  (DRT 5.41) so the full 16-bit precision survives (a `<canvas>` would clamp it).
+- **Products**: Composite Reflectivity, AzShear (instant rotation), 1/6/24-hr
+  rotation tracks, MESH (max hail size), POSH (severe-hail probability), 30-min
+  CG-lightning probability, and 1/6/24-hr precip totals.
+- **GPU plate-carrée layer** (`js/gridLayer.js`) draws the 7000×3500 CONUS grid
+  (max-pooled to a GPU-friendly texture) with per-product colour tables.
+
 ## Architecture
 
 ```

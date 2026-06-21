@@ -218,6 +218,37 @@ input:focus {
   box-shadow: 0 0 16px rgba(255, 120, 40, 0.3);
 }
 
+/* ---------------- Source mode switch ---------------- */
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  background: rgba(10, 20, 40, 0.6);
+  border: 1px solid var(--panel-edge);
+  border-radius: 9px;
+  padding: 3px;
+}
+.mode-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  border-radius: 6px;
+  padding: 7px 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: 0.14s;
+}
+.mode-btn:hover { color: var(--ink); }
+.mode-btn.active {
+  background: rgba(54, 224, 200, 0.14);
+  color: var(--accent);
+  box-shadow: var(--glow);
+}
+
 /* ---------------- Volume list ---------------- */
 .scroll {
   overflow-y: auto;

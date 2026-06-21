@@ -7,6 +7,11 @@ import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from '
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { AlertsController } from './alerts.js';
+import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox } from './goes.js';
+import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
+import { createSatelliteLayer } from './satelliteLayer.js';
+import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
+import { createGridLayer } from './gridLayer.js';
 
 const M_PER_DEG_LAT = 111320;
 
@@ -149,9 +154,11 @@ function setupOverlays(map) {
 
   refreshSiteDots();
 
-  // Repaint the radar (if we have a sweep) into its place between fill and line.
-  if (state.shownSweep && state.shownSite)
+  // Repaint the active source's layer into its place between fill and line.
+  if (state.mode === 'radar' && state.shownSweep && state.shownSite)
     setRadarSource(map, state.shownSweep, PRODUCTS[state.productId], state.shownSite);
+  else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
+  else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
   if (state.alerts) state.alerts.refreshVisible();
 }
 
@@ -220,6 +227,28 @@ const state = {
   shownSite: null,
   inspect: false,
   playback: null,
+
+  // Source mode: 'radar' | 'satellite' | 'mrms'.
+  mode: 'radar',
+  // Satellite (GOES ABI) state.
+  sat: {
+    satKey: 'goes19',
+    sectorKey: 'conus',
+    productId: 'C13',
+    enhanceIR: false,
+    scenes: [],
+    sceneKey: null,
+    scene: null,
+    layer: null,
+  },
+  // MRMS state.
+  mrms: {
+    productId: 'REFC',
+    frames: [],
+    frameKey: null,
+    grid: null,
+    layer: null,
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -253,6 +282,21 @@ function cacheEls() {
   el.alertDetail = $('#alertDetail');
   el.alertDetailPanel = $('#alertDetailPanel');
   el.alertClose = $('#alertClose');
+
+  // Source modes (radar / satellite / MRMS).
+  el.modeSwitch = $('#modeSwitch');
+  el.siteField = $('#siteField');
+  el.satFields = $('#satFields');
+  el.satSelect = $('#satSelect');
+  el.sectorSelect = $('#sectorSelect');
+  el.conusViewField = $('#conusViewField');
+  el.conusViewSelect = $('#conusViewSelect');
+  el.mrmsFields = $('#mrmsFields');
+  el.volumeTitle = $('#volumeTitle');
+  el.tiltPanel = $('#tiltPanel');
+  el.satOptsPanel = $('#satOptsPanel');
+  el.irEnhanceToggle = $('#irEnhanceToggle');
+  el.satInfo = $('#satInfo');
 
   // Mobile control surface.
   el.railLeft = $('.rail-left');
@@ -456,6 +500,8 @@ function buildSiteSelect() {
 }
 
 function buildProductButtons() {
+  if (state.mode === 'satellite') return buildSatProductButtons();
+  if (state.mode === 'mrms') return buildMrmsProductButtons();
   el.productButtons.innerHTML = '';
   for (const id of PRODUCT_ORDER) {
     const p = PRODUCTS[id];
@@ -518,6 +564,8 @@ function buildVolumeList() {
 }
 
 function buildLegend() {
+  if (state.mode === 'satellite') return buildSatLegend();
+  if (state.mode === 'mrms') return buildMrmsLegend();
   const p = PRODUCTS[state.productId];
   const { lo, hi, rgba, steps } = p.scale;
   const segs = 80;
@@ -695,6 +743,383 @@ function drawRings(site, maxR) {
   const src = state.map && state.map.getSource('rings');
   if (!src) return;
   src.setData(site ? ringsGeoJSON(site, maxR) : { type: 'FeatureCollection', features: [] });
+}
+
+// ===========================================================================
+// Source modes — Radar / Satellite (GOES ABI) / MRMS
+//
+// The three sources share the same map, time list, opacity, basemap and
+// playback chrome; switching mode swaps the product menu, the controls shown in
+// the rails, and which custom GL layer is live. Radar stays exactly as it was.
+// ===========================================================================
+const p2 = (n) => String(n).padStart(2, '0');
+
+function applyModePanels() {
+  el.siteField.hidden = state.mode !== 'radar';
+  el.satFields.hidden = state.mode !== 'satellite';
+  el.mrmsFields.hidden = state.mode !== 'mrms';
+  el.tiltPanel.hidden = state.mode !== 'radar';
+  el.satOptsPanel.hidden = state.mode !== 'satellite';
+  el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
+  el.volumeTitle.textContent =
+    state.mode === 'radar' ? 'Volume scans'
+    : state.mode === 'satellite' ? 'Satellite scans' : 'MRMS frames';
+  document.querySelectorAll('.mode-btn')
+    .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
+}
+
+function setMode(mode) {
+  if (state.mode === mode) return;
+  if (state.playback && state.playback.active) state.playback.stop();
+  state.mode = mode;
+  if (mode !== 'radar') clearRadarSource(state.map);
+  if (mode !== 'satellite') clearSatellite();
+  if (mode !== 'mrms') clearMrms();
+  applyModePanels();
+  buildProductButtons();
+  buildLegend();
+  state._forceLatest = true;
+
+  if (mode === 'radar') {
+    buildTiltList();
+    buildVolumeList();
+    if (state.volumes.length) loadVolumeList();
+    renderRadar();
+  } else if (mode === 'satellite') {
+    loadSatScenes();
+  } else if (mode === 'mrms') {
+    loadMrmsList();
+  }
+  updateMeta();
+}
+
+// Dispatch refresh / live / date changes to the active source.
+function refreshActive() {
+  if (state.mode === 'radar') return loadVolumeList();
+  if (state.mode === 'satellite') return loadSatScenes();
+  return loadMrmsList();
+}
+
+// ---------------------------------------------------------------------------
+// Satellite (GOES ABI)
+// ---------------------------------------------------------------------------
+function initSatSelects() {
+  for (const [key, sat] of Object.entries(SATELLITES)) {
+    const o = document.createElement('option');
+    o.value = key; o.textContent = sat.label;
+    if (key === state.sat.satKey) o.selected = true;
+    el.satSelect.appendChild(o);
+  }
+  for (const [key, sec] of Object.entries(SECTORS)) {
+    const o = document.createElement('option');
+    o.value = key; o.textContent = sec.label;
+    if (key === state.sat.sectorKey) o.selected = true;
+    el.sectorSelect.appendChild(o);
+  }
+  CONUS_VIEWS.forEach(([name], i) => {
+    const o = document.createElement('option');
+    o.value = String(i); o.textContent = name;
+    el.conusViewSelect.appendChild(o);
+  });
+
+  el.satSelect.addEventListener('change', () => {
+    state.sat.satKey = el.satSelect.value;
+    state.sat._centered = false;
+    loadSatScenes();
+  });
+  el.sectorSelect.addEventListener('change', () => {
+    state.sat.sectorKey = el.sectorSelect.value;
+    state.sat._centered = false;
+    applyModePanels();
+    loadSatScenes();
+  });
+  el.conusViewSelect.addEventListener('change', () => {
+    const v = CONUS_VIEWS[+el.conusViewSelect.value];
+    if (v && state.map) state.map.fitBounds([[v[1][0], v[1][1]], [v[1][2], v[1][3]]], { padding: 12, animate: true });
+  });
+  el.irEnhanceToggle.addEventListener('click', () => {
+    state.sat.enhanceIR = !state.sat.enhanceIR;
+    el.irEnhanceToggle.classList.toggle('active', state.sat.enhanceIR);
+    el.irEnhanceToggle.textContent = state.sat.enhanceIR ? 'ON' : 'OFF';
+    if (state.mode === 'satellite') { renderSatellite(); buildSatLegend(); }
+  });
+}
+
+function buildSatProductButtons() {
+  el.productButtons.innerHTML = '';
+  const add = (id, label, name) => {
+    const btn = document.createElement('button');
+    btn.className = 'product-btn';
+    btn.dataset.id = id;
+    btn.innerHTML = `<span class="pb-id">${label}</span><span class="pb-name">${name}</span>`;
+    if (id === state.sat.productId) btn.classList.add('active');
+    btn.addEventListener('click', async () => {
+      state.sat.productId = id;
+      document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      buildSatLegend();
+      // Decode any extra bands this product needs from the cached file first.
+      if (state.sat.scene) {
+        setStatus('rendering GOES…', true);
+        await ensureBands(state.sat.scene, bandsFor(id));
+        renderSatellite();
+        setStatus('GOES ready');
+      }
+      updateSatInfo();
+    });
+    el.productButtons.appendChild(btn);
+  };
+  for (const ch of SAT_CHANNELS) add('C' + p2(ch.band), 'C' + p2(ch.band), `${ch.name} · ${ch.um}µm`);
+  for (const id of SAT_RGB_ORDER) add('RGB_' + id, SAT_RGB[id].short, SAT_RGB[id].name + ' RGB');
+}
+
+function buildSatList() {
+  el.volumeList.innerHTML = '';
+  if (!state.sat.scenes.length) {
+    el.volumeList.innerHTML = '<div class="empty">No scenes found.</div>';
+    return;
+  }
+  [...state.sat.scenes].reverse().forEach((v) => {
+    const btn = document.createElement('button');
+    btn.className = 'vol-btn';
+    if (v.key === state.sat.sceneKey) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.addEventListener('click', () => loadSatScene(v.key));
+    el.volumeList.appendChild(btn);
+  });
+}
+
+async function loadSatScenes() {
+  if (state.mode !== 'satellite') return;
+  setStatus('listing GOES…', true);
+  buildSatList();
+  try {
+    const when = state.live ? new Date() : state.date;
+    const scenes = await listScenes(state.sat.satKey, state.sat.sectorKey, when);
+    state.sat.scenes = scenes;
+    buildSatList();
+    setStatus(`${scenes.length} GOES scenes`);
+    if (!scenes.length) return;
+    const latest = scenes[scenes.length - 1].key;
+    if (state._forceLatest || !state.sat.scene || state.live) {
+      state._forceLatest = false;
+      if (latest !== state.sat.sceneKey) loadSatScene(latest);
+    }
+  } catch (e) {
+    setStatus(`GOES list error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+async function loadSatScene(key) {
+  state.sat.sceneKey = key;
+  buildSatList();
+  setStatus('downloading GOES…', true);
+  el.progress.style.width = '0%';
+  el.progress.classList.add('show');
+  try {
+    const scene = await loadGoesScene(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
+      el.progress.style.width = Math.round(p * 100) + '%';
+    });
+    setStatus('rendering GOES…', true);
+    el.decoding.classList.add('show');
+    state.sat.scene = scene;
+    state.sat._bbox = null;
+    if (!state.sat._centered) {
+      const bb = sceneBBox(scene);
+      state.map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 16, animate: false });
+      state.sat._centered = true;
+    }
+    renderSatellite();
+    updateSatInfo();
+    setStatus(`GOES ${SECTORS[state.sat.sectorKey].label} loaded`);
+  } catch (e) {
+    setStatus(`GOES error: ${e.message}`);
+    console.error(e);
+  } finally {
+    el.progress.classList.remove('show');
+    el.decoding.classList.remove('show');
+  }
+}
+
+function setSatelliteSource(map) {
+  if (!state.sat.layer) state.sat.layer = createSatelliteLayer();
+  if (!map.getLayer('satellite'))
+    map.addLayer(state.sat.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+}
+
+function clearSatellite() {
+  if (state.sat.layer) state.sat.layer.clear();
+}
+
+function renderSatellite() {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  const scene = state.sat.scene;
+  if (!scene) { clearSatellite(); return; }
+  const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
+  const bbox = state.sat._bbox || (state.sat._bbox = sceneBBox(scene));
+  setSatelliteSource(map);
+  state.sat.layer.setScene(scene, rgba, bbox);
+  state.sat.layer.setOpacity(state.opacity);
+}
+
+function buildSatLegend() {
+  const id = state.sat.productId;
+  if (id.startsWith('C')) {
+    const meta = SAT_CHANNELS[parseInt(id.slice(1), 10) - 1];
+    const isVis = meta.type === 'vis';
+    const grad = isVis
+      ? 'linear-gradient(90deg,#000,#fff)'
+      : state.sat.enhanceIR
+      ? 'linear-gradient(90deg,#787878,#0000c8,#00b4b4,#00c800,#e6e600,#e67800,#dc0000,#fff)'
+      : 'linear-gradient(90deg,#fff,#000)';
+    const ticks = isVis ? '<span>0</span><span>reflectance</span><span>1</span>'
+      : '<span>313K</span><span>brightness temp</span><span>183K</span>';
+    el.legend.innerHTML = `
+      <div class="legend-title">${meta.name} <span>(${id} · ${meta.um}µm)</span></div>
+      <div class="legend-bar" style="background:${grad}"></div>
+      <div class="legend-ticks">${ticks}</div>`;
+  } else {
+    const r = SAT_RGB[id.replace(/^RGB_/, '')];
+    el.legend.innerHTML = `
+      <div class="legend-title">${r.name} <span>(RGB composite)</span></div>
+      <div class="legend-bar" style="background:linear-gradient(90deg,#f33,#3f3,#33f)"></div>
+      <div class="legend-ticks"><span>multi-band</span><span>${r.day ? 'daytime' : 'day/night'}</span></div>`;
+  }
+}
+
+function updateSatInfo() {
+  const s = state.sat;
+  const sat = SATELLITES[s.satKey];
+  const sec = SECTORS[s.sectorKey];
+  const t = s.scene && s.scene.time;
+  el.satInfo.innerHTML = `
+    <div class="meta-row"><span>Satellite</span><b>${sat.label}</b></div>
+    <div class="meta-row"><span>Sector</span><b>${sec.label}</b></div>
+    <div class="meta-row"><span>Grid</span><b>${s.scene ? s.scene.width + '×' + s.scene.height : '—'}</b></div>
+    <div class="meta-row"><span>Scan time</span><b>${t ? p2(t.getUTCHours()) + ':' + p2(t.getUTCMinutes()) + 'Z' : '—'}</b></div>
+    <div class="meta-row"><span>Refresh</span><b>${sec.refresh}</b></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// MRMS
+// ---------------------------------------------------------------------------
+function buildMrmsProductButtons() {
+  el.productButtons.innerHTML = '';
+  for (const id of MRMS_ORDER) {
+    const p = MRMS_PRODUCTS[id];
+    const btn = document.createElement('button');
+    btn.className = 'product-btn';
+    btn.dataset.id = id;
+    btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+    if (id === state.mrms.productId) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      state.mrms.productId = id;
+      document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      buildMrmsLegend();
+      loadMrmsList(); // each product is a different S3 folder
+    });
+    el.productButtons.appendChild(btn);
+  }
+}
+
+function buildMrmsList() {
+  el.volumeList.innerHTML = '';
+  if (!state.mrms.frames.length) {
+    el.volumeList.innerHTML = '<div class="empty">No frames found for this day.</div>';
+    return;
+  }
+  [...state.mrms.frames].reverse().forEach((v) => {
+    const btn = document.createElement('button');
+    btn.className = 'vol-btn';
+    if (v.key === state.mrms.frameKey) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.addEventListener('click', () => loadMrmsFrame(v.key));
+    el.volumeList.appendChild(btn);
+  });
+}
+
+async function loadMrmsList() {
+  if (state.mode !== 'mrms') return;
+  setStatus('listing MRMS…', true);
+  buildMrmsList();
+  try {
+    const when = state.live ? new Date() : state.date;
+    const frames = await listMrms(state.mrms.productId, when);
+    state.mrms.frames = frames;
+    buildMrmsList();
+    setStatus(`${frames.length} MRMS frames`);
+    if (!frames.length) return;
+    const latest = frames[frames.length - 1].key;
+    if (state._forceLatest || !state.mrms.grid || state.live) {
+      state._forceLatest = false;
+      if (latest !== state.mrms.frameKey) loadMrmsFrame(latest);
+    }
+  } catch (e) {
+    setStatus(`MRMS list error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+async function loadMrmsFrame(key) {
+  state.mrms.frameKey = key;
+  buildMrmsList();
+  setStatus('downloading MRMS…', true);
+  el.progress.style.width = '0%';
+  el.progress.classList.add('show');
+  try {
+    const grid = await loadMrms(state.mrms.productId, key, (p) => {
+      el.progress.style.width = Math.round(p * 100) + '%';
+    });
+    setStatus('decoding MRMS…', true);
+    el.decoding.classList.add('show');
+    state.mrms.grid = grid;
+    renderMrms();
+    setStatus(`MRMS ${grid.product.name} loaded`);
+  } catch (e) {
+    setStatus(`MRMS error: ${e.message}`);
+    console.error(e);
+  } finally {
+    el.progress.classList.remove('show');
+    el.decoding.classList.remove('show');
+  }
+}
+
+function setMrmsSource(map) {
+  if (!state.mrms.layer) state.mrms.layer = createGridLayer();
+  if (!map.getLayer('mrms'))
+    map.addLayer(state.mrms.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+}
+
+function clearMrms() {
+  if (state.mrms.layer) state.mrms.layer.clear();
+}
+
+function renderMrms() {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  const grid = state.mrms.grid;
+  if (!grid) { clearMrms(); return; }
+  setMrmsSource(map);
+  state.mrms.layer.setGrid(grid, grid.product);
+  state.mrms.layer.setOpacity(state.opacity);
+}
+
+function buildMrmsLegend() {
+  const p = MRMS_PRODUCTS[state.mrms.productId];
+  const { lo, hi, rgba, steps } = p.scale;
+  const segs = 80;
+  const colors = [];
+  for (let i = 0; i <= segs; i++) {
+    let li = Math.round((i / segs) * (steps - 1));
+    if (li >= steps) li = steps - 1;
+    const o = li * 4;
+    colors.push(`rgb(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]}) ${(i / segs) * 100}%`);
+  }
+  el.legend.innerHTML = `
+    <div class="legend-title">${p.name} <span>(${p.unit})</span></div>
+    <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
+    <div class="legend-ticks"><span>${lo}</span><span>${((lo + hi) / 2)}</span><span>${hi}</span></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,8 +1509,8 @@ function toggleLive() {
   if (state.live) {
     state.date = new Date();
     el.dateInput.value = isoDate(state.date);
-    loadVolumeList();
-    state.liveTimer = setInterval(() => loadVolumeList(), 60000);
+    refreshActive();
+    state.liveTimer = setInterval(() => refreshActive(), 60000);
   } else if (state.liveTimer) {
     clearInterval(state.liveTimer);
     state.liveTimer = null;
@@ -1120,20 +1545,31 @@ function init() {
   state.playback = createPlayback();
   state.map.on('move', updateInspect);
 
+  // Source-mode switch + satellite controls.
+  initSatSelects();
+  applyModePanels();
+  el.modeSwitch.addEventListener('click', (e) => {
+    const btn = e.target.closest('.mode-btn');
+    if (btn) setMode(btn.dataset.mode);
+  });
+
   el.dateInput.value = isoDate(state.date);
   el.dateInput.max = isoDate(state.date);
   el.dateInput.addEventListener('change', () => {
     const [y, m, d] = el.dateInput.value.split('-').map(Number);
     state.date = new Date(Date.UTC(y, m - 1, d));
-    loadVolumeList();
+    state._forceLatest = true;
+    refreshActive();
   });
 
-  el.refreshBtn.addEventListener('click', () => loadVolumeList());
+  el.refreshBtn.addEventListener('click', () => refreshActive());
   el.liveBtn.addEventListener('click', toggleLive);
   el.opacity.addEventListener('input', () => {
     state.opacity = el.opacity.value / 100;
     el.opacityVal.textContent = el.opacity.value + '%';
     if (state.radarLayer) state.radarLayer.setOpacity(state.opacity);
+    if (state.sat.layer) state.sat.layer.setOpacity(state.opacity);
+    if (state.mrms.layer) state.mrms.layer.setOpacity(state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
