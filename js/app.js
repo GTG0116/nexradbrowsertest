@@ -29,8 +29,8 @@ const BASEMAPS = {
 
 // Canvas resolution for the rasterised radar. Higher = crisper when zoomed in,
 // at the cost of memory and a longer render. A still view renders once so it
-// can afford a big canvas; playback re-renders every frame, so it drops to a
-// lighter resolution to stay smooth.
+// can afford a big canvas; playback re-renders every frame, so it tracks the
+// same zoom but under a tighter cap to keep each frame cheap.
 //
 // The radar is one georeferenced raster that Mapbox keeps sampling with its
 // default *linear* resampling as the map moves. Linear is what we want — it
@@ -58,13 +58,23 @@ function radarResForZoom(zoom, maxR, siteLat) {
   return Math.max(RES_MIN(), Math.min(RES_MAX(), n));
 }
 
-// Resolution to rasterise the current still view at. Playback keeps a lighter
-// fixed size so every frame stays cheap.
+// Resolution to rasterise the current view at. The number of polar cells filled
+// is fixed by the data (not the canvas size), so resolution only changes the
+// fill area, not the polygon count — which means playback can also track the
+// zoom instead of being pinned to a blurry fixed size. It just keeps a tighter
+// cap so each animated frame stays cheap in memory; stills can afford the full
+// zoom-matched resolution. Either way the canvas stays at (or above) 1:1 with
+// the screen, so the GPU's linear resampling never has to upsample and invent
+// the soft in-between pixels that smeared the gates.
 function currentRadarRes(maxR, site) {
   const mobile = window.matchMedia('(max-width: 900px)').matches;
-  if (state.playback && state.playback.active) return mobile ? 1024 : 2048;
   const zoom = state.map ? state.map.getZoom() : 6;
-  return radarResForZoom(zoom, maxR, site ? site.lat : 35);
+  const n = radarResForZoom(zoom, maxR, site ? site.lat : 35);
+  // During playback, bound memory/fill cost per frame while still following the
+  // zoom (so a zoomed-in loop is crisp, not the old fixed-2048 blur).
+  if (state.playback && state.playback.active)
+    return Math.min(n, mobile ? 2048 : 4096);
+  return n;
 }
 
 // Find the basemap layer to insert our overlays *below*, so the style's town
@@ -405,14 +415,20 @@ function initMap() {
   // and never during playback (which owns its own lighter render).
   let radarZoomTimer = null;
   map.on('zoomend', () => {
-    if (state.playback && state.playback.active) return;
     if (!state.shownSweep || !state.shownSite) return;
     clearTimeout(radarZoomTimer);
     radarZoomTimer = setTimeout(() => {
       const product = PRODUCTS[state.productId];
       const maxR = sweepMaxRange(state.shownSweep, product.moment) || 300000;
-      if (currentRadarRes(maxR, state.shownSite) !== state.radarRes)
+      if (currentRadarRes(maxR, state.shownSite) === state.radarRes) return;
+      // A running loop re-rasterises on its own per-frame tick; only nudge it
+      // here when it is paused/scrubbing so the held frame matches the new zoom.
+      const pb = state.playback;
+      if (pb && pb.active) {
+        if (!pb.playing) pb.renderFrame();
+      } else {
         setRadarSource(map, state.shownSweep, product, state.shownSite);
+      }
     }, 200);
   });
 
