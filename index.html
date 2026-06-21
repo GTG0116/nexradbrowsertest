@@ -41,9 +41,34 @@
         <aside class="rail rail-left">
           <section class="panel">
             <h2 class="panel-title">Source</h2>
-            <label class="field">
+            <div class="mode-switch" id="modeSwitch">
+              <button class="mode-btn active" data-mode="radar">RADAR</button>
+              <button class="mode-btn" data-mode="satellite">SAT</button>
+              <button class="mode-btn" data-mode="mrms">MRMS</button>
+            </div>
+            <label class="field" id="siteField">
               <span>Radar site</span>
               <select id="siteSelect"></select>
+            </label>
+            <div id="satFields" hidden>
+              <label class="field">
+                <span>Satellite</span>
+                <select id="satSelect"></select>
+              </label>
+              <label class="field">
+                <span>Sector</span>
+                <select id="sectorSelect"></select>
+              </label>
+              <label class="field" id="conusViewField">
+                <span>CONUS region</span>
+                <select id="conusViewSelect"></select>
+              </label>
+            </div>
+            <label class="field" id="mrmsFields" hidden>
+              <span>Domain</span>
+              <select id="mrmsDomainSelect">
+                <option value="CONUS">CONUS</option>
+              </select>
             </label>
             <label class="field">
               <span>UTC date</span>
@@ -56,7 +81,7 @@
           </section>
 
           <section class="panel grow">
-            <h2 class="panel-title">Volume scans</h2>
+            <h2 class="panel-title" id="volumeTitle">Volume scans</h2>
             <div id="volumeList" class="vol-list scroll"></div>
           </section>
 
@@ -123,9 +148,18 @@
             </label>
           </section>
 
-          <section class="panel">
+          <section class="panel" id="tiltPanel">
             <h2 class="panel-title">Elevation tilt</h2>
             <div id="tiltList" class="tilt-list scroll"></div>
+          </section>
+
+          <section class="panel" id="satOptsPanel" hidden>
+            <h2 class="panel-title">Satellite options</h2>
+            <div class="toggle-field">
+              <span>IR color enhancement</span>
+              <button id="irEnhanceToggle" class="alerts-toggle" title="Colorize infrared channels">OFF</button>
+            </div>
+            <div id="satInfo" class="meta" style="margin-top:8px"></div>
           </section>
 
           <section class="panel grow">
@@ -186,8 +220,8 @@
       </div>
 
       <footer class="footer">
-        <span>Data: NOAA Open Data · <code>unidata-nexrad-level2</code> (AWS S3)</span>
-        <span>Decoded client-side · bzip2 + WSR-88D Level II Message 31</span>
+        <span>Data: NOAA Open Data (AWS S3) · <code>nexrad-level2</code> · <code>goes</code> · <code>mrms-pds</code></span>
+        <span>Decoded client-side · Level II · NetCDF-4/HDF5 · GRIB2</span>
       </footer>
     </div>
 
