@@ -131,6 +131,28 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
   hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
   the right rail like radar elevation tilts.
+- **Point soundings** (`js/sounding.js`): in HRRR mode, **⊙ Sounding** (right
+  rail, or the ⊙ tool on the mobile dock) opens a full-screen, mobile-first
+  briefing for the column under the map center:
+  - a proper **Skew-T / log-P** with dry & moist adiabats, mixing-ratio lines,
+    skewed isotherms, temperature/dewpoint traces, a lifted surface-parcel path
+    with **CAPE/CIN shading**, and wind barbs up the right margin;
+  - a height-coloured **hodograph** in knots with range rings and **Bunkers
+    right/left storm-motion** markers, the 0–6 km mean wind, and the 0–1 km
+    storm-relative inflow;
+  - a colour-tiered **severe parameter** grid — CAPE/CIN/LI, 700–500 lapse rate,
+    PWAT, LCL, 0–1 & 0–6 km bulk shear, 0–1 & 0–3 km SRH (relative to the
+    Bunkers right mover), and the STP/SCP/EHI composites — all computed in the
+    browser from the profile.
+
+  A *point* sounding is the one place the decode-it-yourself path can't reach:
+  GRIB2 complex packing with spatial differencing can't be subset to a single
+  grid cell, so reading one column from the wrfprs file would mean downloading
+  the whole ~130 MB file per tap. Instead the profile comes from the
+  CORS-enabled **Open-Meteo HRRR point API** (`models=gfs_hrrr`) — one small
+  JSON request, pinned to the displayed run's valid hour — and every diagram and
+  derived parameter is then computed locally (parcel theory, Bunkers motion,
+  helicity and the SPC composites), in the same spirit as the rest of the app.
 
 ## Source switching, overlay and playback
 

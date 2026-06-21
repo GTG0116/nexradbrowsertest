@@ -15,6 +15,7 @@ import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
+import { fetchSounding, drawSkewT, drawHodograph, paramRows } from './sounding.js';
 
 // Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
 // radar reflectivity color table, so all reflectivity is colored identically and
@@ -244,6 +245,8 @@ const state = {
   shownSweep: null,
   shownSite: null,
   inspect: false,
+  // Last-loaded HRRR sounding profile (sounding.js), re-rendered on resize.
+  soundingProfile: null,
   playback: null,
   // How many frames each playback loop preloads (user-adjustable).
   playbackFrames: 5,
@@ -369,6 +372,18 @@ function cacheEls() {
   el.playScrub = $('#playScrub');
   el.playLabel = $('#playLabel');
   el.playClose = $('#playClose');
+
+  // HRRR sounding (Skew-T / hodograph / severe parameters).
+  el.soundingBtn = $('#soundingBtn');
+  el.dockSoundingBtn = $('#dockSoundingBtn');
+  el.sounding = $('#sounding');
+  el.sndClose = $('#sndClose');
+  el.sndMeta = $('#sndMeta');
+  el.sndStatus = $('#sndStatus');
+  el.sndCharts = $('#sndCharts');
+  el.sndSkewt = $('#sndSkewt');
+  el.sndHodo = $('#sndHodo');
+  el.sndParams = $('#sndParams');
 }
 
 function setStatus(text, busy = false) {
@@ -919,6 +934,9 @@ function applyModePanels() {
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
+  // The sounding launchers (right rail + mobile dock) are HRRR-only.
+  if (el.soundingBtn) el.soundingBtn.hidden = state.mode !== 'models';
+  if (el.dockSoundingBtn) el.dockSoundingBtn.hidden = state.mode !== 'models';
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar';
@@ -1525,6 +1543,84 @@ function sampleModelAt(lat, lon) {
   const v = grid.values[j * grid.ni + i];
   if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no echo', sub: p.id };
   return { main: fmtValue(p, v), sub: p.id };
+}
+
+// ---------------------------------------------------------------------------
+// HRRR sounding — a Skew-T, a storm-relative hodograph and the severe params,
+// for the column under the map center. Opens as a full-screen, mobile-first
+// sheet. The profile comes from the CORS-enabled HRRR point endpoint (see
+// sounding.js); we pin it to the displayed run's valid time.
+// ---------------------------------------------------------------------------
+let soundingSeq = 0;
+
+function modelValidTime() {
+  if (state.models.grid && state.models.grid.time) return state.models.grid.time;
+  const run = currentModelRun();
+  if (!run) return new Date();
+  return new Date(run.time.getTime() + state.models.fhour * 3600 * 1000);
+}
+
+async function openSounding() {
+  const c = state.map.getCenter();
+  const validTime = modelValidTime();
+  const seq = ++soundingSeq;
+
+  el.sounding.hidden = false;
+  document.body.classList.add('snd-open');
+  el.sndCharts.hidden = true;
+  el.sndParams.hidden = true;
+  el.sndStatus.hidden = false;
+  el.sndStatus.textContent = 'Loading HRRR sounding…';
+  const utc = `${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
+  el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
+
+  try {
+    const profile = await fetchSounding(c.lat, c.lng, validTime);
+    if (seq !== soundingSeq) return; // a newer request superseded this one
+    state.soundingProfile = profile;
+    el.sndStatus.hidden = true;
+    el.sndCharts.hidden = false;
+    el.sndParams.hidden = false;
+    renderSoundingParams(profile);
+    // One frame later, so the now-visible charts have their final layout size
+    // before the canvases size themselves to it.
+    requestAnimationFrame(drawSoundingCharts);
+  } catch (e) {
+    if (seq !== soundingSeq) return;
+    el.sndStatus.hidden = false;
+    el.sndStatus.textContent = e.message || 'Could not load sounding.';
+    console.error(e);
+  }
+}
+
+function renderSoundingParams(profile) {
+  const groups = paramRows(profile);
+  el.sndParams.innerHTML = groups.map((g) => `
+    <div class="snd-pgroup">
+      <h3>${g.title}</h3>
+      <div class="snd-pgrid">
+        ${g.rows.map((r) => `
+          <div class="snd-prow">
+            <span class="snd-plabel">${r.label}</span>
+            <span class="snd-pval" style="color:${r.color}">${r.value}</span>
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+// (Re)draw both canvases at their current on-screen size — called on open and
+// whenever the window/orientation changes while the sheet is up.
+function drawSoundingCharts() {
+  const profile = state.soundingProfile;
+  if (!profile || el.sounding.hidden) return;
+  drawSkewT(el.sndSkewt, profile);
+  drawHodograph(el.sndHodo, profile);
+}
+
+function closeSounding() {
+  el.sounding.hidden = true;
+  document.body.classList.remove('snd-open');
+  soundingSeq++; // cancel any in-flight render
 }
 
 // ---------------------------------------------------------------------------
@@ -2195,6 +2291,15 @@ function init() {
     setBasemap(el.basemapSelect.value)
   );
   el.inspectBtn.addEventListener('click', () => toggleInspect());
+
+  // ---- HRRR sounding launchers + sheet ----
+  el.soundingBtn.addEventListener('click', openSounding);
+  el.dockSoundingBtn.addEventListener('click', openSounding);
+  el.sndClose.addEventListener('click', closeSounding);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.sounding.hidden) closeSounding();
+  });
+
   el.playBtn.addEventListener('click', () => {
     if (state.playback.active) state.playback.stop();
     else state.playback.start();
@@ -2213,7 +2318,10 @@ function init() {
   mqMobile.addEventListener('change', applyResponsiveLayout);
   applyResponsiveLayout();
 
-  window.addEventListener('resize', () => state.map && state.map.resize());
+  window.addEventListener('resize', () => {
+    if (state.map) state.map.resize();
+    drawSoundingCharts();
+  });
   setTimeout(() => state.map.resize(), 100);
 
   tickClock();
