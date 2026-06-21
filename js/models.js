@@ -20,10 +20,14 @@ export const MODELS = {
     id: 'hrrr',
     label: 'HRRR (3 km CONUS)',
     bucket: 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com',
-    // Build the grib + index keys for a UTC day and cycle hour.
-    keysFor(dayStr, hh) {
-      const grib = `hrrr.${dayStr}/conus/hrrr.t${hh}z.wrfsfcf00.grib2`;
+    // Build the grib + index keys for a UTC day, cycle hour and forecast hour.
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `hrrr.${dayStr}/conus/hrrr.t${pad(cycle)}z.wrfsfcf${pad(fhour)}.grib2`;
       return { grib, idx: grib + '.idx' };
+    },
+    // Synoptic cycles (00/06/12/18z) run out to F48; the rest to F18.
+    maxForecastHour(cycle) {
+      return cycle % 6 === 0 ? 48 : 18;
     },
   },
 };
@@ -50,10 +54,9 @@ export const MODEL_PRODUCTS = {
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 const dayStrOf = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
 
-// List the available model runs for a UTC day, newest last. HRRR runs every
-// hour; we surface each cycle's f00 analysis as one frame. For the current day
-// we stop at the most recent cycle that should already be posted (HRRR f00 lands
-// ~50 min after the top of the hour).
+// List the available model runs (cycles) for a UTC day, newest last. HRRR runs
+// every hour. For the current day we stop at the most recent cycle that should
+// already be posted (HRRR f00 lands ~50 min after the top of the hour).
 export async function listModels(modelKey, productId, date) {
   const model = MODELS[modelKey];
   if (!model) throw new Error('unknown model');
@@ -64,18 +67,25 @@ export async function listModels(modelKey, productId, date) {
   if (isToday) {
     maxH = now.getUTCMinutes() >= 55 ? now.getUTCHours() : now.getUTCHours() - 1;
   }
-  const frames = [];
+  const runs = [];
   for (let h = 0; h <= maxH; h++) {
-    const hh = pad(h);
-    const { grib, idx } = model.keysFor(dayStr, hh);
-    frames.push({
-      key: grib,
-      idxKey: idx,
-      label: `${hh}z`,
+    runs.push({
+      key: `${dayStr}t${pad(h)}`,
+      dayStr,
+      cycle: h,
+      label: `${pad(h)}z`,
       time: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h)),
+      maxFhour: model.maxForecastHour ? model.maxForecastHour(h) : 0,
     });
   }
-  return frames;
+  return runs;
+}
+
+// The forecast hours available for a run, as integers [0 … maxFhour].
+export function forecastHours(run) {
+  const out = [];
+  for (let f = 0; f <= (run.maxFhour || 0); f++) out.push(f);
+  return out;
 }
 
 // Parse a GRIB `.idx` file and return the [start, end] byte range of the message
@@ -183,20 +193,25 @@ export function resampleLambert(grid, step = 0.025) {
   return { proj: 'latlon', ni: niT, nj: njT, lon1, lat1, di: step, dj: step, scanMode: 0, values: out };
 }
 
-// Download + decode one model frame into a lat/lon grid of physical values.
-export async function loadModel(modelKey, productId, frame, onProgress) {
+// Download + decode one forecast hour of a model run into a lat/lon grid of
+// physical values. `run` is an entry from listModels; `fhour` an integer.
+export async function loadModel(modelKey, productId, run, fhour, onProgress) {
   const model = MODELS[modelKey];
   const product = MODEL_PRODUCTS[productId];
   if (!model || !product) throw new Error('unknown model/product');
 
-  const idxText = await (await fetch(`${model.bucket}/${frame.idxKey}`)).text();
+  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, fhour);
+  const idxText = await (await fetch(`${model.bucket}/${idx}`)).text();
   const range = rangeFromIdx(idxText, product);
-  const bytes = await fetchRange(`${model.bucket}/${frame.key}`, range, onProgress);
+  const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
   const lambert = await decodeGrib2(bytes);
   const grid = lambert.proj === 'lambert' ? resampleLambert(lambert) : lambert;
   grid.product = product;
   grid.model = model;
-  grid.time = frame.time;
-  grid.key = frame.key;
+  grid.fhour = fhour;
+  grid.runTime = run.time;
+  // Valid time = cycle time + forecast hour.
+  grid.time = new Date(run.time.getTime() + fhour * 3600 * 1000);
+  grid.key = grib;
   return grid;
 }

@@ -102,6 +102,20 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - Composite reflectivity uses the **shared reflectivity color table** — the same
   one as MRMS and single-site radar — so a `.pal` loaded for single-site
   reflectivity recolours all three at once.
+- **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
+  hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
+  the right rail like radar elevation tilts.
+
+## Source switching, overlay and playback
+
+- The **RADAR / SAT / MRMS / MODELS** switch picks the active source. The
+  single-site radar is hidden in the satellite, MRMS and model modes unless the
+  **Radar overlay** toggle is switched on — then the live radar is drawn on top
+  of the other source.
+- **Playback** works for every source: it loops recent radar volumes, MRMS
+  frames or satellite scenes, and steps through a model run's **forecast hours**.
+  Each frame is loaded into a compact GPU-ready payload and cached, so a loop
+  scrubs instantly without holding the (often >100 MB) raw decoded fields.
 
 ## Architecture
 

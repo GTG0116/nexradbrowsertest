@@ -135,6 +135,14 @@
               <span>Dealias velocity</span>
               <button id="dealiasToggle" class="alerts-toggle" title="Unfold aliased velocities (VEL product)">OFF</button>
             </div>
+            <div class="toggle-field" id="radarOverlayField" hidden>
+              <span>Radar overlay</span>
+              <button id="radarOverlayToggle" class="alerts-toggle" title="Overlay the single-site radar on this source">OFF</button>
+            </div>
+            <div class="toggle-field" id="loopField">
+              <span>Playback loop</span>
+              <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
+            </div>
             <div class="pal-row">
               <label class="pal-btn" for="palInput">⤓ Load .pal</label>
               <input type="file" id="palInput" accept=".pal,.txt" hidden />
@@ -160,6 +168,11 @@
           <section class="panel" id="tiltPanel">
             <h2 class="panel-title">Elevation tilt</h2>
             <div id="tiltList" class="tilt-list scroll"></div>
+          </section>
+
+          <section class="panel" id="fhourPanel" hidden>
+            <h2 class="panel-title">Forecast hour</h2>
+            <div id="fhourList" class="tilt-list scroll"></div>
           </section>
 
           <section class="panel" id="satOptsPanel" hidden>
