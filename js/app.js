@@ -318,7 +318,6 @@ function cacheEls() {
   el.sheetBody = $('#sheetBody');
   el.sheetScrim = $('#sheetScrim');
   el.sheetGrip = $('#sheetGrip');
-  el.sheetClose = $('#sheetClose');
   el.sheetHeader = $('#sheetHeader');
   el.basemapSelect = $('#basemapSelect');
   el.sheetPlayback = $('#sheetPlayback');
@@ -1377,8 +1376,8 @@ function closeSheet() {
 
 // Drag the settings sheet down to dismiss it — a more discoverable close than
 // tapping the scrim. A short flick or a drag past ~90px closes; otherwise it
-// springs back. Dragging starts from the header (grip / minimize) so list
-// scrolling inside the body isn't hijacked.
+// springs back. Dragging starts from the header (the grip) so list scrolling
+// inside the body isn't hijacked.
 function enableSheetSwipe() {
   const handle = el.sheetHeader || el.sheetGrip;
   if (!handle) return;
@@ -1739,7 +1738,6 @@ function init() {
   );
   el.sheetScrim.addEventListener('click', closeSheet);
   el.sheetGrip.addEventListener('click', closeSheet);
-  el.sheetClose.addEventListener('click', closeSheet);
   enableSheetSwipe();
 
   el.basemapSelect.value = state.basemap;
