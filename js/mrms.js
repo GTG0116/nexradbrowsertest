@@ -42,9 +42,15 @@ const QPE = [
   s(150, [180, 0, 90]), s(250, [255, 0, 255]),
 ];
 
-function product(id, folder, name, unit, lo, hi, floor, stops) {
+const MM_TO_IN = 0.0393700787;
+
+// `disp` { unit, factor } gives an imperial display conversion for legend ticks
+// and the inspect readout, leaving the native values/colors untouched.
+function product(id, folder, name, unit, lo, hi, floor, stops, disp) {
   const scale = makeScale(stops);
-  return { id, folder, name, unit, lo, hi, floor, scale };
+  const dispUnit = (disp && disp.unit) || unit;
+  const dispFactor = (disp && disp.factor) || 1;
+  return { id, folder, name, unit, lo, hi, floor, scale, dispUnit, dispFactor, dispOffset: 0 };
 }
 
 export const MRMS_PRODUCTS = {
@@ -53,12 +59,12 @@ export const MRMS_PRODUCTS = {
   ROT1H: product('ROT1H', 'RotationTrack60min_00.50', '1-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
   ROT6H: product('ROT6H', 'RotationTrack360min_00.50', '6-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
   ROT24H: product('ROT24H', 'RotationTrack1440min_00.50', '24-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
-  MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', 0, 100, 0.5, HAIL),
+  MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
   POSH: product('POSH', 'POSH_00.50', 'Prob. of Severe Hail', '%', 0, 100, 1, PROB),
   LTG30: product('LTG30', 'LightningProbabilityNext30minGrid_scale_1', '30-min CG Lightning Prob.', '%', 0, 100, 1, PROB),
-  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 50, 0.2, QPE),
-  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 100, 0.2, QPE),
-  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 200, 0.2, QPE),
+  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 50, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 100, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 200, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
 };
 
 export const MRMS_ORDER = [

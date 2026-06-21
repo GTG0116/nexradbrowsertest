@@ -29,7 +29,11 @@ the radar imagery — entirely client-side.
   (`js/products.js`).
 - A distinctive **radar-operations-console UI** over a dark basemap: range rings,
   a live cursor readout, opacity control, elevation-tilt selection, and a UTC
-  clock. Pan/zoom the map freely.
+  clock. Pan/zoom the map freely. An **inspect** crosshair reads the value under
+  it for *any* layer (radar, satellite or MRMS), and all readouts are in
+  **imperial units** (mph, miles, inches, °F).
+- **Velocity dealiasing** (optional): a continuity unfold that removes the false
+  green-beside-red folds where Doppler velocity exceeds the Nyquist limit.
 - **Split-cut aware product selection**: modern VCPs split the Doppler moments
   (VEL/SW) and dual-pol moments (ρHV/ZDR/φDP) into separate sweeps at nearly the
   same elevation. For the chosen product the viewer renders whichever sweep

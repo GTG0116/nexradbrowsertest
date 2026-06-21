@@ -33,7 +33,7 @@ self.onmessage = (e) => {
             raw: m.raw,
           };
         }
-        return { azimuth: r.azimuth, elevation: r.elevation, moments };
+        return { azimuth: r.azimuth, elevation: r.elevation, nyquist: r.nyquist, moments };
       }),
     }));
 

@@ -3,11 +3,12 @@
 // S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
-import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
+import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals } from './products.js';
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
+import { dealiasSweep } from './dealias.js';
 import { AlertsController } from './alerts.js';
-import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox } from './goes.js';
+import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox, lonLatToColRow } from './goes.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
@@ -214,6 +215,7 @@ const state = {
   selectedElevation: 0.5,
   productId: 'REF',
   opacity: 0.85,
+  dealias: false,
   live: false,
   liveTimer: null,
   map: null,
@@ -274,6 +276,8 @@ function cacheEls() {
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
   el.ringsToggle = $('#ringsToggle');
+  el.dealiasToggle = $('#dealiasToggle');
+  el.dealiasField = $('#dealiasField');
   el.palInput = $('#palInput');
   el.palReset = $('#palReset');
   el.palName = $('#palName');
@@ -569,7 +573,12 @@ function buildLegend() {
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   const p = PRODUCTS[state.productId];
-  const { lo, hi, rgba, steps } = p.scale;
+  el.legend.innerHTML = legendHTML(p, p.scale);
+}
+
+// Build the legend markup for a product/scale, with imperial tick labels.
+function legendHTML(p, scale) {
+  const { lo, hi, rgba, steps } = scale;
   const segs = 80;
   const colors = [];
   for (let i = 0; i <= segs; i++) {
@@ -578,15 +587,13 @@ function buildLegend() {
     const o = li * 4;
     colors.push(`rgb(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]}) ${(i / segs) * 100}%`);
   }
-  el.legend.innerHTML = `
-    <div class="legend-title">${p.name} <span>(${p.unit})</span></div>
-    <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(
-      ','
-    )})"></div>
-    <div class="legend-ticks"><span>${lo}</span><span>${(
-    (lo + hi) /
-    2
-  ).toFixed(lo < 0 || hi <= 1 ? 1 : 0)}</span><span>${hi}</span></div>`;
+  const u = dispUnitOf(p);
+  const dec = unitDecimals(u);
+  const tick = (v) => dispValue(p, v).toFixed(dec);
+  return `
+    <div class="legend-title">${p.name} <span>(${u})</span></div>
+    <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
+    <div class="legend-ticks"><span>${tick(lo)}</span><span>${tick((lo + hi) / 2)}</span><span>${tick(hi)}</span></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +627,11 @@ function applyPal(targetId, pal, name) {
   p.scale = makeScale(pal.segments);
   p.range = [p.scale.lo, p.scale.hi];
   if (pal.units) p.unit = pal.units;
+  // A custom palette defines values in its own units, so show them verbatim
+  // (no imperial conversion on top of the author's scale).
+  p.dispUnit = pal.units || p.unit;
+  p.dispFactor = 1;
+  p.dispOffset = 0;
   p.customPal = name;
 }
 
@@ -676,6 +688,9 @@ function resetPalettes() {
     p.scale = p.defaultScale;
     p.range = [p.scale.lo, p.scale.hi];
     p.unit = p.defaultUnit;
+    p.dispUnit = p.defaultDispUnit;
+    p.dispFactor = p.defaultDispFactor;
+    p.dispOffset = p.defaultDispOffset;
     delete p.customPal;
   }
   writePalStore({}); // forget the saved palettes too
@@ -762,10 +777,24 @@ function renderRadar() {
   displaySweep(currentSweep(), state.volume && state.volume.site);
 }
 
+// Resolve the sweep actually shown: apply velocity dealiasing when enabled and
+// the velocity product is selected. Memoised in dealias.js, so this is cheap.
+function resolveSweep(sweep) {
+  if (sweep && state.dealias && state.productId === 'VEL') return dealiasSweep(sweep);
+  return sweep;
+}
+
+// Format a native physical value in the product's imperial display units.
+function fmtValue(product, v) {
+  const u = dispUnitOf(product);
+  return `${dispValue(product, v).toFixed(unitDecimals(u))} ${u}`;
+}
+
 // Draw one sweep (from any volume) onto the map and remember it so the inspect
 // readout and dock can reflect what is actually on screen.
 function displaySweep(sweep, site) {
   const product = PRODUCTS[state.productId];
+  sweep = resolveSweep(sweep);
   state.shownSweep = sweep;
   state.shownSite = site;
 
@@ -811,6 +840,7 @@ function applyModePanels() {
   el.mrmsFields.hidden = state.mode !== 'mrms';
   el.tiltPanel.hidden = state.mode !== 'radar';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
+  if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
     state.mode === 'radar' ? 'Volume scans'
@@ -1027,9 +1057,10 @@ function buildSatLegend() {
       ? enhancementGradientCSS(band)
       : 'linear-gradient(90deg,#fff,#000)';
     const kind = isVis ? 'reflectance' : isWV ? 'WV brightness temp' : 'brightness temp';
-    const warmTick = isWV ? '0°C' : '+50°C';
+    // Warmest knot is +50°C (122°F) for IR, 0°C (32°F) for WV; coldest −95°C (−139°F).
+    const warmTick = isWV ? '32°F' : '122°F';
     const ticks = isVis ? '<span>0</span><span>reflectance</span><span>1</span>'
-      : `<span>${warmTick}</span><span>${kind}</span><span>−95°C</span>`;
+      : `<span>${warmTick}</span><span>${kind}</span><span>−139°F</span>`;
     el.legend.innerHTML = `
       <div class="legend-title">${meta.name} <span>(${id} · ${meta.um}µm)</span></div>
       <div class="legend-bar" style="background:${grad}"></div>
@@ -1162,19 +1193,7 @@ function renderMrms() {
 
 function buildMrmsLegend() {
   const p = MRMS_PRODUCTS[state.mrms.productId];
-  const { lo, hi, rgba, steps } = p.scale;
-  const segs = 80;
-  const colors = [];
-  for (let i = 0; i <= segs; i++) {
-    let li = Math.round((i / segs) * (steps - 1));
-    if (li >= steps) li = steps - 1;
-    const o = li * 4;
-    colors.push(`rgb(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]}) ${(i / segs) * 100}%`);
-  }
-  el.legend.innerHTML = `
-    <div class="legend-title">${p.name} <span>(${p.unit})</span></div>
-    <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
-    <div class="legend-ticks"><span>${lo}</span><span>${((lo + hi) / 2)}</span><span>${hi}</span></div>`;
+  el.legend.innerHTML = legendHTML(p, p.scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,26 +1269,64 @@ function toggleInspect(on) {
   updateInspect();
 }
 
-function updateInspect() {
-  if (!state.inspect) return;
+// Sample whichever data layer is active at a geographic point. Returns null
+// (no layer), { out: true } (off coverage), or { main, sub } formatted strings.
+function sampleActive(lat, lon) {
+  if (state.mode === 'satellite') return sampleSatAt(lat, lon);
+  if (state.mode === 'mrms') return sampleMrmsAt(lat, lon);
+  return sampleRadarAt(lat, lon);
+}
+
+function sampleRadarAt(lat, lon) {
   const product = PRODUCTS[state.productId];
   const sweep = state.shownSweep;
   const site = state.shownSite;
-  if (!sweep || !site) {
-    el.crosshairRead.textContent = 'no data';
-    return;
-  }
+  if (!sweep || !site) return null;
+  const s = sampleAt(sweep, product, lat, lon, site);
+  if (!s || s.range > sweepMaxRange(sweep, product.moment)) return { out: true };
+  const main = s.value == null ? 'no echo' : fmtValue(product, s.value);
+  const mi = ((s.range / 1000) * 0.621371).toFixed(0);
+  return { main, sub: `${product.id} · az ${s.az.toFixed(0)}° · ${mi} mi` };
+}
+
+function sampleSatAt(lat, lon) {
+  const scene = state.sat.scene;
+  if (!scene) return null;
+  const id = state.sat.productId;
+  const cr = lonLatToColRow(scene, lat, lon);
+  if (!cr) return { out: true };
+  if (!id.startsWith('C'))
+    return { main: SAT_RGB[id.replace(/^RGB_/, '')].short, sub: 'RGB composite' };
+  const band = parseInt(id.slice(1), 10);
+  const meta = SAT_CHANNELS[band - 1];
+  const arr = scene.channels[band];
+  if (!arr) return { out: true };
+  const v = arr[Math.round(cr.row) * scene.width + Math.round(cr.col)];
+  if (Number.isNaN(v)) return { main: 'no data', sub: id };
+  if (meta.type === 'vis') return { main: `${(v * 100).toFixed(0)} %`, sub: `${id} reflectance` };
+  const f = ((v - 273.15) * 9 / 5 + 32).toFixed(0);
+  return { main: `${f} °F`, sub: `${id} cloud-top` };
+}
+
+function sampleMrmsAt(lat, lon) {
+  const grid = state.mrms.grid;
+  if (!grid) return null;
+  const p = grid.product;
+  const i = Math.floor((lon - grid.lon1) / grid.di);
+  const j = Math.floor((grid.lat1 - lat) / grid.dj);
+  if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
+  const v = grid.values[j * grid.ni + i];
+  if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no data', sub: p.id };
+  return { main: fmtValue(p, v), sub: p.id };
+}
+
+function updateInspect() {
+  if (!state.inspect) return;
   const c = state.map.getCenter();
-  const s = sampleAt(sweep, product, c.lat, c.lng, site);
-  if (!s || s.range > sweepMaxRange(sweep, product.moment)) {
-    el.crosshairRead.textContent = 'out of range';
-    return;
-  }
-  const valueStr =
-    s.value == null
-      ? 'no echo'
-      : `${s.value.toFixed(product.id === 'RHO' ? 2 : 1)} ${product.unit}`;
-  el.crosshairRead.innerHTML = `<b>${valueStr}</b> · ${product.id}`;
+  const r = sampleActive(c.lat, c.lng);
+  if (!r) { el.crosshairRead.textContent = 'no data'; return; }
+  if (r.out) { el.crosshairRead.textContent = 'out of range'; return; }
+  el.crosshairRead.innerHTML = `<b>${r.main}</b> · ${r.sub}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1284,20 +1341,38 @@ function updateDock() {
   el.dockTime.textContent = t ? t.label : '—';
 }
 
+const SHEET_EASE = 'cubic-bezier(.22,1,.36,1)';
+let sheetCloseTimer = null;
+
 function openSheet() {
+  if (sheetCloseTimer) { clearTimeout(sheetCloseTimer); sheetCloseTimer = null; }
   el.sheet.hidden = false;
-  el.sheet.style.transition = 'none';
-  el.sheet.style.transform = 'translateY(0)';
   el.sheetScrim.hidden = false;
   document.querySelector('.app').classList.add('sheet-open');
+  // Slide up from the bottom: start off-screen, then animate to rest next frame.
+  el.sheet.style.transition = 'none';
+  el.sheet.style.transform = 'translateY(100%)';
+  // Force a reflow so the starting transform is committed before transitioning.
+  void el.sheet.offsetHeight;
+  requestAnimationFrame(() => {
+    el.sheet.style.transition = `transform 0.3s ${SHEET_EASE}`;
+    el.sheet.style.transform = 'translateY(0)';
+  });
 }
 
 function closeSheet() {
-  el.sheet.hidden = true;
-  el.sheet.style.transform = '';
-  el.sheet.style.transition = '';
+  if (el.sheet.hidden) return;
+  el.sheet.style.transition = `transform 0.24s ${SHEET_EASE}`;
+  el.sheet.style.transform = 'translateY(110%)';
   el.sheetScrim.hidden = true;
   document.querySelector('.app').classList.remove('sheet-open');
+  if (sheetCloseTimer) clearTimeout(sheetCloseTimer);
+  sheetCloseTimer = setTimeout(() => {
+    sheetCloseTimer = null;
+    el.sheet.hidden = true;
+    el.sheet.style.transform = '';
+    el.sheet.style.transition = '';
+  }, 240);
 }
 
 // Drag the settings sheet down to dismiss it — a more discoverable close than
@@ -1534,23 +1609,12 @@ function updateMeta() {
 // Cursor readout
 // ---------------------------------------------------------------------------
 function updateReadout(latlng) {
-  const sweep = currentSweep();
-  const product = PRODUCTS[state.productId];
-  const site = state.volume && state.volume.site;
-  if (!sweep || !site) return;
-
-  const s = sampleAt(sweep, product, latlng.lat, latlng.lng, site);
-  if (!s || s.range > sweepMaxRange(sweep, product.moment)) {
+  const r = sampleActive(latlng.lat, latlng.lng);
+  if (!r || r.out) {
     el.readout.classList.remove('show');
     return;
   }
-  const valueStr =
-    s.value == null
-      ? 'no echo'
-      : `${s.value.toFixed(product.id === 'RHO' ? 2 : 1)} ${product.unit}`;
-  el.readout.innerHTML = `<b>${valueStr}</b><span>${product.id} · az ${s.az.toFixed(
-    0
-  )}° · ${(s.range / 1000).toFixed(0)} km</span>`;
+  el.readout.innerHTML = `<b>${r.main}</b><span>${r.sub}</span>`;
   el.readout.classList.add('show');
 }
 
@@ -1639,6 +1703,18 @@ function init() {
     state.showRings = on;
     if (state.map && state.map.getLayer && state.map.getLayer('rings'))
       state.map.setLayoutProperty('rings', 'visibility', on ? 'visible' : 'none');
+  });
+
+  // Velocity dealiasing — unfold aliased VEL gates. Re-renders the current sweep
+  // (and refreshes the inspect/cursor readouts) through the same path.
+  el.dealiasToggle.addEventListener('click', () => {
+    const on = !el.dealiasToggle.classList.contains('active');
+    el.dealiasToggle.classList.toggle('active', on);
+    el.dealiasToggle.textContent = on ? 'ON' : 'OFF';
+    state.dealias = on;
+    renderRadar();
+    updateInspect();
+    setStatus(on ? 'velocity dealiasing on' : 'velocity dealiasing off');
   });
 
   // Live NWS watches/warnings overlay.

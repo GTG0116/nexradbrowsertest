@@ -122,6 +122,11 @@ function parseMessage31(r, base, bodyLen) {
       radial.longitude = r.f32(o + 12);
       radial.siteHeight = r.i16(o + 16);
     }
+    // The RAD constant block carries the Nyquist (unambiguous) velocity, scaled
+    // by 0.01 m/s — needed to unfold (dealias) the velocity moment.
+    if (name === 'RAD') {
+      radial.nyquist = r.u16(o + 16) * 0.01;
+    }
   }
   return radial;
 }
