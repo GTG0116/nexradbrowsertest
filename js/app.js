@@ -244,6 +244,8 @@ const state = {
   shownSite: null,
   inspect: false,
   playback: null,
+  // How many frames each playback loop preloads (user-adjustable).
+  playbackFrames: 5,
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -308,6 +310,8 @@ function cacheEls() {
   el.radarOverlayToggle = $('#radarOverlayToggle');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
+  el.playFrames = $('#playFrames');
+  el.playFramesVal = $('#playFramesVal');
   el.palInput = $('#palInput');
   el.palReset = $('#palReset');
   el.palName = $('#palName');
@@ -1783,10 +1787,11 @@ function playbackContextKey() {
 }
 
 // Build the per-mode playback provider against the current state. `frames` are
-// ordered oldest→newest; `ck` is a globally-unique cache key per frame.
+// ordered oldest→newest; `ck` is a globally-unique cache key per frame. Every
+// source loops the same user-chosen number of frames (state.playbackFrames).
 function buildPlaybackProvider() {
+  const n = state.playbackFrames;
   if (state.mode === 'radar') {
-    const n = mqMobile.matches ? 5 : 10;
     return {
       frames: state.volumes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
       async load(f) { return await decodeVolume(await fetchVolume(f.key)); },
@@ -1795,7 +1800,6 @@ function buildPlaybackProvider() {
     };
   }
   if (state.mode === 'mrms') {
-    const n = mqMobile.matches ? 3 : 8;
     return {
       frames: state.mrms.frames.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
       async load(f) {
@@ -1807,7 +1811,6 @@ function buildPlaybackProvider() {
     };
   }
   if (state.mode === 'satellite') {
-    const n = mqMobile.matches ? 3 : 6;
     return {
       frames: state.sat.scenes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
       async load(f) {
@@ -1822,10 +1825,9 @@ function buildPlaybackProvider() {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Loop the forecast hours of the selected run (capped so we don't preload
-    // dozens of fields); the picker still reaches every hour out to F48.
-    const cap = mqMobile.matches ? 7 : 19;
-    const hours = forecastHours(run).slice(0, cap);
+    // Loop the first N forecast hours of the selected run; the picker still
+    // reaches every hour out to F48.
+    const hours = forecastHours(run).slice(0, n);
     return {
       frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
       async load(f) {
@@ -2130,6 +2132,17 @@ function init() {
     el.loopBtn.addEventListener('click', () => {
       if (state.playback.active) state.playback.stop();
       else state.playback.start();
+    });
+  }
+
+  // How many frames a playback loop preloads. Applied the next time playback
+  // starts (the count determines how much is fetched up front).
+  if (el.playFrames) {
+    el.playFrames.value = String(state.playbackFrames);
+    el.playFramesVal.textContent = state.playbackFrames;
+    el.playFrames.addEventListener('input', () => {
+      state.playbackFrames = Number(el.playFrames.value);
+      el.playFramesVal.textContent = state.playbackFrames;
     });
   }
 

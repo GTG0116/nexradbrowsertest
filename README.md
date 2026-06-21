@@ -115,7 +115,9 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **Playback** works for every source: it loops recent radar volumes, MRMS
   frames or satellite scenes, and steps through a model run's **forecast hours**.
   Each frame is loaded into a compact GPU-ready payload and cached, so a loop
-  scrubs instantly without holding the (often >100 MB) raw decoded fields.
+  scrubs instantly without holding the (often >100 MB) raw decoded fields. The
+  number of frames a loop preloads is adjustable (the **Playback frames** slider,
+  default 5).
 
 ## Architecture
 
