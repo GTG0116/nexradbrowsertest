@@ -1,39 +1,106 @@
-// s3.js — fetch NEXRAD Level II volumes from a public AWS S3 bucket.
+// s3.js — discover and download NEXRAD Level II volumes for the live viewer.
 //
-// We use Unidata's realtime full-volume feed `unidata-nexrad-level2`, mirrored
-// openly on AWS as part of the NOAA Open Data Dissemination program. Objects are
-// keyed as  YYYY/MM/DD/SITE/SITEYYYYMMDD_HHMMSS_V06 . The bucket returns
-// `Access-Control-Allow-Origin: *` for both listing and GET, so the browser can
-// discover and download volumes directly — no backend, no proxy required.
+// Two public sources are used, in priority order:
+//
+//   1. PRIMARY — the Iowa Environmental Mesonet (IEM) raw Level II feed at
+//      mesonet-nexrad.agron.iastate.edu/level2/raw/<SITE>/ . IEM relays the NWS
+//      realtime feed and exposes each volume as it is ingested, so it carries
+//      newer scans (and a denser recent loop) than the AWS mirror — exactly what
+//      a live viewer wants. Each site directory holds a `dir.list` index
+//      (`<bytes> <filename>` per line) plus the volumes, named
+//      <SITE>_YYYYMMDD_HHMMSS.bz2 . Despite the extension these are ordinary
+//      AR2V "Archive II" files (internally bzip2-compressed LDM records), so the
+//      decoder reads them unchanged.
+//
+//   2. FALLBACK — Unidata's realtime full-volume feed `unidata-nexrad-level2`,
+//      mirrored openly on AWS as part of the NOAA Open Data Dissemination
+//      program. Objects are keyed  YYYY/MM/DD/SITE/SITEYYYYMMDD_HHMMSS_V06  and
+//      the bucket returns `Access-Control-Allow-Origin: *` for listing and GET.
+//
+// IEM is tried first. We fall back to the AWS bucket whenever IEM is unreachable
+// (it does not advertise CORS, so a cross-origin browser fetch can be blocked —
+// set a proxy below if so), errors out, or simply has no data for the requested
+// UTC day. That last case covers history browsing: IEM keeps only a rolling
+// window, while AWS retains the full recent archive.
 //
 // (NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
-// disables anonymous bucket listing, so it can't be browsed from the client.
-// The Unidata feed carries a rolling window of the most recent scans, which is
-// exactly what a live viewer needs.)
+// disables anonymous bucket listing, so it can't be browsed from the client.)
 
+const IEM_BASE = 'https://mesonet-nexrad.agron.iastate.edu/level2/raw';
 const BUCKET = 'https://unidata-nexrad-level2.s3.amazonaws.com';
 
-// Optional CORS proxy. Left empty: we talk to S3 directly. If a user's network
-// blocks it, they can set a proxy prefix here.
+// Keys for IEM volumes carry this prefix so fetchVolume can route them back to
+// the right source; AWS keys are bare S3 object keys.
+const IEM_PREFIX = 'iem:';
+
+// Optional CORS proxy. Left empty: we talk to each source directly. If a user's
+// network blocks a source, they can set a proxy prefix here.
 let proxy = '';
 export function setProxy(p) {
   proxy = p || '';
 }
-function url(path) {
-  return proxy ? proxy + encodeURIComponent(BUCKET + path) : BUCKET + path;
+function viaProxy(fullUrl) {
+  return proxy ? proxy + encodeURIComponent(fullUrl) : fullUrl;
 }
 
 function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-// List the volume scan keys for a given site and UTC day, newest last.
+// List the volume scan keys for a given site and UTC day, newest last. Prefers
+// the IEM feed and falls back to the AWS bucket when IEM has nothing usable.
 export async function listVolumes(site, date) {
+  try {
+    const vols = await listVolumesIem(site, date);
+    if (vols.length) return vols;
+  } catch (e) {
+    console.warn('IEM list failed, falling back to AWS:', e.message);
+  }
+  return listVolumesAws(site, date);
+}
+
+// --- IEM (primary) -------------------------------------------------------
+
+async function listVolumesIem(site, date) {
+  const SITE = site.toUpperCase();
+  const res = await fetch(viaProxy(`${IEM_BASE}/${SITE}/dir.list`));
+  if (!res.ok) throw new Error(`IEM list failed: ${res.status}`);
+  const text = await res.text();
+
+  const y = date.getUTCFullYear();
+  const m = pad(date.getUTCMonth() + 1);
+  const d = pad(date.getUTCDate());
+  const day = `${y}${m}${d}`;
+
+  const vols = [];
+  for (const line of text.split('\n')) {
+    // dir.list rows are "<bytes> <filename>"; take the trailing filename.
+    const name = line.trim().split(/\s+/).pop();
+    if (!name) continue;
+    const t = timeForName(name);
+    if (!t) continue;
+    // Keep only scans from the requested UTC day, matching the date picker.
+    if (name.indexOf(`_${day}_`) === -1) continue;
+    vols.push({
+      key: `${IEM_PREFIX}${SITE}/${name}`,
+      label: labelForTime(t),
+      time: t,
+    });
+  }
+  vols.sort((a, b) => a.time - b.time);
+  return vols;
+}
+
+// --- AWS S3 (fallback) ---------------------------------------------------
+
+async function listVolumesAws(site, date) {
   const y = date.getUTCFullYear();
   const m = pad(date.getUTCMonth() + 1);
   const d = pad(date.getUTCDate());
   const prefix = `${y}/${m}/${d}/${site.toUpperCase()}/`;
-  const listUrl = url(`/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`);
+  const listUrl = viaProxy(
+    `${BUCKET}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`
+  );
 
   const res = await fetch(listUrl);
   if (!res.ok) throw new Error(`S3 list failed: ${res.status}`);
@@ -57,17 +124,26 @@ export async function listVolumes(site, date) {
   }));
 }
 
-function labelForKey(key) {
-  const name = key.split('/').pop();
-  const t = timeForKey(key);
-  if (!t) return name;
+// --- shared helpers ------------------------------------------------------
+
+function labelForTime(t) {
   return `${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}:${pad(t.getUTCSeconds())}Z`;
 }
 
+function labelForKey(key) {
+  const t = timeForKey(key);
+  if (!t) return key.split('/').pop();
+  return labelForTime(t);
+}
+
 function timeForKey(key) {
-  // KTLX20240619_120300_V06
-  const name = key.split('/').pop();
-  const m = name.match(/(\d{8})_(\d{6})/);
+  return timeForName(key.split('/').pop());
+}
+
+// Parse the UTC scan time from a volume filename. Handles both the AWS form
+// (KTLX20240619_120300_V06) and the IEM form (KTLX_20240619_120300.bz2).
+function timeForName(name) {
+  const m = name && name.match(/(\d{8})_(\d{6})/);
   if (!m) return null;
   const d = m[1];
   const t = m[2];
@@ -83,9 +159,13 @@ function timeForKey(key) {
   );
 }
 
-// Download one volume scan as raw bytes, reporting progress 0..1.
+// Download one volume scan as raw bytes, reporting progress 0..1. The key picks
+// the source: IEM keys are prefixed (see IEM_PREFIX), AWS keys are bare.
 export async function fetchVolume(key, onProgress) {
-  const res = await fetch(url('/' + key));
+  const src = key.startsWith(IEM_PREFIX)
+    ? `${IEM_BASE}/${key.slice(IEM_PREFIX.length)}`
+    : `${BUCKET}/${key}`;
+  const res = await fetch(viaProxy(src));
   if (!res.ok) throw new Error(`download failed: ${res.status}`);
 
   const total = Number(res.headers.get('content-length')) || 0;
