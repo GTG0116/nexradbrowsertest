@@ -1361,6 +1361,12 @@ input[type='range']::-moz-range-thumb {
   color: var(--accent);
 }
 .sheet-body {
+  /* Become the bounded scroll area inside the height-capped sheet: without
+     flex:1 + min-height:0 the body grows to its content height and its lower
+     sections (e.g. the satellite / MRMS selectors at the bottom of the Source
+     panel) spill below the screen edge, unreachable behind the dock. */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;

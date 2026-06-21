@@ -20,16 +20,23 @@ async function inflate(bytes) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-// Decode a non-interlaced grayscale PNG (colour type 0, bit depth 8 or 16) to a
-// Uint16Array of sample values. This is exactly what GRIB2 DRT 5.41 produces.
-async function decodePNGGray(png) {
+// Decode a non-interlaced PNG to an array of integer sample values. GRIB2 DRT
+// 5.41 packs the data as a grayscale PNG (colour type 0, bit depth 8 or 16) for
+// ≤16-bit fields, but products needing more precision (e.g. lightning
+// probability, 24 bits) are stored as an 8-bit RGB PNG (colour type 2) with the
+// value spread across the R,G,B bytes — so we handle both. The returned typed
+// array is sized to the field's bit depth (Uint8/Uint16/Uint32).
+async function decodePNG(png) {
   const dv = new DataView(png.buffer, png.byteOffset, png.length);
   const W = dv.getUint32(16);
   const H = dv.getUint32(20);
   const bitDepth = png[24];
   const colorType = png[25];
   const interlace = png[28];
-  if (colorType !== 0 || interlace !== 0) throw new Error('unsupported PNG in GRIB2');
+  if (interlace !== 0) throw new Error('unsupported interlaced PNG in GRIB2');
+  // Samples per pixel: grayscale (0) → 1, truecolour RGB (2) → 3.
+  const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : 0;
+  if (!channels) throw new Error('unsupported PNG colour type ' + colorType + ' in GRIB2');
 
   // concatenate IDAT chunks
   const idat = [];
@@ -48,9 +55,13 @@ async function decodePNGGray(png) {
   for (const c of idat) { comp.set(c, off); off += c.length; }
   const raw = await inflate(comp);
 
-  const bpp = bitDepth === 16 ? 2 : 1;
+  const bpp = (bitDepth / 8) * channels; // bytes per pixel (filter unit)
   const stride = W * bpp;
-  const out = new Uint16Array(W * H);
+  // Output values can be 8-bit (gray-8), 16-bit (gray-16) or 24-bit (RGB-8).
+  const bitsPerValue = colorType === 2 ? channels * bitDepth : bitDepth;
+  const out = bitsPerValue <= 8 ? new Uint8Array(W * H)
+    : bitsPerValue <= 16 ? new Uint16Array(W * H)
+    : new Uint32Array(W * H);
   const cur = new Uint8Array(stride);
   const prev = new Uint8Array(stride);
   let ip = 0;
@@ -78,8 +89,15 @@ async function decodePNGGray(png) {
       cur[x] = v & 255;
     }
     const row = y * W;
-    if (bpp === 2) for (let x = 0; x < W; x++) out[row + x] = (cur[x * 2] << 8) | cur[x * 2 + 1];
-    else for (let x = 0; x < W; x++) out[row + x] = cur[x];
+    if (colorType === 2) {
+      // RGB-8: reconstruct the value big-endian across the three bytes.
+      for (let x = 0; x < W; x++)
+        out[row + x] = (cur[x * 3] << 16) | (cur[x * 3 + 1] << 8) | cur[x * 3 + 2];
+    } else if (bitDepth === 16) {
+      for (let x = 0; x < W; x++) out[row + x] = (cur[x * 2] << 8) | cur[x * 2 + 1];
+    } else {
+      for (let x = 0; x < W; x++) out[row + x] = cur[x];
+    }
     prev.set(cur);
   }
   return { W, H, samples: out };
@@ -129,7 +147,7 @@ export async function decodeGrib2(input) {
   const values = new Float32Array(ni * nj);
 
   if (drt === 41 || drt === 40) {
-    const { samples } = await decodePNGGray(dataSection);
+    const { samples } = await decodePNG(dataSection);
     for (let i = 0; i < values.length; i++) {
       const Y = (R + samples[i] * scaleE) / scaleD;
       values[i] = Y;

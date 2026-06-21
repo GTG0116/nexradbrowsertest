@@ -18,9 +18,12 @@ const REFL = [
   s(45, [253, 149, 0]), s(55, [212, 0, 0]), s(65, [248, 0, 253]), s(75, [253, 253, 253]),
 ];
 // Rotation / shear ramp (blue→yellow→red→magenta) for AzShear & rotation tracks.
+// MRMS packs azimuthal shear in native units of 10⁻³ s⁻¹ (so a decoded value of
+// 20 ≈ 0.020 s⁻¹, a strong mesocyclone), on the 0.005° super-res grid. We colour
+// in those native units and label the legend accordingly.
 const ROT = [
-  s(0, [40, 40, 70]), s(0.002, [0, 120, 220]), s(0.004, [0, 200, 120]),
-  s(0.006, [230, 220, 0]), s(0.008, [255, 120, 0]), s(0.012, [220, 0, 0]), s(0.02, [255, 0, 255]),
+  s(2, [40, 40, 70]), s(4, [0, 120, 220]), s(8, [0, 200, 120]),
+  s(12, [230, 220, 0]), s(16, [255, 120, 0]), s(24, [220, 0, 0]), s(40, [255, 0, 255]),
 ];
 // Hail size (mm) ramp.
 const HAIL = [
@@ -46,10 +49,10 @@ function product(id, folder, name, unit, lo, hi, floor, stops) {
 
 export const MRMS_PRODUCTS = {
   REFC: product('REFC', 'MergedReflectivityQCComposite_00.50', 'Composite Reflectivity', 'dBZ', 5, 75, 5, REFL),
-  AZSHEAR: product('AZSHEAR', 'MergedAzShear_0-2kmAGL_00.50', 'AzShear 0–2 km (Instant Rotation)', 's⁻¹', 0, 0.02, 0.001, ROT),
-  ROT1H: product('ROT1H', 'RotationTrack60min_00.50', '1-hr Rotation Track', 's⁻¹', 0, 0.02, 0.001, ROT),
-  ROT6H: product('ROT6H', 'RotationTrack360min_00.50', '6-hr Rotation Track', 's⁻¹', 0, 0.02, 0.001, ROT),
-  ROT24H: product('ROT24H', 'RotationTrack1440min_00.50', '24-hr Rotation Track', 's⁻¹', 0, 0.02, 0.001, ROT),
+  AZSHEAR: product('AZSHEAR', 'MergedAzShear_0-2kmAGL_00.50', 'AzShear 0–2 km (Instant Rotation)', '10⁻³ s⁻¹', 2, 40, 2, ROT),
+  ROT1H: product('ROT1H', 'RotationTrack60min_00.50', '1-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
+  ROT6H: product('ROT6H', 'RotationTrack360min_00.50', '6-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
+  ROT24H: product('ROT24H', 'RotationTrack1440min_00.50', '24-hr Rotation Track', '10⁻³ s⁻¹', 2, 40, 2, ROT),
   MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', 0, 100, 0.5, HAIL),
   POSH: product('POSH', 'POSH_00.50', 'Prob. of Severe Hail', '%', 0, 100, 1, PROB),
   LTG30: product('LTG30', 'LightningProbabilityNext30minGrid_scale_1', '30-min CG Lightning Prob.', '%', 0, 100, 1, PROB),

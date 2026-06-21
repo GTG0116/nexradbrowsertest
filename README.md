@@ -56,7 +56,9 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **Sectors**: full-disk, CONUS, and both mesoscale floaters, plus a set of
   familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
 - **All 16 ABI channels** (visible/near-IR as reflectance, IR as brightness
-  temperature, with an optional IR colour enhancement) and **RGB composites**:
+  temperature). A colour enhancement (on by default, toggleable) gives the
+  infrared window channels the classic rainbow cloud-top scale and the
+  water-vapour channels a dedicated WV enhancement. Plus **RGB composites**:
   True Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and
   Night Microphysics.
 - **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
@@ -67,7 +69,10 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 
 - **GRIB2 decoded in pure JS** (`js/grib2.js`): gunzip via `DecompressionStream`,
   GRIB2 section parsing, and an in-house PNG reader for the PNG-packed values
-  (DRT 5.41) so the full 16-bit precision survives (a `<canvas>` would clamp it).
+  (DRT 5.41) so the full precision survives (a `<canvas>` would clamp it) —
+  grayscale 8/16-bit *and* the RGB-packed 24-bit fields (e.g. lightning
+  probability). Super-res products (AzShear, rotation tracks) on the 0.005° grid
+  are coloured in their native 10⁻³ s⁻¹ units.
 - **Products**: Composite Reflectivity, AzShear (instant rotation), 1/6/24-hr
   rotation tracks, MESH (max hail size), POSH (severe-hail probability), 30-min
   CG-lightning probability, and 1/6/24-hr precip totals.
