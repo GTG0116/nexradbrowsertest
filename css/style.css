@@ -577,6 +577,25 @@ input[type='range']::-moz-range-thumb {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+/* Models mode stacks labelled category groups, each holding its own grid. */
+.product-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.product-stack .product-grid + .product-cat {
+  margin-top: 6px;
+}
+.product-cat {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  opacity: 0.85;
+  padding: 2px 2px 1px;
+  border-bottom: 1px solid var(--panel-edge);
+}
 .product-btn {
   display: flex;
   flex-direction: column;

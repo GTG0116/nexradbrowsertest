@@ -169,7 +169,10 @@ export const PRODUCTS = {
 };
 
 // Decimal places to show for a (display) unit.
-const UNIT_DECIMALS = { mph: 0, in: 2, '°F': 0, dBZ: 0, ρHV: 2, dB: 1, '°': 0, '%': 0, 'm/s': 1 };
+const UNIT_DECIMALS = {
+  mph: 0, in: 2, '°F': 0, '°C': 0, dBZ: 0, ρHV: 2, dB: 1, '°': 0, '%': 0, 'm/s': 1,
+  kt: 0, 'J/kg': 0, 'm²/s²': 0, '°C/km': 1, '10⁻⁵/s': 0, m: 0, 'flash/km²': 1,
+};
 export function unitDecimals(unit) {
   return unit in UNIT_DECIMALS ? UNIT_DECIMALS[unit] : 1;
 }
