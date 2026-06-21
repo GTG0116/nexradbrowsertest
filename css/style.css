@@ -1357,34 +1357,6 @@ input[type='range']::-moz-range-thumb {
   margin: 10px auto;
   cursor: pointer;
 }
-/* A large, obvious tap target to minimize the sheet (alongside swipe-down). */
-.sheet-min {
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 38px;
-  padding: 8px 14px;
-  border: 1px solid var(--panel-edge);
-  border-radius: 10px;
-  background: rgba(14, 24, 44, 0.94);
-  color: var(--ink);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  letter-spacing: 1px;
-  cursor: pointer;
-}
-.sheet-min span {
-  font-size: 14px;
-  line-height: 1;
-}
-.sheet-min:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
 .sheet-body {
   /* Become the bounded scroll area inside the height-capped sheet: without
      flex:1 + min-height:0 the body grows to its content height and its lower
@@ -1397,11 +1369,16 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   gap: 12px;
 }
-/* Rails relocated into the sheet stack as full-width sections. */
+/* Rails relocated into the sheet stack as full-width sections. The sheet body
+   is a scrolling flex column, so the rails must keep their natural (content)
+   height — without flex-shrink:0 the flex layout squeezes each rail's box while
+   its flex-shrink:0 panels overflow, letting the next rail (Source/volumes)
+   render on top of the Product grid. */
 .mobile-sheet .rail {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex-shrink: 0;
 }
 .mobile-sheet .panel.grow {
   flex: 0 0 auto;
