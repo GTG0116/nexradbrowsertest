@@ -12,8 +12,9 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScen
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
-import { MODELS, MODEL_PRODUCTS, MODEL_ORDER, listModels, loadModel, forecastHours } from './models.js';
+import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
+import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
 
 // Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
 // radar reflectivity color table, so all reflectivity is colored identically and
@@ -545,6 +546,7 @@ function buildProductButtons() {
   if (state.mode === 'mrms') return buildMrmsProductButtons();
   if (state.mode === 'models') return buildModelProductButtons();
   el.productButtons.innerHTML = '';
+  el.productButtons.className = 'product-grid';
   for (const id of PRODUCT_ORDER) {
     const p = PRODUCTS[id];
     const btn = document.createElement('button');
@@ -1012,6 +1014,7 @@ function initSatSelects() {
 
 function buildSatProductButtons() {
   el.productButtons.innerHTML = '';
+  el.productButtons.className = 'product-grid';
   const add = (id, label, name) => {
     const btn = document.createElement('button');
     btn.className = 'product-btn';
@@ -1195,6 +1198,7 @@ function updateSatInfo() {
 // ---------------------------------------------------------------------------
 function buildMrmsProductButtons() {
   el.productButtons.innerHTML = '';
+  el.productButtons.className = 'product-grid';
   for (const id of MRMS_ORDER) {
     const p = MRMS_PRODUCTS[id];
     const btn = document.createElement('button');
@@ -1335,20 +1339,31 @@ function initModelSelects() {
 
 function buildModelProductButtons() {
   el.productButtons.innerHTML = '';
-  for (const id of MODEL_ORDER) {
-    const p = MODEL_PRODUCTS[id];
-    const btn = document.createElement('button');
-    btn.className = 'product-btn';
-    btn.dataset.id = id;
-    btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
-    if (id === state.models.productId) btn.classList.add('active');
-    btn.addEventListener('click', () => {
-      state.models.productId = id;
-      document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      buildModelLegend();
-      loadModelFrame(); // same run/forecast hour, different field
-    });
-    el.productButtons.appendChild(btn);
+  el.productButtons.className = 'product-stack';
+  for (const cat of MODEL_CATEGORIES) {
+    const head = document.createElement('div');
+    head.className = 'product-cat';
+    head.textContent = cat.name;
+    el.productButtons.appendChild(head);
+    const grid = document.createElement('div');
+    grid.className = 'product-grid';
+    for (const id of cat.products) {
+      const p = MODEL_PRODUCTS[id];
+      if (!p) continue;
+      const btn = document.createElement('button');
+      btn.className = 'product-btn';
+      btn.dataset.id = id;
+      btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+      if (id === state.models.productId) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        state.models.productId = id;
+        document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+        buildModelLegend();
+        loadModelFrame(); // same run/forecast hour, different field
+      });
+      grid.appendChild(btn);
+    }
+    el.productButtons.appendChild(grid);
   }
 }
 
@@ -1469,6 +1484,7 @@ function setModelSource(map) {
 
 function clearModels() {
   if (state.models.layer) state.models.layer.clear();
+  if (state.map && state.styleReady) clearModelOverlays(state.map);
 }
 
 function renderModels() {
@@ -1479,13 +1495,17 @@ function renderModels() {
   setModelSource(map);
   state.models.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.models.layer.setOpacity(state.opacity);
+  // Upper-air products carry wind + height overlays; others clear them.
+  renderModelOverlays(map, grid);
 }
 
 // Display a pre-prepared model grid payload — used by forecast-hour playback.
+// Playback shows the colored fill only; barb/contour overlays are hidden.
 function drawModelPayload(payload) {
   const map = state.map;
   if (!map || !state.styleReady) return;
   setModelSource(map);
+  clearModelOverlays(map);
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
 }

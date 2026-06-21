@@ -22,8 +22,11 @@ export const MODELS = {
     label: 'HRRR (3 km CONUS)',
     bucket: 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com',
     // Build the grib + index keys for a UTC day, cycle hour and forecast hour.
-    keysFor(dayStr, cycle, fhour) {
-      const grib = `hrrr.${dayStr}/conus/hrrr.t${pad(cycle)}z.wrfsfcf${pad(fhour)}.grib2`;
+    // `file` selects the product family: 'sfc' (surface, default) or 'prs'
+    // (3-D pressure levels — winds/heights/vorticity aloft).
+    keysFor(dayStr, cycle, fhour, file = 'sfc') {
+      const kind = file === 'prs' ? 'wrfprs' : 'wrfsfc';
+      const grib = `hrrr.${dayStr}/conus/hrrr.t${pad(cycle)}z.${kind}f${pad(fhour)}.grib2`;
       return { grib, idx: grib + '.idx' };
     },
     // Synoptic cycles (00/06/12/18z) run out to F48; the rest to F18.
@@ -33,15 +36,15 @@ export const MODELS = {
   },
 };
 
-export const MODEL_ORDER = [
-  'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
-  'QPF1', 'QPF6', 'QPF24', 'QPF',
-];
+// Products are grouped into categories (MODEL_CATEGORIES, defined after the
+// product table); MODEL_ORDER is the flattened list in display order.
 
 // Display conversions applied only to legend ticks / cursor readouts — the
 // physical values and color scales stay native (see products.js `disp`).
 const MS_TO_MPH = 2.2369363; // m/s → mph
+const MS_TO_KT = 1.9438445; // m/s → knots
 const K_TO_F = { factor: 1.8, offset: -459.67 }; // kelvin → °F
+const K_TO_C = { unit: '°C', factor: 1, offset: -273.15 }; // kelvin → °C
 const MM_TO_IN = 1 / 25.4; // kg/m² (mm) → inches
 
 // Build a smooth color scale from [value, [r,g,b]] stops.
@@ -104,6 +107,84 @@ const PRECIP_STOPS = [
 ];
 const precipScale = (hiMM) => rampScale(PRECIP_STOPS.map(([f, c]) => [f * hiMM, c]));
 
+// Upper-air temperature (K) — broad ramp covering values from 850 mb down to
+// 500 mb. Same family of colors as the surface temperature scale.
+const UA_TMP_SCALE = rampScale([
+  [228.15, [120, 20, 150]], [238.15, [80, 60, 200]], [248.15, [50, 90, 220]],
+  [258.15, [40, 150, 230]], [268.15, [80, 200, 200]], [273.15, [200, 200, 200]],
+  [278.15, [120, 200, 110]], [288.15, [230, 220, 60]], [298.15, [235, 120, 40]],
+  [308.15, [200, 40, 40]],
+]);
+
+// Wind speed aloft (m/s) — isotachs; placed at round knot values. Calm/light is
+// transparent, jet-level speeds saturate to magenta.
+const ISOTACH_SCALE = rampScale([
+  [10.29, [120, 190, 230]], [15.43, [80, 200, 160]], [20.58, [120, 210, 80]],
+  [25.72, [220, 220, 70]], [30.87, [240, 160, 50]], [41.16, [230, 90, 50]],
+  [51.44, [200, 40, 60]], [61.73, [170, 30, 110]], [77.17, [120, 20, 140]],
+]);
+
+// Absolute vorticity (s⁻¹), shown in 10⁻⁵ s⁻¹. Cyclonic (positive) maxima
+// highlighted yellow→red→purple; low/anticyclonic left transparent by `floor`.
+const VORT_SCALE = rampScale([
+  [8e-5, [120, 160, 200]], [12e-5, [120, 200, 140]], [16e-5, [220, 220, 80]],
+  [22e-5, [240, 170, 50]], [28e-5, [230, 90, 50]], [36e-5, [200, 40, 60]],
+  [44e-5, [160, 30, 120]], [52e-5, [110, 20, 140]],
+]);
+
+// CAPE (J/kg). Green → yellow → red → purple.
+const capeScale = (hi) => rampScale([
+  [0.02 * hi, [120, 200, 120]], [0.1 * hi, [70, 175, 70]], [0.2 * hi, [220, 220, 80]],
+  [0.35 * hi, [240, 160, 50]], [0.5 * hi, [230, 90, 50]], [0.7 * hi, [200, 40, 60]],
+  [0.85 * hi, [160, 30, 120]], [1.0 * hi, [110, 20, 140]],
+]);
+
+// CIN, stored as positive inhibition magnitude (J/kg). Weak → strong = blue →
+// purple. (Displayed as a negative value.)
+const CIN_SCALE = rampScale([
+  [25, [120, 170, 220]], [50, [80, 130, 220]], [100, [90, 90, 210]],
+  [150, [130, 60, 190]], [250, [120, 30, 150]], [400, [80, 20, 110]],
+]);
+
+// Storm-relative helicity (m²/s²).
+const SRH_SCALE = rampScale([
+  [50, [120, 200, 140]], [100, [220, 220, 80]], [150, [240, 170, 50]],
+  [250, [230, 90, 50]], [350, [200, 40, 60]], [500, [160, 30, 120]],
+]);
+
+// Bulk shear / storm motion (m/s), shown in knots.
+const SHEAR_SCALE = rampScale([
+  [5.14, [120, 190, 230]], [10.29, [80, 200, 160]], [15.43, [120, 210, 80]],
+  [20.58, [220, 220, 70]], [25.72, [240, 160, 50]], [30.87, [230, 90, 50]],
+  [41.16, [170, 30, 110]],
+]);
+
+// 700–500 mb lapse rate (°C/km). Stable → steep = blue → red.
+const LAPSE_SCALE = rampScale([
+  [5.0, [70, 110, 200]], [6.0, [90, 190, 150]], [7.0, [220, 220, 80]],
+  [8.0, [240, 140, 50]], [9.0, [210, 40, 50]],
+]);
+
+// LCL height AGL (m). Low (favourable) → high (unfavourable) = green → brown.
+const LCL_SCALE = rampScale([
+  [0, [40, 150, 90]], [500, [120, 195, 90]], [1000, [220, 220, 110]],
+  [1750, [205, 165, 90]], [2500, [165, 120, 70]], [4000, [120, 85, 55]],
+]);
+
+// Lightning flash density (flashes km⁻² over the period).
+const LTNG_SCALE = rampScale([
+  [0.1, [70, 90, 160]], [1, [70, 170, 220]], [3, [120, 210, 90]],
+  [8, [230, 220, 70]], [16, [240, 140, 50]], [30, [220, 40, 50]],
+]);
+
+// Dimensionless composite-severe indices (EHI / SCP / STP). Shared ramp scaled
+// to each parameter's typical maximum.
+const compositeScale = (hi) => rampScale([
+  [0.06 * hi, [120, 200, 140]], [0.15 * hi, [120, 200, 140]], [0.3 * hi, [220, 220, 80]],
+  [0.5 * hi, [240, 150, 50]], [0.7 * hi, [220, 60, 55]], [0.85 * hi, [180, 30, 100]],
+  [1.0 * hi, [120, 20, 140]],
+]);
+
 // Helper for a standard (non-reflectivity) model product: the color scale's
 // range *is* the product range, so GPU encoding and colors line up.
 function gridProduct(id, name, scale, floor, unit, disp) {
@@ -145,6 +226,57 @@ function precipWindow(hours) {
     : [apcpTotal];
 }
 
+// Pressure-level source descriptors (from the wrfprs file).
+const prs = (varName, mb) => ({ varName, level: `${mb} mb`, file: 'prs' });
+// Surface-file source descriptor.
+const sfc = (varName, level) => ({ varName, level, file: 'sfc' });
+
+// Wind speed at a pressure level (magnitude of U/V), with wind + height overlays
+// at the same level. `hi` is the layout/contour interval for the height field.
+function isotachProduct(id, mb) {
+  return {
+    ...gridProduct(id, `${mb} mb Winds`, ISOTACH_SCALE, 10, 'm/s', { unit: 'kt', factor: MS_TO_KT }),
+    combine: 'mag', sources: () => [prs('UGRD', mb), prs('VGRD', mb)],
+  };
+}
+
+// A pressure-level scalar (vorticity or temperature) drawn as the colored fill,
+// with 10 m-style wind barbs and geopotential-height contours overlaid at the
+// same level (the classic "field + wind + height" upper-air chart).
+function aloftProduct(base, mb, interval) {
+  return { ...base, overlays: { level: `${mb} mb`, file: 'prs', interval } };
+}
+
+// Combine helpers operate element-wise: (arrays, i) → value, where `arrays` is
+// the list of source value arrays in declared order.
+const negate = (a, i) => -a[0][i];
+const magnitude = (a, i) => Math.hypot(a[0][i], a[1][i]);
+// 700–500 mb lapse rate (°C/km): −dT/dz over the layer. arrays = T700,T500,z500,z700.
+const lapseRate = (a, i) => {
+  const dz = a[2][i] - a[3][i];
+  return dz > 0 ? ((a[0][i] - a[1][i]) / dz) * 1000 : NaN;
+};
+// Energy-helicity index: arrays = MLCAPE, SRH.
+const ehi = (a, i) => (Math.max(0, a[0][i]) * a[1][i]) / 160000;
+// Supercell composite (fixed-layer approx): arrays = MUCAPE, SRH(0-3), Ush(0-6), Vsh(0-6).
+const scp = (a, i) => {
+  const cape = a[0][i], srh = a[1][i];
+  let shr = Math.hypot(a[2][i], a[3][i]);
+  if (shr < 10) return 0;
+  if (shr > 20) shr = 20;
+  return Math.max(0, (cape / 1000) * (srh / 50) * (shr / 20));
+};
+// Significant tornado (fixed-layer): arrays = SBCAPE, LCL_msl, sfcHGT, SRH(0-1),
+// Ush(0-6), Vsh(0-6), SBCIN. Standard SPC term clamps.
+const stp = (a, i) => {
+  const cape = a[0][i], lcl = a[1][i] - a[2][i], srh = a[3][i], cin = a[6][i];
+  const shr = Math.hypot(a[4][i], a[5][i]);
+  const lclT = lcl <= 1000 ? 1 : lcl >= 2000 ? 0 : (2000 - lcl) / 1000;
+  const shrT = shr < 12.5 ? 0 : shr > 30 ? 1.5 : shr / 20;
+  const cinT = cin >= -50 ? 1 : cin < -200 ? 0 : (200 + cin) / 150;
+  return Math.max(0, (cape / 1500) * lclT * (srh / 150) * shrT * cinT);
+};
+
 export const MODEL_PRODUCTS = {
   REFC: {
     id: 'REFC',
@@ -184,7 +316,128 @@ export const MODEL_PRODUCTS = {
     ...gridProduct('QPF', 'Total Precip', precipScale(150), 0.1, 'mm', { unit: 'in', factor: MM_TO_IN }),
     sources: () => [apcpTotal],
   },
+
+  // ---- Upper air (wrfprs pressure levels) ----
+  W200: isotachProduct('W200', 200),
+  W300: isotachProduct('W300', 300),
+  W500: isotachProduct('W500', 500),
+  W700: isotachProduct('W700', 700),
+  W850: isotachProduct('W850', 850),
+  W925: isotachProduct('W925', 925),
+
+  VORT850: aloftProduct({
+    ...gridProduct('VORT850', '850 mb Vorticity', VORT_SCALE, 10e-5, 's⁻¹', { unit: '10⁻⁵/s', factor: 1e5 }),
+    varName: 'ABSV', level: '850 mb', file: 'prs',
+  }, 850, 30),
+  VORT700: aloftProduct({
+    ...gridProduct('VORT700', '700 mb Vorticity', VORT_SCALE, 10e-5, 's⁻¹', { unit: '10⁻⁵/s', factor: 1e5 }),
+    varName: 'ABSV', level: '700 mb', file: 'prs',
+  }, 700, 30),
+  VORT500: aloftProduct({
+    ...gridProduct('VORT500', '500 mb Vorticity', VORT_SCALE, 10e-5, 's⁻¹', { unit: '10⁻⁵/s', factor: 1e5 }),
+    varName: 'ABSV', level: '500 mb', file: 'prs',
+  }, 500, 60),
+
+  TMP925: aloftProduct({
+    ...gridProduct('TMP925', '925 mb Temp', UA_TMP_SCALE, UA_TMP_SCALE.lo, 'K', K_TO_C),
+    varName: 'TMP', level: '925 mb', file: 'prs',
+  }, 925, 30),
+  TMP850: aloftProduct({
+    ...gridProduct('TMP850', '850 mb Temp', UA_TMP_SCALE, UA_TMP_SCALE.lo, 'K', K_TO_C),
+    varName: 'TMP', level: '850 mb', file: 'prs',
+  }, 850, 30),
+  TMP700: aloftProduct({
+    ...gridProduct('TMP700', '700 mb Temp', UA_TMP_SCALE, UA_TMP_SCALE.lo, 'K', K_TO_C),
+    varName: 'TMP', level: '700 mb', file: 'prs',
+  }, 700, 30),
+  TMP500: aloftProduct({
+    ...gridProduct('TMP500', '500 mb Temp', UA_TMP_SCALE, UA_TMP_SCALE.lo, 'K', K_TO_C),
+    varName: 'TMP', level: '500 mb', file: 'prs',
+  }, 500, 60),
+
+  // ---- Severe / convective ----
+  SBCAPE: { ...gridProduct('SBCAPE', 'SB CAPE', capeScale(5000), 100, 'J/kg'), varName: 'CAPE', level: 'surface' },
+  MLCAPE: { ...gridProduct('MLCAPE', 'ML CAPE', capeScale(5000), 100, 'J/kg'), varName: 'CAPE', level: '90-0 mb above ground' },
+  MUCAPE: { ...gridProduct('MUCAPE', 'MU CAPE', capeScale(5000), 100, 'J/kg'), varName: 'CAPE', level: '255-0 mb above ground' },
+  CAPE3: { ...gridProduct('CAPE3', '0-3 km CAPE', capeScale(500), 25, 'J/kg'), varName: 'CAPE', level: '0-3000 m above ground' },
+  SBCIN: {
+    ...gridProduct('SBCIN', 'SB CIN', CIN_SCALE, 25, 'J/kg', { unit: 'J/kg', factor: -1 }),
+    combine: negate, sources: () => [sfc('CIN', 'surface')],
+  },
+  MLCIN: {
+    ...gridProduct('MLCIN', 'ML CIN', CIN_SCALE, 25, 'J/kg', { unit: 'J/kg', factor: -1 }),
+    combine: negate, sources: () => [sfc('CIN', '90-0 mb above ground')],
+  },
+  LAPSE: {
+    ...gridProduct('LAPSE', 'Lapse Rate', LAPSE_SCALE, 5.5, '°C/km'),
+    combine: lapseRate, sources: () => [prs('TMP', 700), prs('TMP', 500), prs('HGT', 500), prs('HGT', 700)],
+  },
+  LCL: {
+    ...gridProduct('LCL', 'SB LCL', LCL_SCALE, 0, 'm'),
+    combine: (a, i) => Math.max(0, a[0][i] - a[1][i]),
+    sources: () => [sfc('HGT', 'level of adiabatic condensation from sfc'), sfc('HGT', 'surface')],
+  },
+  SRH1: { ...gridProduct('SRH1', '0-1 km SRH', SRH_SCALE, 50, 'm²/s²'), varName: 'HLCY', level: '1000-0 m above ground' },
+  SRH3: { ...gridProduct('SRH3', '0-3 km SRH', SRH_SCALE, 50, 'm²/s²'), varName: 'HLCY', level: '3000-0 m above ground' },
+  SHEAR1: {
+    ...gridProduct('SHEAR1', '0-1 km Shear', SHEAR_SCALE, 5, 'm/s', { unit: 'kt', factor: MS_TO_KT }),
+    combine: magnitude, sources: () => [sfc('VUCSH', '0-1000 m above ground'), sfc('VVCSH', '0-1000 m above ground')],
+  },
+  SHEAR6: {
+    ...gridProduct('SHEAR6', '0-6 km Shear', SHEAR_SCALE, 5, 'm/s', { unit: 'kt', factor: MS_TO_KT }),
+    combine: magnitude, sources: () => [sfc('VUCSH', '0-6000 m above ground'), sfc('VVCSH', '0-6000 m above ground')],
+  },
+  STORM: {
+    ...gridProduct('STORM', 'Storm Motion', SHEAR_SCALE, 0, 'm/s', { unit: 'kt', factor: MS_TO_KT }),
+    combine: magnitude, sources: () => [sfc('USTM', '0-6000 m above ground'), sfc('VSTM', '0-6000 m above ground')],
+  },
+  STP: {
+    ...gridProduct('STP', 'Sig. Tornado', compositeScale(8), 0.5, ''),
+    combine: stp,
+    sources: () => [
+      sfc('CAPE', 'surface'), sfc('HGT', 'level of adiabatic condensation from sfc'), sfc('HGT', 'surface'),
+      sfc('HLCY', '1000-0 m above ground'), sfc('VUCSH', '0-6000 m above ground'),
+      sfc('VVCSH', '0-6000 m above ground'), sfc('CIN', 'surface'),
+    ],
+  },
+  SCP: {
+    ...gridProduct('SCP', 'Supercell', compositeScale(20), 0.5, ''),
+    combine: scp,
+    sources: () => [
+      sfc('CAPE', '255-0 mb above ground'), sfc('HLCY', '3000-0 m above ground'),
+      sfc('VUCSH', '0-6000 m above ground'), sfc('VVCSH', '0-6000 m above ground'),
+    ],
+  },
+  EHI1: {
+    ...gridProduct('EHI1', '0-1 km EHI', compositeScale(6), 0.5, ''),
+    combine: ehi, sources: () => [sfc('CAPE', '90-0 mb above ground'), sfc('HLCY', '1000-0 m above ground')],
+  },
+  EHI3: {
+    ...gridProduct('EHI3', '0-3 km EHI', compositeScale(6), 0.5, ''),
+    combine: ehi, sources: () => [sfc('CAPE', '90-0 mb above ground'), sfc('HLCY', '3000-0 m above ground')],
+  },
+  LTNG: { ...gridProduct('LTNG', 'Lightning', LTNG_SCALE, 0.1, 'flash/km²'), varName: 'LTNG', level: 'entire atmosphere' },
 };
+
+// Categories shown as labelled groups in the product picker.
+export const MODEL_CATEGORIES = [
+  {
+    id: 'surface', name: 'Surface & Precip',
+    products: ['REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF'],
+  },
+  {
+    id: 'upper', name: 'Upper Air',
+    products: ['W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+      'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500'],
+  },
+  {
+    id: 'severe', name: 'Severe',
+    products: ['SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
+      'SRH1', 'SRH3', 'SHEAR1', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG'],
+  },
+];
+
+export const MODEL_ORDER = MODEL_CATEGORIES.flatMap((c) => c.products);
 
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 const dayStrOf = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
@@ -247,20 +500,31 @@ function rangeFromIdx(text, src) {
 function sourcesFor(product, fhour) {
   return typeof product.sources === 'function'
     ? product.sources(fhour)
-    : [{ varName: product.varName, level: product.level }];
+    : [{ varName: product.varName, level: product.level, file: product.file }];
 }
 
-// Combine the values of multiple resampled grids into one. 'mag' = vector
-// magnitude (e.g. wind from U/V); 'diff' = first minus second, floored at zero
-// (e.g. multi-hour precip from run-total accumulations). A single grid (or no
-// rule) passes through unchanged.
+// Combine the values of one or more resampled grids into one. `mode` may be a
+// built-in string — 'mag' (vector magnitude, e.g. wind from U/V) or 'diff'
+// (first minus second floored at zero, e.g. multi-hour precip) — or an
+// element-wise function (arrays, i) → value for derived parameters. With no
+// rule a single grid passes through unchanged.
 function combineGrids(grids, mode) {
-  if (grids.length === 1 || !mode) return grids[0];
-  const a = grids[0].values, b = grids[1].values;
-  const out = new Float32Array(a.length);
-  for (let i = 0; i < a.length; i++) {
-    if (mode === 'mag') out[i] = Math.hypot(a[i], b[i]);
-    else { const d = a[i] - b[i]; out[i] = Number.isNaN(a[i]) ? NaN : d > 0 ? d : 0; }
+  if (!mode) return grids[0];
+  // 'mag'/'diff' need two inputs; with only one (e.g. short-lead precip) the
+  // single grid is already the answer.
+  if (grids.length === 1 && (mode === 'mag' || mode === 'diff')) return grids[0];
+  const arrays = grids.map((g) => g.values);
+  const n = arrays[0].length;
+  const out = new Float32Array(n);
+  if (mode === 'mag') {
+    for (let i = 0; i < n; i++) out[i] = Math.hypot(arrays[0][i], arrays[1][i]);
+  } else if (mode === 'diff') {
+    for (let i = 0; i < n; i++) {
+      const d = arrays[0][i] - arrays[1][i];
+      out[i] = Number.isNaN(arrays[0][i]) ? NaN : d > 0 ? d : 0;
+    }
+  } else {
+    for (let i = 0; i < n; i++) out[i] = mode(arrays, i);
   }
   return { ...grids[0], values: out };
 }
@@ -363,12 +627,38 @@ export function resampleLambert(grid, step = 0.025) {
   return { proj: 'latlon', ni: niT, nj: njT, lon1, lat1, di: step, dj: step, scanMode: 0, values: out };
 }
 
+// Fetch + decode + resample a single index source into a lat/lon grid. `.idx`
+// text is memoised per file in `idxCache` so multi-field products (overlays,
+// derived parameters) read each index only once.
+async function loadSource(model, run, fhour, src, idxCache, onProgress) {
+  const f = fhour + (src.fhourDelta || 0);
+  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file);
+  if (!idxCache.has(grib)) idxCache.set(grib, (await fetch(`${model.bucket}/${idx}`)).text());
+  const range = rangeFromIdx(await idxCache.get(grib), src);
+  const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
+  const decoded = await decodeGrib2(bytes);
+  return decoded.proj === 'lambert' ? resampleLambert(decoded) : decoded;
+}
+
+// Wind + geopotential-height fields for an upper-air overlay, at the product's
+// overlay level. Returned as raw value arrays (the geometry matches the main
+// grid, since everything resamples to the same lat/lon target).
+async function loadOverlays(model, run, fhour, ov, idxCache) {
+  const [u, v, h] = await Promise.all([
+    loadSource(model, run, fhour, { varName: 'UGRD', level: ov.level, file: ov.file }, idxCache),
+    loadSource(model, run, fhour, { varName: 'VGRD', level: ov.level, file: ov.file }, idxCache),
+    loadSource(model, run, fhour, { varName: 'HGT', level: ov.level, file: ov.file }, idxCache),
+  ]);
+  return { u: u.values, v: v.values, hgt: h.values, interval: ov.interval, level: ov.level };
+}
+
 // Download + decode one forecast hour of a model run into a lat/lon grid of
 // physical values. `run` is an entry from listModels; `fhour` an integer.
 export async function loadModel(modelKey, productId, run, fhour, onProgress) {
   const model = MODELS[modelKey];
   const product = MODEL_PRODUCTS[productId];
   if (!model || !product) throw new Error('unknown model/product');
+  const idxCache = new Map();
 
   // Accumulation products with nothing to show yet draw an empty grid.
   let grid;
@@ -378,17 +668,12 @@ export async function loadModel(modelKey, productId, run, fhour, onProgress) {
     const sources = sourcesFor(product, fhour);
     const grids = [];
     for (let s = 0; s < sources.length; s++) {
-      const src = sources[s];
-      const f = fhour + (src.fhourDelta || 0);
-      const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f);
-      const idxText = await (await fetch(`${model.bucket}/${idx}`)).text();
-      const range = rangeFromIdx(idxText, src);
-      const bytes = await fetchRange(`${model.bucket}/${grib}`, range,
+      grid = await loadSource(model, run, fhour, sources[s], idxCache,
         onProgress && ((p) => onProgress((s + p) / sources.length)));
-      const decoded = await decodeGrib2(bytes);
-      grids.push(decoded.proj === 'lambert' ? resampleLambert(decoded) : decoded);
+      grids.push(grid);
     }
     grid = combineGrids(grids, product.combine);
+    if (product.overlays) grid.overlays = await loadOverlays(model, run, fhour, product.overlays, idxCache);
   }
   grid.product = product;
   grid.model = model;
