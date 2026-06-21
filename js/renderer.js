@@ -195,6 +195,10 @@ export function renderRadarCanvas(canvas, sweep, product, site, maxRange, resolu
     canvas.height = N;
   }
   const ctx = canvas.getContext('2d');
+  // Never let the 2D layer interpolate: each gate is filled as its own polar
+  // polygon at full data resolution, so any image smoothing here would only
+  // blend true gate values into invented in-between ones.
+  ctx.imageSmoothingEnabled = false;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, N, N);
 
