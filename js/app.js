@@ -44,6 +44,25 @@ function makeBasemapLayer(key) {
   );
 }
 
+// Place-name + boundary labels drawn on top of everything. Mapbox raster tiles
+// bake labels into the base image (which the radar then covers), so a separate
+// CARTO labels-only overlay is layered above the radar to keep town names and
+// borders legible. Light vs dark label styling follows the chosen basemap.
+function makeLabelsLayer(key) {
+  const dark = key === 'dark' || key === 'satellite';
+  const variant = dark ? 'dark_only_labels' : 'light_only_labels';
+  return L.tileLayer(
+    `https://{s}.basemaps.cartocdn.com/${variant}/{z}/{x}/{y}{r}.png`,
+    {
+      subdomains: 'abcd',
+      pane: 'labels',
+      maxZoom: 19,
+      // The labels overlay re-states attribution carried by the basemap.
+      attribution: '',
+    }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Radar layer — draws polar cells straight into a canvas in the map's screen
 // space and re-renders on every zoom/move, so gates stay crisp and true-to-size
@@ -67,21 +86,30 @@ function createRadarLayer() {
       canvas.style.position = 'absolute';
       canvas.style.pointerEvents = 'none';
       canvas.style.opacity = this._opacity;
-      map.getPanes().overlayPane.appendChild(canvas);
-      map.on('moveend zoomend resize viewreset', this._reset, this);
-      this._reset();
+      // Sit in the dedicated radar pane so alert fills draw under the radar and
+      // alert borders + labels draw over it.
+      const pane = map.getPane('radar') || map.getPanes().overlayPane;
+      pane.appendChild(canvas);
+      // A full re-render is only needed when the zoom changes (gate sizes change)
+      // or the view scrolls past the already-drawn margin. A plain pan within the
+      // drawn area just repositions the canvas — cheap — instead of redrawing
+      // thousands of polar cells, which is what made panning feel laggy.
+      map.on('zoomend resize viewreset', this._draw, this);
+      map.on('moveend', this._onMoveEnd, this);
+      this._draw();
     },
 
     onRemove(map) {
       L.DomUtil.remove(this._canvas);
-      map.off('moveend zoomend resize viewreset', this._reset, this);
+      map.off('zoomend resize viewreset', this._draw, this);
+      map.off('moveend', this._onMoveEnd, this);
     },
 
     setData(sweep, product, site) {
       this._sweep = sweep;
       this._product = product;
       this._site = site;
-      if (this._map) this._reset();
+      if (this._map) this._draw();
     },
 
     setOpacity(o) {
@@ -89,17 +117,49 @@ function createRadarLayer() {
       if (this._canvas) this._canvas.style.opacity = o;
     },
 
-    _reset() {
+    // Cheap path on pan: if the viewport is still inside the drawn region (same
+    // zoom), just slide the existing canvas to stay geo-aligned. Otherwise fall
+    // back to a full redraw.
+    _onMoveEnd() {
+      const map = this._map;
+      const canvas = this._canvas;
+      if (!map || !canvas) return;
+      const cov = this._cov;
+      if (!cov || cov.zoom !== map.getZoom() || !this._sweep || !this._site) {
+        this._draw();
+        return;
+      }
+      const origin = map.getPixelOrigin();
+      const tl = map.containerPointToLayerPoint([0, 0]);
+      const size = map.getSize();
+      const vx0 = tl.x + origin.x;
+      const vy0 = tl.y + origin.y;
+      const vx1 = vx0 + size.x;
+      const vy1 = vy0 + size.y;
+      const m = 4; // require a few px of slack so the edge never shows blank
+      if (
+        vx0 < cov.wx0 + m ||
+        vy0 < cov.wy0 + m ||
+        vx1 > cov.wx1 - m ||
+        vy1 > cov.wy1 - m
+      ) {
+        this._draw();
+      } else {
+        L.DomUtil.setPosition(canvas, L.point(cov.wx0 - origin.x, cov.wy0 - origin.y));
+      }
+    },
+
+    _draw() {
       const map = this._map;
       const canvas = this._canvas;
       if (!map || !canvas) return;
 
       const size = map.getSize();
-      // Oversize the canvas generously so a pan keeps showing already-drawn
-      // radar (the overlay pane translates with the drag) instead of flashing
-      // blank at the edges before the moveend redraw catches up.
-      const padX = Math.round(size.x * 0.6);
-      const padY = Math.round(size.y * 0.6);
+      // Oversize the canvas so a pan keeps showing already-drawn radar before a
+      // redraw is needed. With the pan-reposition fast path above, the redraw
+      // only fires once the view leaves this margin.
+      const padX = Math.round(size.x * 0.4);
+      const padY = Math.round(size.y * 0.4);
       const wCss = size.x + 2 * padX;
       const hCss = size.y + 2 * padY;
 
@@ -109,9 +169,9 @@ function createRadarLayer() {
       const dpr = window.devicePixelRatio || 1;
       const bw = Math.round(wCss * dpr);
       const bh = Math.round(hCss * dpr);
-      // Reallocating the backing store on every pan/zoom is expensive and adds
-      // GC churn that makes moving the map feel laggy. Only resize when the
-      // dimensions actually change; otherwise just clear and redraw.
+      // Reallocating the backing store on every redraw is expensive and adds GC
+      // churn. Only resize when the dimensions actually change; otherwise just
+      // clear and redraw.
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.style.width = wCss + 'px';
         canvas.style.height = hCss + 'px';
@@ -123,7 +183,10 @@ function createRadarLayer() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, wCss, hCss);
 
-      if (!this._sweep || !this._site) return;
+      if (!this._sweep || !this._site) {
+        this._cov = null;
+        return;
+      }
 
       // screen pixel = world-pixel(latlng) - (pixelOrigin + canvasCorner)
       const pixelOrigin = map.getPixelOrigin();
@@ -131,10 +194,22 @@ function createRadarLayer() {
       const mPerDegLon =
         M_PER_DEG_LAT * Math.cos((this._site.lat * Math.PI) / 180);
 
+      const offX = pixelOrigin.x + corner.x;
+      const offY = pixelOrigin.y + corner.y;
+      // Remember the world-pixel rectangle this draw covers, so a later pan can
+      // tell whether it can reuse the canvas instead of redrawing.
+      this._cov = {
+        zoom: map.getZoom(),
+        wx0: offX,
+        wy0: offY,
+        wx1: offX + wCss,
+        wy1: offY + hCss,
+      };
+
       renderScreen(ctx, this._sweep, this._product, {
         scale,
-        offX: pixelOrigin.x + corner.x,
-        offY: pixelOrigin.y + corner.y,
+        offX,
+        offY,
         w: wCss,
         h: hCss,
         siteLat: this._site.lat,
@@ -183,6 +258,7 @@ const state = {
   map: null,
   basemap: 'dark',
   baseLayer: null,
+  labelsLayer: null,
   radarLayer: null,
   ringLayer: null,
   siteLayer: null,
@@ -273,12 +349,31 @@ function initMap() {
     preferCanvas: true,
   }).setView([35.33, -97.27], 7);
 
+  // Stacking order (back → front):
+  //   basemap (tilePane 200) → alert fills (350) → radar (360) →
+  //   range rings + site dots (overlayPane 400) → alert borders (440) →
+  //   place names & boundary labels (470).
+  // Custom panes give each layer an explicit z-index so this order holds.
+  const panes = [
+    ['alertFill', 350],
+    ['radar', 360],
+    ['alertBorder', 440],
+    ['labels', 470],
+  ];
+  for (const [name, z] of panes) {
+    map.createPane(name);
+    map.getPane(name).style.zIndex = String(z);
+    // Only the alert outlines need to catch clicks (to open the briefing).
+    map.getPane(name).style.pointerEvents = name === 'alertBorder' ? '' : 'none';
+  }
+
   state.baseLayer = makeBasemapLayer(state.basemap).addTo(map);
 
   state.radarLayer = createRadarLayer();
   state.radarLayer.setOpacity(state.opacity);
   state.radarLayer.addTo(map);
   state.ringLayer = L.layerGroup().addTo(map);
+  state.labelsLayer = makeLabelsLayer(state.basemap).addTo(map);
   state.map = map;
 
   map.on('mousemove', (e) => updateReadout(e.latlng));
@@ -309,6 +404,14 @@ function setBasemap(key) {
     setTimeout(() => state.map.hasLayer(old) && state.map.removeLayer(old), 1500);
   }
   state.baseLayer = next;
+
+  // Re-style the top labels overlay to match the new basemap brightness.
+  const nextLabels = makeLabelsLayer(key).addTo(state.map);
+  if (state.labelsLayer) {
+    const oldLabels = state.labelsLayer;
+    setTimeout(() => state.map.hasLayer(oldLabels) && state.map.removeLayer(oldLabels), 1500);
+  }
+  state.labelsLayer = nextLabels;
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated

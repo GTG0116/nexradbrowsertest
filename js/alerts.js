@@ -230,15 +230,109 @@ function tagChips(params) {
   return chips.join('');
 }
 
+// Plain-language safety guidance for the common storm-scale alerts, written so
+// the briefing always has actionable "what to do" advice even when the NWS
+// product omits a structured instruction. Keyed by event name; the strongest
+// upgrade displays (PDS / Emergency) get their own, more urgent wording.
+const EVENT_GUIDANCE = {
+  'Tornado Warning': [
+    'Take shelter immediately — a tornado is occurring or imminent.',
+    'Go to a basement or storm shelter. If none, get to a small interior room (bathroom, closet) on the lowest floor, away from windows.',
+    'Cover your head and neck with your arms; use blankets, a mattress, or a helmet.',
+    'Mobile homes and vehicles are unsafe — get to a sturdy building now.',
+  ],
+  'PDS Tornado Warning': [
+    'PARTICULARLY DANGEROUS SITUATION — a strong, potentially violent tornado is on the ground. Act now.',
+    'Get underground or to the most interior, lowest room of a sturdy building immediately.',
+    'Protect your head and neck; put as many walls between you and the outside as possible.',
+    'Do not try to outrun it in a vehicle unless you have a clear escape route at right angles to its path.',
+  ],
+  'Tornado Emergency': [
+    'TORNADO EMERGENCY — a confirmed large, destructive tornado threatens your area. This is life-threatening.',
+    'Shelter underground or in the most interior room on the lowest floor right now.',
+    'Cover your head and body; a helmet and heavy blankets can save your life.',
+    'If you cannot reach shelter, lie flat in a low ditch away from cars and trees and cover your head.',
+  ],
+  'Severe Thunderstorm Warning': [
+    'Move indoors and stay away from windows — damaging winds and large hail are likely.',
+    'Bring in or secure loose outdoor objects, and park vehicles under cover if possible.',
+    'If driving, watch for fallen trees, power lines, and sudden loss of visibility.',
+    'Stay inside until the storm passes; treat any downed power line as live.',
+  ],
+  'Flash Flood Warning': [
+    'Move to higher ground immediately — flooding is occurring or imminent.',
+    'Turn Around, Don’t Drown: never walk or drive into flood water. Just 12 inches can sweep away most vehicles.',
+    'Avoid low-water crossings, creeks, drainage ditches, and underpasses.',
+    'If water is rising around your vehicle, abandon it and move to higher ground on foot if safe.',
+  ],
+  'Tornado Watch': [
+    'Conditions favor tornadoes — stay alert and be ready to act.',
+    'Review where you will shelter and keep a way to receive warnings (NOAA radio, phone alerts).',
+    'Move anything you would need (shoes, helmet, flashlight) to your shelter spot.',
+  ],
+  'Severe Thunderstorm Watch': [
+    'Conditions favor severe storms with damaging wind and hail — stay weather-aware.',
+    'Be ready to move indoors quickly and secure loose outdoor items.',
+  ],
+  'Flash Flood Watch': [
+    'Flash flooding is possible — monitor rising water and be ready to move to higher ground.',
+    'Avoid camping or parking along streams and washes.',
+  ],
+  'Extreme Wind Warning': [
+    'Extreme, tornado-strength winds are imminent — shelter like you would for a tornado.',
+    'Move to an interior room on the lowest floor, away from all windows, now.',
+  ],
+  'Winter Storm Warning': [
+    'Significant winter weather is occurring or imminent — avoid unnecessary travel.',
+    'If you must travel, carry an emergency kit (blankets, water, charger) and tell someone your route.',
+  ],
+  'Blizzard Warning': [
+    'Blizzard conditions — do not travel. Whiteouts make roads deadly.',
+    'If you become stranded, stay in your vehicle, run the engine sparingly, and keep the exhaust pipe clear.',
+  ],
+  'Special Marine Warning': [
+    'Hazardous winds, waves, or waterspouts on the water — boaters seek safe harbor now.',
+    'Secure loose gear and keep all aboard in life jackets until conditions improve.',
+  ],
+  'Hurricane Warning': [
+    'Follow all evacuation orders without delay.',
+    'Secure your home, gather supplies, and move to a safe interior room or designated shelter.',
+  ],
+  'Tropical Storm Warning': [
+    'Prepare for damaging winds and flooding rain — secure property and follow local guidance.',
+    'Avoid travel through flooded or wind-blown areas.',
+  ],
+};
+
+const DEFAULT_GUIDANCE = [
+  'Stay indoors, away from windows, and monitor local media or a NOAA Weather Radio.',
+  'Be ready to act quickly if conditions worsen or the alert is upgraded.',
+];
+
+// Pick the best-matching guidance bullets for a classified alert.
+function guidanceFor(cls) {
+  return (
+    EVENT_GUIDANCE[cls.display] ||
+    EVENT_GUIDANCE[cls.event] ||
+    (/Warning$/.test(cls.event) ? DEFAULT_GUIDANCE : null)
+  );
+}
+
 export class AlertsController {
   constructor(map, els) {
     this.map = map;
     this.els = els; // { listPanel, list, detail, detailPanel, close }
     this.alerts = []; // [{ id, feature, cls, bounds }]
-    this.layers = new Map(); // id -> leaflet layer (only the visible ones)
+    this.layers = new Map(); // id -> { fill, border } (only the visible ones)
     this.layerGroup = L.layerGroup().addTo(map);
     this.enabled = true;
     this.selectedId = null;
+
+    // Dedicated renderers so the fill draws in the under-radar pane and the
+    // outline in the over-radar pane. With the map's shared canvas renderer the
+    // `pane` option alone would be ignored, so each gets its own pane renderer.
+    this.fillRenderer = L.canvas({ pane: 'alertFill' });
+    this.borderRenderer = L.canvas({ pane: 'alertBorder' });
 
     // Debounce so a pan/zoom doesn't rebuild every polygon layer mid-gesture,
     // which is a big contributor to the map feeling laggy while moving.
@@ -322,26 +416,39 @@ export class AlertsController {
     // Drop polygons that scrolled out of view.
     for (const [id, layer] of this.layers) {
       if (!wantIds.has(id)) {
-        this.layerGroup.removeLayer(layer);
+        this.layerGroup.removeLayer(layer.fill);
+        this.layerGroup.removeLayer(layer.border);
         this.layers.delete(id);
       }
     }
-    // Add polygons that scrolled into view.
+    // Add polygons that scrolled into view. The fill and the border are drawn
+    // as separate layers in separate panes so the radar can sit between them:
+    // translucent fill under the radar, crisp outline over it.
     for (const a of visible) {
       if (this.layers.has(a.id)) continue;
-      const layer = L.geoJSON(a.feature, {
+      const fill = L.geoJSON(a.feature, {
+        renderer: this.fillRenderer,
+        interactive: false,
         style: () => ({
-          color: a.cls.color,
-          weight: 2.5,
-          opacity: 0.95,
+          stroke: false,
           fill: true,
           fillColor: a.cls.color,
           fillOpacity: 0.12,
         }),
       });
-      layer.on('click', () => this.openDetail(a.id));
-      layer.addTo(this.layerGroup);
-      this.layers.set(a.id, layer);
+      const border = L.geoJSON(a.feature, {
+        renderer: this.borderRenderer,
+        style: () => ({
+          color: a.cls.color,
+          weight: 2.5,
+          opacity: 0.95,
+          fill: false,
+        }),
+      });
+      border.on('click', () => this.openDetail(a.id));
+      fill.addTo(this.layerGroup);
+      border.addTo(this.layerGroup);
+      this.layers.set(a.id, { fill, border });
     }
     this.renderList(visible);
     if (this.selectedId && !wantIds.has(this.selectedId)) {
@@ -414,6 +521,14 @@ export class AlertsController {
     const motion = parseMotion(firstParam(params, 'eventMotionDescription'));
     const tags = tagChips(params);
 
+    const guidance = guidanceFor(a.cls);
+    const guidanceHTML = guidance
+      ? `<div class="alert-block alert-guidance" style="--ac:${c}">
+           <span class="alert-block-title">What to do</span>
+           <ul>${guidance.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>
+         </div>`
+      : '';
+
     return `
       <section class="alert-sec${selected ? ' selected' : ''}" data-id="${esc(a.id)}">
         <header class="alert-sec-head" style="--ac:${c}">
@@ -422,7 +537,7 @@ export class AlertsController {
         </header>
         <div class="alert-sec-body">
           <div class="alert-expires">
-            <span>EXPIRES</span>
+            <span class="alert-block-title">Expires</span>
             <b>${esc(fmtTime(p.ends || p.expires))}</b>
           </div>
           ${boxes.length ? `<div class="alert-hazards">${boxes.join('')}</div>` : ''}
@@ -430,20 +545,23 @@ export class AlertsController {
           <div class="alert-issued">Issued ${esc(fmtTime(p.sent))} · ${esc(
       p.senderName || 'NWS'
     )}</div>
-          <div class="alert-loc"><span>LOCATION</span><p>${esc(p.areaDesc || '—')}</p></div>
+          ${guidanceHTML}
+          <div class="alert-loc"><span class="alert-block-title">Location</span><p>${esc(
+            p.areaDesc || '—'
+          )}</p></div>
           ${
             p.instruction
-              ? `<div class="alert-block"><span>WHAT TO DO</span><p>${esc(
+              ? `<div class="alert-block"><span class="alert-block-title">NWS instructions</span><p>${esc(
                   p.instruction
                 ).replace(/\n+/g, '</p><p>')}</p></div>`
               : ''
           }
-          <div class="alert-block"><span>FULL ALERT TEXT</span><p>${esc(
+          <div class="alert-block"><span class="alert-block-title">Full alert text</span><p>${esc(
             p.description || ''
           ).replace(/\n+/g, '</p><p>')}</p></div>
           ${
             tags
-              ? `<div class="alert-tags"><span>TAGS</span><div class="alert-tag-row">${tags}</div></div>`
+              ? `<div class="alert-tags"><span class="alert-block-title">Tags</span><div class="alert-tag-row">${tags}</div></div>`
               : ''
           }
         </div>
