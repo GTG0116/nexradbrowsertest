@@ -8,7 +8,7 @@ import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { AlertsController } from './alerts.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox } from './goes.js';
-import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
+import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { createGridLayer } from './gridLayer.js';
@@ -235,7 +235,7 @@ const state = {
     satKey: 'goes19',
     sectorKey: 'conus',
     productId: 'C13',
-    enhanceIR: false,
+    enhanceIR: true,
     scenes: [],
     sceneKey: null,
     scene: null,
@@ -515,6 +515,8 @@ function buildProductButtons() {
       document
         .querySelectorAll('.product-btn')
         .forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      // Reflect this product's custom palette (if any) in the .pal name label.
+      el.palName.textContent = p.customPal ? `${p.customPal} → ${id}` : '';
       buildTiltList();
       buildLegend();
       renderRadar();
@@ -590,6 +592,37 @@ function buildLegend() {
 // ---------------------------------------------------------------------------
 // Custom .pal color tables (GRLevelX / GR2Analyst format)
 // ---------------------------------------------------------------------------
+// Custom palettes are remembered across visits in localStorage, keyed by the
+// radar product they apply to, so a loaded .pal survives a reload (storage may
+// be unavailable in private mode — every access is guarded).
+const PAL_STORE_KEY = 'aether.pals';
+
+function readPalStore() {
+  try {
+    return JSON.parse(localStorage.getItem(PAL_STORE_KEY) || '{}') || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writePalStore(store) {
+  try {
+    localStorage.setItem(PAL_STORE_KEY, JSON.stringify(store));
+  } catch (_) {
+    /* storage full or blocked — the palette still applies for this session */
+  }
+}
+
+// Apply a parsed palette to a product's color scale (no UI side effects).
+function applyPal(targetId, pal, name) {
+  const p = PRODUCTS[targetId];
+  if (!p) return;
+  p.scale = makeScale(pal.segments);
+  p.range = [p.scale.lo, p.scale.hi];
+  if (pal.units) p.unit = pal.units;
+  p.customPal = name;
+}
+
 async function loadPalFile(file) {
   if (!file) return;
   try {
@@ -597,11 +630,12 @@ async function loadPalFile(file) {
     const pal = parsePal(text);
     // Apply to the product the file names, falling back to the current one.
     const targetId = palTargetProduct(pal) || state.productId;
-    const p = PRODUCTS[targetId];
-    p.scale = makeScale(pal.segments);
-    p.range = [p.scale.lo, p.scale.hi];
-    if (pal.units) p.unit = pal.units;
-    p.customPal = file.name;
+    applyPal(targetId, pal, file.name);
+
+    // Persist the raw .pal text so it can be re-applied on the next visit.
+    const store = readPalStore();
+    store[targetId] = { name: file.name, text };
+    writePalStore(store);
 
     state.productId = targetId;
     document
@@ -620,6 +654,22 @@ async function loadPalFile(file) {
   }
 }
 
+// Re-apply any saved palettes on startup. Runs before the first legend/render so
+// the restored colors show immediately.
+function restoreStoredPals() {
+  const store = readPalStore();
+  for (const [id, entry] of Object.entries(store)) {
+    if (!PRODUCTS[id] || !entry || !entry.text) continue;
+    try {
+      applyPal(id, parsePal(entry.text), entry.name);
+    } catch (_) {
+      /* skip a corrupt stored entry */
+    }
+  }
+  const cur = PRODUCTS[state.productId];
+  if (cur && cur.customPal) el.palName.textContent = `${cur.customPal} → ${state.productId}`;
+}
+
 function resetPalettes() {
   for (const id of PRODUCT_ORDER) {
     const p = PRODUCTS[id];
@@ -628,6 +678,7 @@ function resetPalettes() {
     p.unit = p.defaultUnit;
     delete p.customPal;
   }
+  writePalStore({}); // forget the saved palettes too
   el.palName.textContent = '';
   buildLegend();
   renderRadar();
@@ -966,15 +1017,19 @@ function renderSatellite() {
 function buildSatLegend() {
   const id = state.sat.productId;
   if (id.startsWith('C')) {
-    const meta = SAT_CHANNELS[parseInt(id.slice(1), 10) - 1];
+    const band = parseInt(id.slice(1), 10);
+    const meta = SAT_CHANNELS[band - 1];
     const isVis = meta.type === 'vis';
+    const isWV = WV_BANDS.has(band);
     const grad = isVis
       ? 'linear-gradient(90deg,#000,#fff)'
       : state.sat.enhanceIR
-      ? 'linear-gradient(90deg,#787878,#0000c8,#00b4b4,#00c800,#e6e600,#e67800,#dc0000,#fff)'
+      ? enhancementGradientCSS(band)
       : 'linear-gradient(90deg,#fff,#000)';
+    const kind = isVis ? 'reflectance' : isWV ? 'WV brightness temp' : 'brightness temp';
+    const warmTick = isWV ? '0°C' : '+50°C';
     const ticks = isVis ? '<span>0</span><span>reflectance</span><span>1</span>'
-      : '<span>313K</span><span>brightness temp</span><span>183K</span>';
+      : `<span>${warmTick}</span><span>${kind}</span><span>−95°C</span>`;
     el.legend.innerHTML = `
       <div class="legend-title">${meta.name} <span>(${id} · ${meta.um}µm)</span></div>
       <div class="legend-bar" style="background:${grad}"></div>
@@ -1538,6 +1593,7 @@ function init() {
   initMap();
   enableLongPress();
   buildSiteSelect();
+  restoreStoredPals(); // re-apply any saved .pal color tables before first paint
   buildProductButtons();
   buildLegend();
   buildTiltList();

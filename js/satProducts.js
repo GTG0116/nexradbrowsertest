@@ -90,26 +90,72 @@ function stretch(v, lo, hi, gamma) {
   return t;
 }
 
-// A simple infrared colour enhancement for the clean-window channels: grey for
-// warm scenes, then blue→green→yellow→red→white for progressively colder cloud
-// tops (the classic “IR rainbow”, in Kelvin).
+// Colour enhancements for the IR channels, defined as [Kelvin, r, g, b] knots,
+// warmest first, linearly interpolated. The data are brightness temperatures, so
+// these reproduce the familiar enhancement curves used by satellite imagery.
+const C2K = (c) => c + 273.15;
+
+// Infrared "rainbow" window enhancement (screenshot 1): grey for warm scenes,
+// then cyan→blue→green→yellow→orange→red for progressively colder cloud tops,
+// a grey band in the deep cold, and magenta at the very coldest overshooting
+// tops. Knots given in °C and converted to Kelvin.
 const IR_RAMP = [
-  [330, 0, 0, 0], [243, 175, 175, 175], [242, 0, 0, 0], [220, 0, 0, 200],
-  [210, 0, 180, 180], [200, 0, 200, 0], [190, 230, 230, 0], [180, 230, 120, 0],
-  [170, 220, 0, 0], [160, 150, 0, 0], [150, 255, 255, 255], [120, 120, 120, 120],
+  [C2K(50), 0, 0, 0], [C2K(30), 105, 105, 105], [C2K(20), 160, 160, 160],
+  [C2K(0), 225, 225, 225], [C2K(-20), 0, 230, 240], [C2K(-25), 0, 150, 230],
+  [C2K(-32), 0, 40, 200], [C2K(-40), 10, 10, 120], [C2K(-42), 0, 90, 40],
+  [C2K(-50), 0, 210, 0], [C2K(-55), 180, 230, 0], [C2K(-60), 240, 240, 0],
+  [C2K(-63), 250, 150, 0], [C2K(-68), 240, 0, 0], [C2K(-72), 120, 0, 0],
+  [C2K(-75), 10, 10, 10], [C2K(-78), 90, 90, 90], [C2K(-83), 180, 180, 180],
+  [C2K(-87), 240, 240, 240], [C2K(-90), 255, 0, 255], [C2K(-95), 150, 0, 180],
 ];
-function irColor(k) {
+
+// Water-vapour enhancement (screenshot 2): warm (dry, low-level) scenes in
+// red→orange→yellow, a sharp step to blue through the mid range, then white and
+// the green family deepening into bright cyan for the coldest (highest, moistest)
+// cloud tops.
+const WV_RAMP = [
+  [C2K(0), 120, 0, 0], [C2K(-10), 230, 0, 0], [C2K(-14), 255, 120, 0],
+  [C2K(-18), 255, 200, 0], [C2K(-20), 255, 255, 0], [C2K(-24), 150, 140, 0],
+  [C2K(-28), 40, 40, 180], [C2K(-34), 0, 60, 200], [C2K(-40), 10, 10, 90],
+  [C2K(-44), 120, 90, 180], [C2K(-48), 220, 210, 235], [C2K(-52), 255, 255, 255],
+  [C2K(-58), 200, 235, 200], [C2K(-62), 80, 200, 90], [C2K(-70), 0, 160, 70],
+  [C2K(-78), 0, 120, 60], [C2K(-82), 0, 180, 160], [C2K(-88), 0, 230, 220],
+  [C2K(-95), 0, 255, 255],
+];
+
+// The water-vapour channels (upper/mid/lower-level WV) get the WV enhancement;
+// every other IR channel gets the IR rainbow.
+export const WV_BANDS = new Set([8, 9, 10]);
+
+// Sample a [K,r,g,b] knot ramp (warmest first) at brightness temperature `k`.
+function rampColor(ramp, k) {
   if (Number.isNaN(k)) return null;
-  if (k >= IR_RAMP[0][0]) { const c = IR_RAMP[0]; return [c[1], c[2], c[3]]; }
-  for (let i = 0; i < IR_RAMP.length - 1; i++) {
-    const a = IR_RAMP[i], b = IR_RAMP[i + 1];
+  if (k >= ramp[0][0]) { const c = ramp[0]; return [c[1], c[2], c[3]]; }
+  for (let i = 0; i < ramp.length - 1; i++) {
+    const a = ramp[i], b = ramp[i + 1];
     if (k <= a[0] && k >= b[0]) {
       const t = (a[0] - k) / (a[0] - b[0]);
       return [a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
     }
   }
-  const c = IR_RAMP[IR_RAMP.length - 1];
+  const c = ramp[ramp.length - 1];
   return [c[1], c[2], c[3]];
+}
+
+// Pick the right enhancement ramp for an ABI band.
+const rampForBand = (band) => (WV_BANDS.has(band) ? WV_RAMP : IR_RAMP);
+
+// Build a CSS linear-gradient (warm → cold, left → right) for a band's
+// enhancement, so the legend bar matches the imagery.
+export function enhancementGradientCSS(band) {
+  const ramp = rampForBand(band);
+  const warm = ramp[0][0], cold = ramp[ramp.length - 1][0];
+  const span = warm - cold || 1;
+  const stops = ramp.map((c) => {
+    const pct = ((warm - c[0]) / span) * 100;
+    return `rgb(${c[1] | 0},${c[2] | 0},${c[3] | 0}) ${pct.toFixed(1)}%`;
+  });
+  return `linear-gradient(90deg,${stops.join(',')})`;
 }
 
 // Build the W×H RGBA texture for a product. `enhance` (IR colour) only affects
@@ -135,7 +181,7 @@ export function buildRGBA(scene, productId, opts = {}) {
         const g = (t * 255) | 0;
         out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
       } else if (enhanceIR) {
-        const c = irColor(v);
+        const c = rampColor(rampForBand(band), v);
         out[o] = c[0] | 0; out[o + 1] = c[1] | 0; out[o + 2] = c[2] | 0; out[o + 3] = 255;
       } else {
         // IR brightness temperature: invert so cold cloud tops are white.
