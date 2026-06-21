@@ -12,8 +12,8 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScen
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
-import { MODELS, MODEL_PRODUCTS, MODEL_ORDER, listModels, loadModel } from './models.js';
-import { createGridLayer } from './gridLayer.js';
+import { MODELS, MODEL_PRODUCTS, MODEL_ORDER, listModels, loadModel, forecastHours } from './models.js';
+import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 
 // Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
 // radar reflectivity color table, so all reflectivity is colored identically and
@@ -170,6 +170,8 @@ function setupOverlays(map) {
   else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
   else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
   else if (state.mode === 'models' && state.models.grid) renderModels();
+  // Re-apply the single-site radar overlay if it's enabled in a non-radar mode.
+  if (state.mode !== 'radar' && state.radarOverlay) applyRadarOverlay();
   if (state.alerts) state.alerts.refreshVisible();
 }
 
@@ -232,6 +234,9 @@ const state = {
   basemap: 'dark',
   showRings: true,
   radarLayer: null,
+  // In satellite / MRMS / model modes the single-site radar is hidden unless
+  // this overlay toggle is switched on.
+  radarOverlay: false,
   styleReady: false,
   geo: null,
   alerts: null,
@@ -261,12 +266,14 @@ const state = {
     grid: null,
     layer: null,
   },
-  // Weather-model state (HRRR for now).
+  // Weather-model state (HRRR for now). A run is a model cycle; each run has a
+  // set of forecast hours that the forecast-hour picker and playback step through.
   models: {
     modelKey: 'hrrr',
     productId: 'REFC',
-    frames: [],
-    frameKey: null,
+    runs: [],
+    runKey: null,
+    fhour: 0,
     grid: null,
     layer: null,
   },
@@ -297,6 +304,10 @@ function cacheEls() {
   el.ringsToggle = $('#ringsToggle');
   el.dealiasToggle = $('#dealiasToggle');
   el.dealiasField = $('#dealiasField');
+  el.radarOverlayField = $('#radarOverlayField');
+  el.radarOverlayToggle = $('#radarOverlayToggle');
+  el.loopField = $('#loopField');
+  el.loopBtn = $('#loopBtn');
   el.palInput = $('#palInput');
   el.palReset = $('#palReset');
   el.palName = $('#palName');
@@ -317,6 +328,8 @@ function cacheEls() {
   el.mrmsFields = $('#mrmsFields');
   el.modelFields = $('#modelFields');
   el.modelSelect = $('#modelSelect');
+  el.fhourPanel = $('#fhourPanel');
+  el.fhourList = $('#fhourList');
   el.volumeTitle = $('#volumeTitle');
   el.tiltPanel = $('#tiltPanel');
   el.satOptsPanel = $('#satOptsPanel');
@@ -843,6 +856,14 @@ function displaySweep(sweep, site) {
     return;
   }
 
+  // In satellite / MRMS / model modes the single-site radar only draws when the
+  // overlay toggle is on; otherwise keep it (and its range rings) hidden.
+  if (state.mode !== 'radar' && !state.radarOverlay) {
+    clearRadarSource(map);
+    drawRings(null, 0);
+    return;
+  }
+
   if (!sweep || !site) {
     clearRadarSource(map);
     drawRings(null, 0);
@@ -854,6 +875,19 @@ function displaySweep(sweep, site) {
   setRadarSource(map, sweep, product, site);
   drawRings(site, maxR);
   updateInspect();
+}
+
+// Show or hide the single-site radar overlay in a non-radar mode. Draws the
+// radar volume that's already loaded (the app loads one on startup); the left
+// "Volume scans" list stays owned by the active source, so we don't refetch it
+// here. If no radar has ever been loaded, prompt the user to visit RADAR once.
+function applyRadarOverlay() {
+  if (state.mode === 'radar') return;
+  if (state.radarOverlay && !state.volume) {
+    setStatus('radar overlay: open RADAR once to load a site');
+    return;
+  }
+  displaySweep(currentSweep(), state.volume && state.volume.site);
 }
 
 function drawRings(site, maxR) {
@@ -877,8 +911,11 @@ function applyModePanels() {
   el.mrmsFields.hidden = state.mode !== 'mrms';
   if (el.modelFields) el.modelFields.hidden = state.mode !== 'models';
   el.tiltPanel.hidden = state.mode !== 'radar';
+  if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
+  // The single-site radar overlay control only makes sense outside radar mode.
+  if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
     state.mode === 'radar' ? 'Volume scans'
@@ -892,10 +929,10 @@ function setMode(mode) {
   if (state.mode === mode) return;
   if (state.playback && state.playback.active) state.playback.stop();
   state.mode = mode;
-  if (mode !== 'radar') clearRadarSource(state.map);
   if (mode !== 'satellite') clearSatellite();
   if (mode !== 'mrms') clearMrms();
   if (mode !== 'models') clearModels();
+  if (mode !== 'radar') applyRadarOverlay(); // hide radar unless its overlay is on
   applyModePanels();
   buildProductButtons();
   buildLegend();
@@ -1082,8 +1119,27 @@ function renderSatellite() {
   if (!scene) { clearSatellite(); return; }
   const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
   const bbox = state.sat._bbox || (state.sat._bbox = sceneBBox(scene));
+  drawSatScene(scene, rgba, bbox);
+}
+
+// The projection metadata the satellite layer needs to draw a scene — small
+// enough to cache per playback frame (unlike the scene's full channel arrays).
+function satSceneMeta(scene) {
+  return {
+    width: scene.width, height: scene.height,
+    xScale: scene.xScale, xOffset: scene.xOffset,
+    yScale: scene.yScale, yOffset: scene.yOffset,
+    proj: scene.proj,
+  };
+}
+
+// Draw a satellite frame from its prebuilt RGBA + projection meta. `meta` may be
+// the full scene (live view) or a stripped satSceneMeta (playback).
+function drawSatScene(meta, rgba, bbox) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
   setSatelliteSource(map);
-  state.sat.layer.setScene(scene, rgba, bbox);
+  state.sat.layer.setScene(meta, rgba, bbox);
   state.sat.layer.setOpacity(state.opacity);
 }
 
@@ -1234,6 +1290,16 @@ function renderMrms() {
   state.mrms.layer.setOpacity(state.opacity);
 }
 
+// Display a pre-prepared MRMS grid payload (see prepareGridTexture) — used by
+// playback to swap cached frames cheaply.
+function drawMrmsPayload(payload) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  setMrmsSource(map);
+  state.mrms.layer.showPrepared(payload);
+  state.mrms.layer.setOpacity(state.opacity);
+}
+
 function buildMrmsLegend() {
   const p = resolveGridProduct(MRMS_PRODUCTS[state.mrms.productId]);
   el.legend.innerHTML = legendHTML(p, p.scale);
@@ -1276,26 +1342,53 @@ function buildModelProductButtons() {
       state.models.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       buildModelLegend();
-      loadModelList(); // each field is pulled separately from the GRIB index
+      loadModelFrame(); // same run/forecast hour, different field
     });
     el.productButtons.appendChild(btn);
   }
 }
 
+function currentModelRun() {
+  return state.models.runs.find((r) => r.key === state.models.runKey) || null;
+}
+
+// The left "Model runs" list — each entry is a model cycle.
 function buildModelList() {
   el.volumeList.innerHTML = '';
-  if (!state.models.frames.length) {
+  if (!state.models.runs.length) {
     el.volumeList.innerHTML = '<div class="empty">No model runs found for this day.</div>';
     return;
   }
-  [...state.models.frames].reverse().forEach((v) => {
+  [...state.models.runs].reverse().forEach((r) => {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
-    if (v.key === state.models.frameKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${v.label}`;
-    btn.addEventListener('click', () => loadModelFrame(v.key));
+    if (r.key === state.models.runKey) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${r.label} run`;
+    btn.addEventListener('click', () => selectModelRun(r.key));
     el.volumeList.appendChild(btn);
   });
+}
+
+// Forecast-hour picker (right rail), mirroring the radar elevation-tilt list.
+function buildFhourList() {
+  if (!el.fhourList) return;
+  el.fhourList.innerHTML = '';
+  const run = currentModelRun();
+  if (!run) { el.fhourList.innerHTML = '<div class="empty">No run selected.</div>'; return; }
+  for (const f of forecastHours(run)) {
+    const btn = document.createElement('button');
+    btn.className = 'tilt-btn';
+    if (f === state.models.fhour) btn.classList.add('active');
+    btn.textContent = 'F' + p2(f);
+    btn.addEventListener('click', () => selectFhour(f));
+    el.fhourList.appendChild(btn);
+  }
+}
+
+function selectFhour(f) {
+  state.models.fhour = f;
+  buildFhourList();
+  loadModelFrame();
 }
 
 async function loadModelList() {
@@ -1304,15 +1397,18 @@ async function loadModelList() {
   buildModelList();
   try {
     const when = state.live ? new Date() : state.date;
-    const frames = await listModels(state.models.modelKey, state.models.productId, when);
-    state.models.frames = frames;
+    const runs = await listModels(state.models.modelKey, state.models.productId, when);
+    state.models.runs = runs;
     buildModelList();
-    setStatus(`${frames.length} model runs`);
-    if (!frames.length) return;
-    const latest = frames[frames.length - 1].key;
-    if (state._forceLatest || !state.models.grid || state.live) {
+    setStatus(`${runs.length} model runs`);
+    if (!runs.length) return;
+    const latest = runs[runs.length - 1].key;
+    if (state._forceLatest || !state.models.grid || state.live || !currentModelRun()) {
       state._forceLatest = false;
-      if (latest !== state.models.frameKey) loadModelFrame(latest);
+      selectModelRun(latest);
+    } else {
+      buildModelList();
+      buildFhourList();
     }
   } catch (e) {
     setStatus(`HRRR list error: ${e.message}`);
@@ -1320,29 +1416,44 @@ async function loadModelList() {
   }
 }
 
-async function loadModelFrame(key) {
-  const frame = state.models.frames.find((f) => f.key === key);
-  if (!frame) return;
-  state.models.frameKey = key;
+function selectModelRun(key) {
+  state.models.runKey = key;
+  const run = currentModelRun();
+  // Keep the chosen forecast hour if the new run reaches it, else fall back to F00.
+  if (run && state.models.fhour > run.maxFhour) state.models.fhour = 0;
   buildModelList();
+  buildFhourList();
+  loadModelFrame();
+}
+
+// Load the currently-selected run + forecast hour.
+let modelLoadSeq = 0;
+async function loadModelFrame() {
+  const run = currentModelRun();
+  if (!run) return;
+  const fhour = state.models.fhour;
+  const seq = ++modelLoadSeq;
   setStatus('downloading HRRR…', true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
-    const grid = await loadModel(state.models.modelKey, state.models.productId, frame, (p) => {
+    const grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
+    if (seq !== modelLoadSeq) return; // a newer selection superseded this one
     setStatus('decoding HRRR…', true);
     el.decoding.classList.add('show');
     state.models.grid = grid;
     renderModels();
-    setStatus(`HRRR ${grid.product.name} loaded`);
+    setStatus(`HRRR ${run.label} F${p2(fhour)} · ${grid.product.name}`);
   } catch (e) {
-    setStatus(`HRRR error: ${e.message}`);
+    if (seq === modelLoadSeq) setStatus(`HRRR error: ${e.message}`);
     console.error(e);
   } finally {
-    el.progress.classList.remove('show');
-    el.decoding.classList.remove('show');
+    if (seq === modelLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
   }
 }
 
@@ -1363,6 +1474,15 @@ function renderModels() {
   if (!grid) { clearModels(); return; }
   setModelSource(map);
   state.models.layer.setGrid(grid, resolveGridProduct(grid.product));
+  state.models.layer.setOpacity(state.opacity);
+}
+
+// Display a pre-prepared model grid payload — used by forecast-hour playback.
+function drawModelPayload(payload) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  setModelSource(map);
+  state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
 }
 
@@ -1639,8 +1759,86 @@ function applyResponsiveLayout() {
 }
 
 // ---------------------------------------------------------------------------
-// Playback — scrub/animate the last 10 scans of the current radar.
+// Playback — scrub/animate a loop of recent frames. Works for every source:
+// radar volumes, MRMS frames, satellite scenes, and HRRR forecast hours. Each
+// mode supplies a "provider" describing its frames, how to load one, how to draw
+// a loaded one, and how to restore the live view when playback stops.
+//
+// Raw decoded data is far too big to cache many of (an MRMS grid alone is
+// ~100 MB), so grid/satellite providers load each frame straight into a compact
+// GPU-ready payload (a max-pooled texture or a prebuilt RGBA) and cache that.
 // ---------------------------------------------------------------------------
+
+// A short key identifying the current playback context; when it changes (site,
+// product, run, sector…) the cached frames are no longer valid and are dropped.
+function playbackContextKey() {
+  const m = state.mode;
+  if (m === 'radar') return `radar:${state.site}`;
+  if (m === 'mrms') return `mrms:${state.mrms.productId}`;
+  if (m === 'satellite')
+    return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.productId}:${state.sat.enhanceIR}`;
+  if (m === 'models')
+    return `models:${state.models.modelKey}:${state.models.productId}:${state.models.runKey}`;
+  return m;
+}
+
+// Build the per-mode playback provider against the current state. `frames` are
+// ordered oldest→newest; `ck` is a globally-unique cache key per frame.
+function buildPlaybackProvider() {
+  if (state.mode === 'radar') {
+    const n = mqMobile.matches ? 5 : 10;
+    return {
+      frames: state.volumes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      async load(f) { return await decodeVolume(await fetchVolume(f.key)); },
+      render(vol) { displaySweep(pickSweep(vol.sweeps), vol.site); },
+      idle() { displaySweep(currentSweep(), state.volume && state.volume.site); },
+    };
+  }
+  if (state.mode === 'mrms') {
+    const n = mqMobile.matches ? 3 : 8;
+    return {
+      frames: state.mrms.frames.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      async load(f) {
+        const grid = await loadMrms(state.mrms.productId, f.key);
+        return prepareGridTexture(grid, resolveGridProduct(grid.product));
+      },
+      render(payload) { drawMrmsPayload(payload); },
+      idle() { renderMrms(); },
+    };
+  }
+  if (state.mode === 'satellite') {
+    const n = mqMobile.matches ? 3 : 6;
+    return {
+      frames: state.sat.scenes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      async load(f) {
+        const scene = await loadGoesScene(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
+        const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
+        return { meta: satSceneMeta(scene), rgba, bbox: sceneBBox(scene) };
+      },
+      render(payload) { drawSatScene(payload.meta, payload.rgba, payload.bbox); },
+      idle() { renderSatellite(); },
+    };
+  }
+  if (state.mode === 'models') {
+    const run = currentModelRun();
+    if (!run) return { frames: [] };
+    // Loop the forecast hours of the selected run (capped so we don't preload
+    // dozens of fields); the picker still reaches every hour out to F48.
+    const cap = mqMobile.matches ? 7 : 19;
+    const hours = forecastHours(run).slice(0, cap);
+    return {
+      frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
+      async load(f) {
+        const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
+        return prepareGridTexture(grid, resolveGridProduct(grid.product));
+      },
+      render(payload) { drawModelPayload(payload); },
+      idle() { renderModels(); },
+    };
+  }
+  return { frames: [] };
+}
+
 function createPlayback() {
   return {
     active: false,
@@ -1650,15 +1848,20 @@ function createPlayback() {
     fps: 3,
     timer: null,
     cache: new Map(),
+    cacheCtx: null,
+    provider: null,
 
     async start() {
       if (this.active) return;
-      if (!state.volumes.length) {
-        setStatus('no scans to play back');
+      const provider = buildPlaybackProvider();
+      if (!provider.frames || !provider.frames.length) {
+        setStatus('no frames to play back');
         return;
       }
+      this.provider = provider;
       this.active = true;
       el.playBtn.classList.add('active');
+      if (el.loopBtn) el.loopBtn.classList.add('active');
       // The loop UI takes over the dock's space: hide the dock while playing
       // and reveal it again on stop (the ✕ on the bar).
       el.mobileDock.hidden = true;
@@ -1668,36 +1871,35 @@ function createPlayback() {
       el.playLabel.textContent = 'loading…';
       if (state.live) toggleLive(); // freeze auto-refresh during playback
 
-      // Decoding ten full Level II volumes and holding them all in memory at
-      // once can exhaust a phone and crash the tab. On mobile, loop fewer,
-      // recent frames so the working set stays small.
-      const frameCount = mqMobile.matches ? 5 : 10;
-      const last = state.volumes.slice(-frameCount);
+      // Drop any cache held for a different context (mode/product/run/…).
+      const ctx = playbackContextKey();
+      if (ctx !== this.cacheCtx) { this.cache.clear(); this.cacheCtx = ctx; }
+
       setStatus('loading playback…', true);
       const frames = [];
-      for (const v of last) {
-        let entry = this.cache.get(v.key);
-        if (!entry) {
+      let i = 0;
+      for (const fr of provider.frames) {
+        let payload = this.cache.get(fr.ck);
+        if (!payload) {
           try {
-            const bytes = await fetchVolume(v.key);
-            const volume = await decodeVolume(bytes);
-            entry = { volume, sweeps: volume.sweeps };
-            this.cache.set(v.key, entry);
+            payload = await provider.load(fr);
+            this.cache.set(fr.ck, payload);
           } catch (e) {
+            console.error(e);
             continue;
           }
         }
         if (!this.active) return; // user bailed mid-load
-        frames.push({ key: v.key, label: v.label, volume: entry.volume });
+        frames.push({ label: fr.label, ck: fr.ck, payload });
+        el.playLabel.textContent = `loading ${++i}/${provider.frames.length}…`;
       }
       if (!frames.length) {
         setStatus('playback unavailable');
         this.stop();
         return;
       }
-      // Drop any cached volumes that aren't part of this loop so the cache
-      // can't grow without bound as new scans arrive over a long session.
-      const keep = new Set(frames.map((f) => f.key));
+      // Bound the cache to this loop so it can't grow without limit.
+      const keep = new Set(frames.map((f) => f.ck));
       for (const k of [...this.cache.keys()]) if (!keep.has(k)) this.cache.delete(k);
 
       this.frames = frames;
@@ -1746,8 +1948,8 @@ function createPlayback() {
 
     renderFrame() {
       const f = this.frames[this.idx];
-      if (!f) return;
-      displaySweep(pickSweep(f.volume.sweeps), f.volume.site);
+      if (!f || !this.provider) return;
+      this.provider.render(f.payload);
       el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}`;
       el.dockTime.textContent = f.label;
     },
@@ -1755,17 +1957,21 @@ function createPlayback() {
     stop() {
       this.pause();
       this.active = false;
+      const provider = this.provider;
       this.frames = [];
       el.playBtn.classList.remove('active');
+      if (el.loopBtn) el.loopBtn.classList.remove('active');
       el.playbackBar.hidden = true;
       el.sheetPlayback.hidden = true;
       document.querySelector('.app').classList.remove('playing');
       // Restore the normal bottom dock that the loop UI replaced.
       if (mqMobile.matches) el.mobileDock.hidden = false;
-      // Release the decoded-volume cache on phones so playback memory is freed
-      // as soon as the loop is dismissed.
-      if (mqMobile.matches) this.cache.clear();
-      displaySweep(currentSweep(), state.volume && state.volume.site);
+      // Release the frame cache on phones so playback memory is freed at once.
+      if (mqMobile.matches) { this.cache.clear(); this.cacheCtx = null; }
+      // Restore the live view for the active source.
+      if (provider && provider.idle) provider.idle();
+      else displaySweep(currentSweep(), state.volume && state.volume.site);
+      this.provider = null;
       updateDock();
     },
   };
@@ -1906,6 +2112,26 @@ function init() {
     updateInspect();
     setStatus(on ? 'velocity dealiasing on' : 'velocity dealiasing off');
   });
+
+  // Single-site radar overlay for the satellite / MRMS / model modes.
+  if (el.radarOverlayToggle) {
+    el.radarOverlayToggle.addEventListener('click', () => {
+      const on = !el.radarOverlayToggle.classList.contains('active');
+      el.radarOverlayToggle.classList.toggle('active', on);
+      el.radarOverlayToggle.textContent = on ? 'ON' : 'OFF';
+      state.radarOverlay = on;
+      applyRadarOverlay();
+      setStatus(on ? `radar overlay on (${state.site})` : 'radar overlay off');
+    });
+  }
+
+  // Desktop playback trigger (mobile uses the dock's ▶ button).
+  if (el.loopBtn) {
+    el.loopBtn.addEventListener('click', () => {
+      if (state.playback.active) state.playback.stop();
+      else state.playback.start();
+    });
+  }
 
   // Live NWS watches/warnings overlay.
   state.alerts = new AlertsController(state.map, {

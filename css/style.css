@@ -1309,6 +1309,11 @@ input[type='range']::-moz-range-thumb {
 .pb-scrub {
   flex: 1;
 }
+/* The desktop "Playback loop" button is redundant on mobile, where the bottom
+   dock already carries a ▶ control — hide it there. */
+.app.mobile #loopField {
+  display: none;
+}
 .pb-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;

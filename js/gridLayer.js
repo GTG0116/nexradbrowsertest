@@ -94,6 +94,24 @@ function buildTexture(grid, product) {
   return { data, W, H, lon1, lat1, di: di * factor, dj: dj * factor };
 }
 
+// Build the GPU-ready payload for a grid (max-pooled texture + quad geometry +
+// color LUT) without touching any GL context. Pulling this out of the layer lets
+// playback precompute and cache the lightweight payload per frame — crucial
+// because a raw MRMS grid is ~100 MB, far too big to hold many of.
+export function prepareGridTexture(grid, product) {
+  const tex = buildTexture(grid, product);
+  const sc = product.scale;
+  const w = mercX(tex.lon1);
+  const e = mercX(tex.lon1 + tex.W * tex.di);
+  const n = mercY(tex.lat1);
+  const s = mercY(tex.lat1 - tex.H * tex.dj);
+  const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
+  return {
+    tex, verts, lut: sc.rgba, steps: sc.steps,
+    uni: { ni: tex.W, nj: tex.H, lon1: tex.lon1, lat1: tex.lat1, di: tex.di, dj: tex.dj },
+  };
+}
+
 export function createGridLayer(id = 'mrms') {
   return {
     id,
@@ -127,17 +145,13 @@ export function createGridLayer(id = 'mrms') {
     },
 
     setGrid(grid, product) {
-      const tex = buildTexture(grid, product);
-      const sc = product.scale;
-      const w = mercX(tex.lon1);
-      const e = mercX(tex.lon1 + tex.W * tex.di);
-      const n = mercY(tex.lat1);
-      const s = mercY(tex.lat1 - tex.H * tex.dj);
-      const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
-      this.pending = {
-        tex, verts, lut: sc.rgba, steps: sc.steps,
-        uni: { ni: tex.W, nj: tex.H, lon1: tex.lon1, lat1: tex.lat1, di: tex.di, dj: tex.dj },
-      };
+      this.showPrepared(prepareGridTexture(grid, product));
+    },
+
+    // Display an already-prepared payload (from prepareGridTexture). Playback
+    // uses this to swap cached frames without rebuilding the texture each time.
+    showPrepared(payload) {
+      this.pending = payload;
       if (this.gl) this._upload(this.pending);
       this.has = true;
       if (this.map) this.map.triggerRepaint();
