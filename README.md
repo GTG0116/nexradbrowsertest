@@ -9,9 +9,14 @@ the radar imagery — entirely client-side.
 
 ## What it does
 
-- **Live data** from the open `unidata-nexrad-level2` AWS S3 bucket (NOAA Open
-  Data Dissemination). The bucket is CORS-enabled (`Access-Control-Allow-Origin: *`)
-  for both listing and download, so the browser talks to it directly.
+- **Live data**, primarily from the Iowa Environmental Mesonet (IEM) raw
+  Level II feed (`mesonet-nexrad.agron.iastate.edu/level2/raw/`), which relays
+  the NWS realtime feed and exposes volumes as they are ingested — so it carries
+  the freshest scans. When IEM is unreachable or lacks data for the requested
+  day (it keeps only a rolling window), the viewer transparently falls back to
+  the open `unidata-nexrad-level2` AWS S3 bucket (NOAA Open Data Dissemination),
+  which is CORS-enabled (`Access-Control-Allow-Origin: *`) and retains the recent
+  archive for history browsing.
 - **Client-side bzip2** decompression of the LDM records (`js/bzip2.js`), a
   self-contained, dependency-free implementation (Huffman + MTF + RLE2 + inverse
   BWT + RLE1).
@@ -172,7 +177,7 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 ```
 index.html ─ css/style.css        UI shell + console styling
 js/app.js                         controller: UI, state, interaction
- ├─ js/s3.js                      list/download volumes from S3 (CORS)
+ ├─ js/s3.js                      list/download volumes (IEM live → AWS S3 fallback)
  ├─ js/products.js                color scales + LUTs per product
  ├─ js/radarLayer.js              custom WebGL layer: polar gates → GPU, per pixel
  ├─ js/renderer.js                sweep range + point-sample helpers
@@ -198,10 +203,18 @@ to pan, hover to read the value at any gate.
 
 ## Data source notes
 
-The Unidata feed carries a rolling window of the most recent scans — exactly
-what a live viewer needs. NOAA's deep archive bucket `noaa-nexrad-level2` holds
-data back to 1991 but disables anonymous bucket listing, so it cannot be browsed
-from the client; the Unidata realtime mirror is used instead.
+The IEM raw feed (`mesonet-nexrad.agron.iastate.edu/level2/raw/<SITE>/`) is the
+primary live source: it indexes each site's recent volumes in a `dir.list` file
+and serves them as ordinary AR2V Archive II files (the `.bz2` extension
+notwithstanding), often a scan or two ahead of the AWS mirror. It keeps only a
+rolling window and does not advertise CORS, so the viewer falls back to the
+Unidata AWS S3 mirror — which is CORS-enabled and retains a longer recent
+archive — whenever IEM is blocked, errors, or has no data for the requested day
+(as when browsing history). If a deployment's origin can't reach IEM directly
+because of CORS, point `setProxy()` in `js/s3.js` at a CORS proxy.
+
+NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
+disables anonymous bucket listing, so it cannot be browsed from the client.
 
 ## Validation
 
