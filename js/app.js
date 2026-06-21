@@ -4,7 +4,8 @@
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct } from './products.js';
-import { renderRadarCanvas, sampleAt, sweepMaxRange } from './renderer.js';
+import { sampleAt, sweepMaxRange } from './renderer.js';
+import { createRadarLayer } from './radarLayer.js';
 import { AlertsController } from './alerts.js';
 
 const M_PER_DEG_LAT = 111320;
@@ -27,55 +28,10 @@ const BASEMAPS = {
   outdoors: { url: 'mapbox://styles/mapbox/outdoors-v12', label: 'Outdoors' },
 };
 
-// Canvas resolution for the rasterised radar. Higher = crisper when zoomed in,
-// at the cost of memory and a longer render. A still view renders once so it
-// can afford a big canvas; playback re-renders every frame, so it tracks the
-// same zoom but under a tighter cap to keep each frame cheap.
-//
-// The radar is one georeferenced raster that Mapbox keeps sampling with its
-// default *linear* resampling as the map moves. Linear is what we want — it
-// reprojects the polar cells smoothly — but if the canvas is rasterised at a
-// fixed resolution, zooming in past that detail makes the GPU stretch a coarse
-// image and the picture goes soft (the "auto smoothing" the radar suffers).
-// Switching the layer to `raster-resampling: nearest` doesn't fix that: it just
-// trades the blur for the canvas's own square mercator grid showing through,
-// which misrepresents the gates. The real fix is to rasterise at a resolution
-// that keeps up with the zoom so the displayed image stays at (or above) 1:1
-// with the screen — then linear has nothing to invent and the gates stay crisp.
-const RES_MIN = () => (window.matchMedia('(max-width: 900px)').matches ? 1024 : 2048);
-const RES_MAX = () => (window.matchMedia('(max-width: 900px)').matches ? 4096 : 8192);
-
-// Canvas size (px) needed for the radar's coverage box to map ~1:1 onto screen
-// pixels at this zoom, stepped to powers of two so we only re-render when we
-// cross a real detail boundary (not on every pixel of zoom).
-function radarResForZoom(zoom, maxR, siteLat) {
-  const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
-  const spanDeg = ((maxR || 300000) * 1.04 * 2) / mPerDegLon; // E–W span of the canvas
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const want = 256 * Math.pow(2, zoom) * (spanDeg / 360) * dpr; // screen px across the radar
-  let n = 512;
-  while (n < want) n *= 2;
-  return Math.max(RES_MIN(), Math.min(RES_MAX(), n));
-}
-
-// Resolution to rasterise the current view at. The number of polar cells filled
-// is fixed by the data (not the canvas size), so resolution only changes the
-// fill area, not the polygon count — which means playback can also track the
-// zoom instead of being pinned to a blurry fixed size. It just keeps a tighter
-// cap so each animated frame stays cheap in memory; stills can afford the full
-// zoom-matched resolution. Either way the canvas stays at (or above) 1:1 with
-// the screen, so the GPU's linear resampling never has to upsample and invent
-// the soft in-between pixels that smeared the gates.
-function currentRadarRes(maxR, site) {
-  const mobile = window.matchMedia('(max-width: 900px)').matches;
-  const zoom = state.map ? state.map.getZoom() : 6;
-  const n = radarResForZoom(zoom, maxR, site ? site.lat : 35);
-  // During playback, bound memory/fill cost per frame while still following the
-  // zoom (so a zoomed-in loop is crisp, not the old fixed-2048 blur).
-  if (state.playback && state.playback.active)
-    return Math.min(n, mobile ? 2048 : 4096);
-  return n;
-}
+// The radar is drawn by a custom WebGL layer (radarLayer.js) that samples the
+// polar gate data per screen pixel with NEAREST lookup, every frame. There is no
+// rasterised canvas to size to the zoom: the gates stay pixel-exact at any zoom,
+// so the old resolution/“auto smoothing” machinery is gone.
 
 // Find the basemap layer to insert our overlays *below*, so the style's town
 // labels and administrative borders stay on top of the radar. We slot in just
@@ -199,52 +155,24 @@ function setupOverlays(map) {
   if (state.alerts) state.alerts.refreshVisible();
 }
 
-// Rasterise the current sweep and (re)bind it as a georeferenced CanvasSource
-// beneath the alert outline. Mapbox then reprojects this single image on the
-// GPU as the map moves — no per-frame JS, which is the whole point of the move
-// off the old re-render-on-every-pan canvas.
+// Hand the current sweep to the custom WebGL radar layer, inserting the layer
+// beneath the alert outline if it isn't on the map yet. The layer then renders
+// the polar data directly on the GPU every frame — no rasterised image, so the
+// gates stay pixel-exact at every zoom and pan/zoom cost no JavaScript.
 function setRadarSource(map, sweep, product, site) {
-  const maxR = sweepMaxRange(sweep, product.moment) || 300000;
-  const res = currentRadarRes(maxR, site);
-  state.radarRes = res;
-  const { coordinates } = renderRadarCanvas(
-    el.radarCanvas,
-    sweep,
-    product,
-    site,
-    maxR,
-    res
-  );
-  if (map.getLayer('radar')) map.removeLayer('radar');
-  if (map.getSource('radar')) map.removeSource('radar');
-  map.addSource('radar', {
-    type: 'canvas',
-    canvas: el.radarCanvas,
-    coordinates,
-    animate: false,
-  });
-  map.addLayer(
-    {
-      id: 'radar',
-      type: 'raster',
-      source: 'radar',
-      paint: {
-        'raster-opacity': state.opacity,
-        'raster-fade-duration': 0,
-        // Keep linear resampling (the default): nearest would expose the
-        // mercator pixel grid. Crispness is held by re-rasterising at a
-        // zoom-matched resolution (see currentRadarRes / the zoomend handler).
-        'raster-resampling': 'linear',
-      },
-    },
-    map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
-  );
+  if (!state.radarLayer) state.radarLayer = createRadarLayer();
+  if (!map.getLayer('radar'))
+    map.addLayer(
+      state.radarLayer,
+      map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
+    );
+  state.radarLayer.setSweep(sweep, product, site);
+  state.radarLayer.setOpacity(state.opacity);
 }
 
 function clearRadarSource(map) {
   if (!map) return;
-  if (map.getLayer('radar')) map.removeLayer('radar');
-  if (map.getSource('radar')) map.removeSource('radar');
+  if (state.radarLayer) state.radarLayer.clear();
 }
 
 // Decode volumes off the main thread.
@@ -284,7 +212,7 @@ const state = {
   map: null,
   basemap: 'dark',
   showRings: true,
-  radarRes: 0,
+  radarLayer: null,
   styleReady: false,
   geo: null,
   alerts: null,
@@ -299,7 +227,6 @@ const el = {};
 
 function cacheEls() {
   el.map = $('#map');
-  el.radarCanvas = $('#radarCanvas');
   el.mapWrap = $('#mapWrap');
   el.siteSelect = $('#siteSelect');
   el.dateInput = $('#dateInput');
@@ -408,29 +335,8 @@ function initMap() {
   });
   map.on('mouseout', () => el.readout.classList.remove('show'));
 
-  // Re-rasterise the radar when a zoom settles at a level that needs more (or
-  // less) canvas detail than what's currently drawn — this is what keeps the
-  // gates crisp as you zoom in without falling back to nearest resampling.
-  // Debounced and bucketed (powers of two) so it fires rarely, never mid-gesture
-  // and never during playback (which owns its own lighter render).
-  let radarZoomTimer = null;
-  map.on('zoomend', () => {
-    if (!state.shownSweep || !state.shownSite) return;
-    clearTimeout(radarZoomTimer);
-    radarZoomTimer = setTimeout(() => {
-      const product = PRODUCTS[state.productId];
-      const maxR = sweepMaxRange(state.shownSweep, product.moment) || 300000;
-      if (currentRadarRes(maxR, state.shownSite) === state.radarRes) return;
-      // A running loop re-rasterises on its own per-frame tick; only nudge it
-      // here when it is paused/scrubbing so the held frame matches the new zoom.
-      const pb = state.playback;
-      if (pb && pb.active) {
-        if (!pb.playing) pb.renderFrame();
-      } else {
-        setRadarSource(map, state.shownSweep, product, state.shownSite);
-      }
-    }, 200);
-  });
+  // No zoom handling needed: the custom radar layer re-samples the polar data
+  // per pixel every frame, so it stays pixel-exact at any zoom on its own.
 
   // Right-click anywhere to jump to the NEXRAD radar nearest that point.
   map.on('contextmenu', (e) => {
@@ -781,7 +687,6 @@ function displaySweep(sweep, site) {
 
   const maxR = sweepMaxRange(sweep, product.moment) || 300000;
   setRadarSource(map, sweep, product, site);
-  if (map.getLayer('radar')) map.setPaintProperty('radar', 'raster-opacity', state.opacity);
   drawRings(site, maxR);
   updateInspect();
 }
@@ -1228,8 +1133,7 @@ function init() {
   el.opacity.addEventListener('input', () => {
     state.opacity = el.opacity.value / 100;
     el.opacityVal.textContent = el.opacity.value + '%';
-    if (state.map && state.map.getLayer && state.map.getLayer('radar'))
-      state.map.setPaintProperty('radar', 'raster-opacity', state.opacity);
+    if (state.radarLayer) state.radarLayer.setOpacity(state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);

@@ -192,9 +192,8 @@
     </div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.js"></script>
-    <!-- Hidden canvas the radar sweep is rasterised into; Mapbox draws it as a
-         georeferenced CanvasSource beneath the basemap's label layers. -->
-    <canvas id="radarCanvas" style="display: none"></canvas>
+    <!-- The radar is drawn by a custom WebGL layer (js/radarLayer.js) straight
+         from the polar gate data; no intermediate canvas is needed. -->
     <script type="module" src="js/app.js"></script>
   </body>
 </html>
