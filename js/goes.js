@@ -225,6 +225,41 @@ export function scanToLonLat(x, y, proj) {
   return [lon * 180 / Math.PI, lat * 180 / Math.PI];
 }
 
+// Inverse of scanToLonLat: geodetic lon/lat (deg) → fractional grid column/row,
+// the same math the satellite shader runs per pixel. Returns null when the point
+// is off the visible Earth disk or outside the scene grid. Used by the inspect
+// tool / cursor readout to read the channel value under a point.
+export function lonLatToColRow(scene, lat, lon) {
+  const { proj, xOffset, xScale, yOffset, yScale, width: W, height: H } = scene;
+  const latR = (lat * Math.PI) / 180;
+  const lonR = (lon * Math.PI) / 180;
+  const req2 = proj.rEq * proj.rEq;
+  const rpol2 = proj.rPol * proj.rPol;
+  const phic = Math.atan((rpol2 / req2) * Math.tan(latR)); // geocentric latitude
+  const cphic = Math.cos(phic);
+  const e2 = 1 - rpol2 / req2;
+  const rc = proj.rPol / Math.sqrt(1 - e2 * cphic * cphic);
+  const dlon = lonR - proj.lon0;
+  const sx = proj.H - rc * cphic * Math.cos(dlon);
+  const sy = -rc * cphic * Math.sin(dlon);
+  const sz = rc * Math.sin(phic);
+  // Visibility: the point must be on the Earth face toward the satellite.
+  if (proj.H * (proj.H - sx) < sy * sy + (req2 / rpol2) * sz * sz) return null;
+  const sxyz = Math.sqrt(sx * sx + sy * sy + sz * sz);
+  let scanX, scanY;
+  if (proj.sweep === 'y') {
+    scanX = Math.atan(sy / sx);
+    scanY = Math.asin(-sz / sxyz);
+  } else {
+    scanY = Math.atan(sz / sx);
+    scanX = Math.asin(-sy / sxyz);
+  }
+  const col = (scanX - xOffset) / xScale;
+  const row = (scanY - yOffset) / yScale;
+  if (col < 0 || col >= W || row < 0 || row >= H) return null;
+  return { col, row };
+}
+
 // Bounding box [w, s, e, n] of a scene by forward-projecting a coarse sample of
 // its scan-angle grid (skipping off-limb points, e.g. full-disk corners).
 export function sceneBBox(scene) {

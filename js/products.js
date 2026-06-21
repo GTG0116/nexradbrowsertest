@@ -134,8 +134,17 @@ const PHI_STOPS = [
   s(360, [255, 0, 0]),
 ];
 
-function product(id, name, unit, moment, stops) {
+// `disp` carries an imperial display conversion applied only to the *labels and
+// readouts* (legend ticks, cursor / inspect values) — the color scale and the
+// physical values stay native, so colours are unaffected. value_shown =
+// value*factor + offset.
+const MS_TO_MPH = 2.2369363;
+
+function product(id, name, unit, moment, stops, disp) {
   const scale = makeScale(stopsToSegments(stops));
+  const dispUnit = (disp && disp.unit) || unit;
+  const dispFactor = (disp && disp.factor) || 1;
+  const dispOffset = (disp && disp.offset) || 0;
   return {
     id,
     name,
@@ -145,17 +154,33 @@ function product(id, name, unit, moment, stops) {
     range: [scale.lo, scale.hi],
     scale,
     defaultScale: scale,
+    dispUnit, dispFactor, dispOffset,
+    defaultDispUnit: dispUnit, defaultDispFactor: dispFactor, defaultDispOffset: dispOffset,
   };
 }
 
 export const PRODUCTS = {
   REF: product('REF', 'Reflectivity', 'dBZ', 'REF', REF_STOPS),
-  VEL: product('VEL', 'Velocity', 'm/s', 'VEL', VEL_STOPS),
-  SW: product('SW', 'Spectrum Width', 'm/s', 'SW', SW_STOPS),
+  VEL: product('VEL', 'Velocity', 'm/s', 'VEL', VEL_STOPS, { unit: 'mph', factor: MS_TO_MPH }),
+  SW: product('SW', 'Spectrum Width', 'm/s', 'SW', SW_STOPS, { unit: 'mph', factor: MS_TO_MPH }),
   RHO: product('RHO', 'Correlation Coeff.', 'ρHV', 'RHO', CC_STOPS),
   ZDR: product('ZDR', 'Differential Refl.', 'dB', 'ZDR', ZDR_STOPS),
   PHI: product('PHI', 'Differential Phase', '°', 'PHI', PHI_STOPS),
 };
+
+// Decimal places to show for a (display) unit.
+const UNIT_DECIMALS = { mph: 0, in: 2, '°F': 0, dBZ: 0, ρHV: 2, dB: 1, '°': 0, '%': 0, 'm/s': 1 };
+export function unitDecimals(unit) {
+  return unit in UNIT_DECIMALS ? UNIT_DECIMALS[unit] : 1;
+}
+
+// Convert a native physical value to its imperial display value + format it.
+export function dispValue(product, v) {
+  return v * (product.dispFactor || 1) + (product.dispOffset || 0);
+}
+export function dispUnitOf(product) {
+  return product.dispUnit || product.unit;
+}
 
 export const PRODUCT_ORDER = ['REF', 'VEL', 'SW', 'RHO', 'ZDR', 'PHI'];
 
