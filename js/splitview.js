@@ -69,6 +69,7 @@ export class SplitView {
       projection: 'mercator',
       attributionControl: false,
       accessToken: MAPBOX_TOKEN,
+      preserveDrawingBuffer: true, // keep the pane grabbable by the export tool
     });
     this.map = map;
     this.productId = this._defaultProduct();

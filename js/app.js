@@ -19,6 +19,7 @@ import { fetchSounding, drawSkewT, drawHodograph, paramRows } from './sounding.j
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
 import { SplitView } from './splitview.js';
+import { ExportTool } from './export.js';
 
 // Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
 // radar reflectivity color table, so all reflectivity is colored identically and
@@ -261,6 +262,7 @@ const state = {
   metars: null,
   mapTools: null,
   splitView: null,
+  exportTool: null,
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -387,6 +389,7 @@ function cacheEls() {
   el.toolStorm = $('#toolStorm');
   el.toolMetars = $('#toolMetars');
   el.toolSplit = $('#toolSplit');
+  el.toolExport = $('#toolExport');
   el.toolClear = $('#toolClear');
   el.playbackBar = $('#playbackBar');
   el.playToggle = $('#playToggle');
@@ -431,6 +434,10 @@ function initMap() {
     // The vector basemap renders on its own; our radar/alert layers slot into
     // its layer stack beneath the labels (set up in setupOverlays).
     renderWorldCopies: true,
+    // Keep the WebGL backbuffer readable so the export tool can grab the canvas
+    // (basemap + radar + drawings) with toDataURL at any time, not just inside a
+    // render frame. The cost is a small amount of GPU memory bandwidth.
+    preserveDrawingBuffer: true,
   });
   map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-left');
   state.map = map;
@@ -2317,6 +2324,83 @@ function setupMapTools() {
     el.toolSplit.classList.toggle('active', on);
     if (on) state.splitView.setDrawings(state.mapTools.getFeatureCollection());
   });
+
+  // Export / share — snapshot the live map(s) to a PNG with a caption banner.
+  state.exportTool = new ExportTool({ getScene: buildExportScene });
+  el.toolExport.addEventListener('click', () => {
+    try {
+      state.exportTool.run();
+    } catch (e) {
+      console.error('export failed:', e);
+      setStatus('Export failed');
+    }
+  });
+}
+
+// Gather the canvases, caption and legend for the export tool. In split view
+// both panes are included, left → right.
+function buildExportScene() {
+  // Force a fresh GL frame so the captured backbuffer is current (the map is
+  // created with preserveDrawingBuffer, so the read itself is then safe).
+  if (state.map && state.map.redraw) state.map.redraw();
+  const canvases = [state.map.getCanvas()];
+  if (state.splitView && state.splitView.active && state.splitView.map) {
+    if (state.splitView.map.redraw) state.splitView.map.redraw();
+    canvases.push(state.splitView.map.getCanvas());
+  }
+  return { canvases, caption: buildExportCaption(), legendEl: el.legend };
+}
+
+// Describe what's on screen for the export banner: a title, a product/source
+// sub-line, the scan/frame time and a UTC stamp. Adapts to the active mode.
+function buildExportCaption() {
+  const cap = {
+    brand: 'AETHER',
+    tagline: 'browser-native NEXRAD scope',
+    title: '',
+    sub: '',
+    time: '',
+    stamp: utcStamp(new Date()),
+  };
+
+  if (state.mode === 'satellite') {
+    const sat = SATELLITES[state.sat.satKey];
+    const sec = SECTORS[state.sat.sectorKey];
+    cap.title = sat ? sat.label : 'GOES';
+    cap.sub = `${state.sat.productId} · ${sec ? sec.label : ''} · GOES ABI`;
+    const t = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
+    cap.time = t ? t.label : '';
+  } else if (state.mode === 'mrms') {
+    const p = MRMS_PRODUCTS[state.mrms.productId];
+    cap.title = 'MRMS CONUS';
+    cap.sub = `${p ? p.name : state.mrms.productId} · MRMS`;
+    const t = state.mrms.frames.find((x) => x.key === state.mrms.frameKey);
+    cap.time = t ? t.label : '';
+  } else if (state.mode === 'models') {
+    const m = MODELS[state.models.modelKey];
+    const p = MODEL_PRODUCTS[state.models.productId];
+    cap.title = m ? m.label : 'Model';
+    cap.sub = `${p ? p.name : state.models.productId} · F${String(state.models.fhour).padStart(2, '0')}`;
+    const run = state.models.runs.find((x) => x.key === state.models.runKey);
+    cap.time = run ? `${run.label} run` : '';
+  } else {
+    // Radar.
+    const site = (state.volume && state.volume.icao) || state.site;
+    const meta = RADARS.find((r) => r[0] === site);
+    const p = PRODUCTS[state.productId];
+    cap.title = meta ? `${site} · ${meta[1]}` : site;
+    cap.sub = `${p.name} (${dispUnitOf(p)}) · NEXRAD Level II`;
+    const t = state.volumes.find((x) => x.key === state.volumeKey);
+    cap.time = t ? t.label : '';
+  }
+  return cap;
+}
+
+// "2026-06-22 18:42:07 UTC" for the export footer.
+function utcStamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
 }
 
 // ---------------------------------------------------------------------------

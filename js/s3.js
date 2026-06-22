@@ -381,6 +381,60 @@ export const RADARS = [
   ['PHWA', 'South Shore, HI', 19.095, -155.569],
   ['TJUA', 'San Juan, PR', 18.116, -66.078],
   ['PGUA', 'Andersen AFB, Guam', 13.456, 144.811],
+
+  // --- TDWR (Terminal Doppler Weather Radar) -----------------------------
+  // The FAA's terminal radars guarding major airports. They share the same
+  // realtime feed and Archive-II message format as the WSR-88D network (AWS
+  // keys end _V08 rather than _V06; listVolumes/fetchVolume handle both), so
+  // they load through the exact same path. TDWR is C-band with a tighter
+  // ~90 nmi range and finer beam, giving a much sharper near-airport view than
+  // the parent WSR-88D. Names carry a "(TDWR)" tag so they're easy to spot in
+  // the picker, which sits next to the WSR-88D site of the same city.
+  ['TADW', 'Washington/Andrews, MD (TDWR)', 38.695, -76.845],
+  ['TATL', 'Atlanta, GA (TDWR)', 33.646, -84.262],
+  ['TBNA', 'Nashville, TN (TDWR)', 35.98, -86.662],
+  ['TBOS', 'Boston, MA (TDWR)', 42.159, -70.934],
+  ['TBWI', 'Baltimore, MD (TDWR)', 39.09, -76.63],
+  ['TCLT', 'Charlotte, NC (TDWR)', 35.337, -80.885],
+  ['TCMH', 'Columbus, OH (TDWR)', 40.006, -82.715],
+  ['TCVG', 'Cincinnati, OH (TDWR)', 38.898, -84.58],
+  ['TDAL', 'Dallas Love, TX (TDWR)', 32.926, -96.968],
+  ['TDAY', 'Dayton, OH (TDWR)', 40.022, -84.123],
+  ['TDCA', 'Washington/National, DC (TDWR)', 38.759, -76.962],
+  ['TDEN', 'Denver, CO (TDWR)', 39.728, -104.526],
+  ['TDFW', 'Dallas/Fort Worth, TX (TDWR)', 33.065, -96.918],
+  ['TDTW', 'Detroit, MI (TDWR)', 42.111, -83.515],
+  ['TEWR', 'Newark, NJ (TDWR)', 40.593, -74.27],
+  ['TFLL', 'Fort Lauderdale, FL (TDWR)', 26.143, -80.344],
+  ['THOU', 'Houston/Hobby, TX (TDWR)', 29.516, -95.242],
+  ['TIAD', 'Washington/Dulles, VA (TDWR)', 39.084, -77.529],
+  ['TIAH', 'Houston/Intercontinental, TX (TDWR)', 30.065, -95.567],
+  ['TICH', 'Wichita, KS (TDWR)', 37.507, -97.437],
+  ['TIDS', 'Indianapolis, IN (TDWR)', 39.637, -86.435],
+  ['TJFK', 'New York/JFK, NY (TDWR)', 40.589, -73.881],
+  ['TLAS', 'Las Vegas, NV (TDWR)', 36.144, -115.007],
+  ['TLVE', 'Cleveland, OH (TDWR)', 41.29, -81.972],
+  ['TMCI', 'Kansas City, MO (TDWR)', 39.498, -94.742],
+  ['TMCO', 'Orlando, FL (TDWR)', 28.343, -81.326],
+  ['TMDW', 'Chicago/Midway, IL (TDWR)', 41.651, -87.73],
+  ['TMEM', 'Memphis, TN (TDWR)', 34.896, -89.993],
+  ['TMIA', 'Miami, FL (TDWR)', 25.758, -80.491],
+  ['TMKE', 'Milwaukee, WI (TDWR)', 42.819, -88.046],
+  ['TMSP', 'Minneapolis, MN (TDWR)', 44.871, -93.341],
+  ['TMSY', 'New Orleans, LA (TDWR)', 30.022, -90.403],
+  ['TOKC', 'Oklahoma City, OK (TDWR)', 35.276, -97.51],
+  ['TORD', 'Chicago/O’Hare, IL (TDWR)', 41.797, -87.858],
+  ['TPBI', 'West Palm Beach, FL (TDWR)', 26.688, -80.273],
+  ['TPHL', 'Philadelphia, PA (TDWR)', 39.95, -75.069],
+  ['TPHX', 'Phoenix, AZ (TDWR)', 33.421, -112.163],
+  ['TPIT', 'Pittsburgh, PA (TDWR)', 40.501, -80.486],
+  ['TRDU', 'Raleigh/Durham, NC (TDWR)', 36.002, -78.697],
+  ['TSDF', 'Louisville, KY (TDWR)', 38.046, -85.611],
+  ['TSJU', 'San Juan, PR (TDWR)', 18.474, -66.179],
+  ['TSLC', 'Salt Lake City, UT (TDWR)', 40.967, -111.93],
+  ['TSTL', 'St. Louis, MO (TDWR)', 38.804, -90.489],
+  ['TTPA', 'Tampa, FL (TDWR)', 27.86, -82.518],
+  ['TTUL', 'Tulsa, OK (TDWR)', 36.071, -95.827],
 ];
 
 // Find the radar site nearest to a geographic point. Returns [ICAO, name, lat,
