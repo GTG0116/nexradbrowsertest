@@ -229,7 +229,11 @@ const state = {
   selectedElevation: 0.5,
   productId: 'REF',
   opacity: 0.85,
-  dealias: false,
+  // Unfold aliased velocities by default: without this, gates beyond the Nyquist
+  // co-interval fold back to small/wrong-signed values, so VEL reads much lower
+  // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
+  // off to inspect the raw folded field.
+  dealias: true,
   live: false,
   liveTimer: null,
   map: null,
