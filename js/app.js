@@ -2,7 +2,7 @@
 // the UI. Everything runs in the browser; the only network calls are the public
 // S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
-import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
+import { listVolumes, fetchVolume, RADARS, nearestSite, isTDWR } from './s3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals, reflectivityProduct, displayFactorFor } from './products.js';
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
@@ -100,7 +100,7 @@ function sitesGeoJSON() {
     features: RADARS.map(([icao, name, lat, lon]) => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [lon, lat] },
-      properties: { icao, name, current: icao === state.site ? 1 : 0 },
+      properties: { icao, name, current: icao === state.site ? 1 : 0, tdwr: isTDWR(icao) ? 1 : 0 },
     })),
   };
 }
@@ -159,8 +159,19 @@ function setupOverlays(map) {
       source: 'sites',
       paint: {
         'circle-radius': ['case', ['==', ['get', 'current'], 1], 6, 3.5],
-        'circle-color': ['case', ['==', ['get', 'current'], 1], '#36e0c8', 'rgba(80,140,220,0.85)'],
-        'circle-stroke-color': ['case', ['==', ['get', 'current'], 1], '#36e0c8', 'rgba(150,205,255,0.85)'],
+        // Active site → accent; TDWR terminal radars → yellow; NEXRAD → blue.
+        'circle-color': [
+          'case',
+          ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
+          'rgba(80,140,220,0.85)',
+        ],
+        'circle-stroke-color': [
+          'case',
+          ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
+          'rgba(150,205,255,0.85)',
+        ],
         'circle-stroke-width': ['case', ['==', ['get', 'current'], 1], 2, 1],
         'circle-opacity': ['case', ['==', ['get', 'current'], 1], 1, 0.6],
       },
@@ -530,6 +541,16 @@ function onSiteSwitch(icao) {
   state.site = icao;
   state._centered = false;
   state._forceLatest = true; // show the latest frame without needing LIVE
+  // TDWR is Doppler-only: drop a dual-pol selection and rebuild the product row
+  // so its dual-pol buttons disappear (and reappear when leaving a TDWR site).
+  if (state.mode === 'radar') {
+    if (isTDWR(icao) && DUAL_POL.has(state.productId)) {
+      state.productId = 'REF';
+      buildTiltList();
+      buildLegend();
+    }
+    buildProductButtons();
+  }
   refreshSiteDots();
   closeSheet();
   loadVolumeList();
@@ -627,13 +648,24 @@ function routeProductToPane(id) {
   return true;
 }
 
+// The dual-polarization moments. TDWR terminal radars scan only to Doppler
+// (REF/VEL/SW), so these products are hidden when a TDWR site is active.
+const DUAL_POL = new Set(['RHO', 'ZDR', 'PHI']);
+
+// Product ids offered for the current radar site — the full set, minus dual-pol
+// for TDWR towers.
+function availableProductOrder() {
+  if (isTDWR(state.site)) return PRODUCT_ORDER.filter((id) => !DUAL_POL.has(id));
+  return PRODUCT_ORDER;
+}
+
 function buildProductButtons() {
   if (state.mode === 'satellite') return buildSatProductButtons();
   if (state.mode === 'mrms') return buildMrmsProductButtons();
   if (state.mode === 'models') return buildModelProductButtons();
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-grid';
-  for (const id of PRODUCT_ORDER) {
+  for (const id of availableProductOrder()) {
     const p = PRODUCTS[id];
     const btn = document.createElement('button');
     btn.className = 'product-btn';
@@ -2356,7 +2388,6 @@ function buildExportScene() {
 function buildExportCaption() {
   const cap = {
     brand: 'AETHER',
-    tagline: 'browser-native NEXRAD scope',
     title: '',
     sub: '',
     time: '',
