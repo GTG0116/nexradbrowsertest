@@ -616,6 +616,7 @@ function buildProductButtons() {
       document
         .querySelectorAll('.product-btn')
         .forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      if (state.splitView) state.splitView.syncMainProduct();
       // Reflect this product's custom palette (if any) in the .pal name label.
       el.palName.textContent = p.customPal ? `${p.customPal} → ${id}` : '';
       buildTiltList();
@@ -1112,6 +1113,7 @@ function buildSatProductButtons() {
     btn.addEventListener('click', async () => {
       state.sat.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      if (state.splitView) state.splitView.syncMainProduct();
       buildSatLegend();
       // Decode any extra bands this product needs from the cached file first.
       if (state.sat.scene) {
@@ -1298,6 +1300,7 @@ function buildMrmsProductButtons() {
     btn.addEventListener('click', () => {
       state.mrms.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      if (state.splitView) state.splitView.syncMainProduct();
       buildMrmsLegend();
       loadMrmsList(); // each product is a different S3 folder
     });
@@ -1448,6 +1451,7 @@ function buildModelProductButtons() {
       btn.addEventListener('click', () => {
         state.models.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      if (state.splitView) state.splitView.syncMainProduct();
         buildModelLegend();
         loadModelFrame(); // same run/forecast hour, different field
       });
@@ -2282,6 +2286,12 @@ function setupMapTools() {
     MAPBOX_TOKEN,
     BASEMAPS,
     radarSweepFor,
+    // Change the main pane's product by reusing the normal product-switch path
+    // (the toolbar button click wires up legend/tilts/render for every mode).
+    setMainProduct: (id) => {
+      const btn = document.querySelector(`.product-btn[data-id="${id}"]`);
+      if (btn) btn.click();
+    },
   });
   el.toolSplit.addEventListener('click', () => {
     const on = state.splitView.toggle();

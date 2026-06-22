@@ -105,14 +105,29 @@ export class MapTools {
       filter: ['==', ['geometry-type'], 'Polygon'],
       paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.12 },
     });
+    // Two line layers: line-dasharray is a data-CONSTANT property in Mapbox GL
+    // (no `['get', …]` support), so a per-feature dash expression silently fails
+    // to validate and the whole line layer never gets added — which is why
+    // drawing/measuring showed nothing. Split solid vs. dashed into two layers,
+    // each with a constant dasharray, keyed off the feature's `dashed` flag.
     add({
       id: 'mt-line', type: 'line', source: 'mt-shapes',
-      filter: ['!=', ['geometry-type'], 'Point'],
+      filter: ['all', ['!=', ['geometry-type'], 'Point'], ['!=', ['get', 'dashed'], true]],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
         'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
-        'line-dasharray': ['case', ['get', 'dashed'], ['literal', [2, 1.6]], ['literal', [1, 0]]],
+        'line-opacity': 0.95,
+      },
+    });
+    add({
+      id: 'mt-line-dash', type: 'line', source: 'mt-shapes',
+      filter: ['all', ['!=', ['geometry-type'], 'Point'], ['==', ['get', 'dashed'], true]],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        'line-dasharray': [2, 1.6],
         'line-opacity': 0.95,
       },
     });
@@ -367,6 +382,15 @@ export class MapTools {
     const totalM = speedMs * minutes * 60;
     const end = destination(a, brng, totalM);
 
+    // Forecast cone — a wedge that widens with lead time to convey positional
+    // uncertainty (like an NHC/SPC track cone). Drawn first so the track line
+    // and ticks sit on top of its translucent fill.
+    this.shapes.push({
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [coneRing(a, brng, totalM)] },
+      properties: { kind: 'storm', color: bgColor.storm, dashed: true, role: 'cone' },
+    });
+
     // Track line (origin → forecast end), dashed.
     const trackCoords = [a, end];
     this.shapes.push({
@@ -466,6 +490,26 @@ export class MapTools {
     mk._kind = kind;
     return mk;
   }
+}
+
+// Forecast-cone ring [lon,lat][] around the storm's projected path: sample
+// points along the heading and offset them left/right by a half-width that
+// starts at the storm's rough size and grows with distance, then close the
+// ring (left edge out, right edge back).
+const CONE_BASE_M = 4000; // ~4 km initial half-width
+const CONE_SPREAD = 0.28; // half-width grows to ~28% of distance travelled
+function coneRing(origin, brngDeg, totalM) {
+  const samples = 24;
+  const left = [];
+  const right = [];
+  for (let i = 0; i <= samples; i++) {
+    const d = (totalM * i) / samples;
+    const p = destination(origin, brngDeg, d);
+    const half = CONE_BASE_M + CONE_SPREAD * d;
+    left.push(destination(p, brngDeg - 90, half));
+    right.push(destination(p, brngDeg + 90, half));
+  }
+  return [...left, ...right.reverse(), left[0]];
 }
 
 function centroid(coords) {

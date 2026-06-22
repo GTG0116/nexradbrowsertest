@@ -76,6 +76,7 @@ export class SplitView {
     });
     this._bindSync();
     this._buildPicker();
+    this._buildMainPicker();
     setTimeout(() => { main.resize(); map.resize(); }, 60);
   }
 
@@ -86,6 +87,7 @@ export class SplitView {
     wrap.classList.remove('split');
     document.getElementById('map2').hidden = true;
     if (this._picker) { this._picker.remove(); this._picker = null; }
+    if (this._mainPicker) { this._mainPicker.remove(); this._mainPicker = null; }
     // Detach the camera-sync listener from the main map before tearing down the
     // pane, or its next move would call jumpTo on a removed map.
     if (this._onMainMove) { this.ctx.state.map.off('move', this._onMainMove); this._onMainMove = null; }
@@ -126,14 +128,27 @@ export class SplitView {
       filter: ['==', ['geometry-type'], 'Polygon'],
       paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.12 },
     });
+    // line-dasharray is data-constant in Mapbox GL, so split solid vs. dashed
+    // into two layers (matching maptools.js) instead of a per-feature dash
+    // expression that would silently fail to validate.
     add({
       id: 'mt-line', type: 'line', source: 'mt-shapes',
-      filter: ['!=', ['geometry-type'], 'Point'],
+      filter: ['all', ['!=', ['geometry-type'], 'Point'], ['!=', ['get', 'dashed'], true]],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
         'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
-        'line-dasharray': ['case', ['get', 'dashed'], ['literal', [2, 1.6]], ['literal', [1, 0]]],
+        'line-opacity': 0.95,
+      },
+    });
+    add({
+      id: 'mt-line-dash', type: 'line', source: 'mt-shapes',
+      filter: ['all', ['!=', ['geometry-type'], 'Point'], ['==', ['get', 'dashed'], true]],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        'line-dasharray': [2, 1.6],
         'line-opacity': 0.95,
       },
     });
@@ -194,7 +209,26 @@ export class SplitView {
     if (!this.active) return;
     this.productId = this._defaultProduct();
     this._buildPicker();
+    this._buildMainPicker();
     this.render();
+  }
+
+  // The product currently shown in the main (left/top) pane, by mode.
+  _mainProduct() {
+    const s = this.ctx.state;
+    if (s.mode === 'mrms') return s.mrms.productId;
+    if (s.mode === 'models') return s.models.productId;
+    if (s.mode === 'satellite') return s.sat.productId;
+    return s.productId;
+  }
+
+  // Keep the main pane's highlight in step when its product changes elsewhere
+  // (e.g. the toolbar product buttons).
+  syncMainProduct() {
+    if (!this._mainPicker) return;
+    const cur = this._mainProduct();
+    this._mainPicker.querySelectorAll('.split-prod')
+      .forEach((b) => b.classList.toggle('active', b.dataset.id === cur));
   }
 
   _buildPicker() {
@@ -218,6 +252,33 @@ export class SplitView {
     }
     document.getElementById('map2').appendChild(div);
     this._picker = div;
+  }
+
+  // A matching picker on the main (left/top) pane so each panel's data can be
+  // chosen by clicking that panel. Selecting here drives the main app's product
+  // through ctx.setMainProduct, reusing the normal product-switch path.
+  _buildMainPicker() {
+    if (this._mainPicker) this._mainPicker.remove();
+    const div = document.createElement('div');
+    div.className = 'split-picker split-picker-main';
+    const label = document.createElement('span');
+    label.className = 'split-picker-label';
+    label.textContent = 'PANE 1';
+    div.appendChild(label);
+    const cur = this._mainProduct();
+    for (const [id, txt] of this._productList()) {
+      const b = document.createElement('button');
+      b.textContent = txt;
+      b.dataset.id = id;
+      b.className = 'split-prod' + (id === cur ? ' active' : '');
+      b.addEventListener('click', () => {
+        div.querySelectorAll('.split-prod').forEach((x) => x.classList.toggle('active', x === b));
+        if (this.ctx.setMainProduct) this.ctx.setMainProduct(id);
+      });
+      div.appendChild(b);
+    }
+    document.getElementById('map').appendChild(div);
+    this._mainPicker = div;
   }
 
   // ---- Render the chosen product into the second pane ----

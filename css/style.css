@@ -1976,11 +1976,15 @@ input[type='range']::-moz-range-thumb {
 .split-picker {
   position: absolute;
   top: 10px;
-  left: 10px;
-  right: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Centered + single scrollable row so it clears the nav control (pane 1,
+     top-left) and the map-tools toolbar (top-right) instead of covering them. */
+  max-width: calc(100% - 110px);
   z-index: 610;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
   align-items: center;
   gap: 5px;
   padding: 6px 8px;
@@ -1988,7 +1992,10 @@ input[type='range']::-moz-range-thumb {
   background: rgba(8, 16, 32, 0.88);
   border: 1px solid var(--panel-edge);
   backdrop-filter: blur(6px);
+  scrollbar-width: thin;
 }
+.split-picker-label,
+.split-prod { flex: 0 0 auto; }
 .split-picker-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
