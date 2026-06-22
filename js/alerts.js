@@ -603,6 +603,37 @@ export class AlertsController {
     this.els.preview.hidden = true;
   }
 
+  // Snapshot of the open compact preview card for the export tool: the
+  // classified alert plus the same summary rows the card shows. Returns null
+  // when no preview is open. The "View full briefing" footer is deliberately
+  // left out — the export shows the first popup, not the expanded briefing.
+  exportPreview() {
+    if (!this.els.preview || this.els.preview.hidden) return null;
+    const a = this.alerts.find((x) => x.id === this.selectedId);
+    if (!a) return null;
+    const p = a.feature.properties;
+    const params = p.parameters || {};
+    const expiry = p.ends || p.expires;
+    const until = untilText(expiry);
+    const rows = [['Expires', `${fmtClock(expiry)}${until ? ` (${until})` : ''}`]];
+    const tor = firstParam(params, 'tornadoDetection');
+    const torThreat = firstParam(params, 'tornadoDamageThreat');
+    const hail = firstParam(params, 'maxHailSize');
+    const wind = firstParam(params, 'maxWindGust');
+    if (tor) {
+      const t = String(tor).replace(/\b\w/g, (m) => m.toUpperCase());
+      rows.push(['Tornado', `${t}${torThreat ? ` · ${String(torThreat).toUpperCase()}` : ''}`]);
+    }
+    if (hail) rows.push(['Hail', `${hail}${/in/i.test(hail) ? '' : ' in'}`]);
+    if (wind) rows.push(['Wind', String(wind)]);
+    return {
+      color: a.cls.color,
+      title: a.cls.display,
+      area: (p.areaDesc || '').split(';')[0],
+      rows,
+    };
+  }
+
   renderPreview() {
     const a = this.alerts.find((x) => x.id === this.selectedId);
     if (!a) {

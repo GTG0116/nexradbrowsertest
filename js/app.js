@@ -2380,7 +2380,10 @@ function buildExportScene() {
     if (state.splitView.map.redraw) state.splitView.map.redraw();
     canvases.push(state.splitView.map.getCanvas());
   }
-  return { canvases, caption: buildExportCaption(), legendEl: el.legend };
+  // If a compact alert preview card is open, include it in the export (minus
+  // its "View full briefing" footer) so the screenshot shows the alert too.
+  const alert = state.alerts ? state.alerts.exportPreview() : null;
+  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert };
 }
 
 // Describe what's on screen for the export banner: a title, a product/source
