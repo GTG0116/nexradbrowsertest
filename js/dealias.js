@@ -6,15 +6,18 @@
 // green-next-to-red boundary. Dealiasing adds the right whole number of 2·VN
 // intervals to each gate so the field is continuous again.
 //
-// This is a lightweight continuity unfold: radials are walked in azimuth order
-// and every gate is anchored against two already-unfolded neighbours — the
-// previous gate along the beam and the same gate in the previous radial. Using
-// both anchors keeps along-beam and beam-to-beam continuity while stopping a
-// single mis-unfolded gate from shifting the rest of its beam (which otherwise
-// draws long radial "streaks"): when the two anchors disagree the cross-beam one
-// wins, since it cannot accumulate error down the beam. This avoids the
-// cost/complexity of a full region-based 4DD. Near the radar the velocities are
-// small and unaliased, which anchors the unfolding outward.
+// This is a lightweight continuity unfold done one radial at a time (each radial
+// is independent, so a bad gate can never propagate across the whole sweep).
+// Walking a beam outward from the radar — where velocities are small and
+// unaliased — each gate is unfolded to sit closest to a reference built from the
+// *median* of the last few already-unfolded gates. The median is the key to
+// avoiding the long radial "streaks" a naive unfold produces: chaining off only
+// the single previous gate means one wrong guess at an ambiguous gate makes
+// every gate after it look confidently offset by 2·VN, painting a whole spoke
+// the wrong colour. Referencing a short window's median instead lets the good
+// gates outvote a single bad one, so a mistake stays a lone speckle and the beam
+// self-heals on the next gate. A fresh run (the first gate, or the first gate
+// after a no-data gap) is seeded from the same gate in the previous radial.
 //
 // The result is a sweep whose VEL moment blocks carry re-encoded 16-bit codes
 // (so unfolded values beyond the original ±VN range still fit) with a matching
@@ -26,6 +29,11 @@ const cache = new WeakMap();
 // encoding offset so even large negative unfolded values map to a positive code.
 const VMIN = -200;
 
+// Length of the along-beam reference window. Small enough that its span stays
+// well under one Nyquist interval on ordinary gradients (so it never invents a
+// fold), large enough that a single mis-unfolded gate is outvoted by the median.
+const WIN = 5;
+
 // Dealias a sweep's VEL moment, memoised per sweep object. Returns the original
 // sweep unchanged when there's no velocity data or no Nyquist information.
 export function dealiasSweep(sweep) {
@@ -34,6 +42,20 @@ export function dealiasSweep(sweep) {
   const out = computeDealias(sweep);
   cache.set(sweep, out);
   return out;
+}
+
+// Median of the first `n` entries of `buf` (n ≤ WIN). Small insertion sort into
+// a scratch array; order within the window doesn't matter for the median.
+function windowMedian(buf, n, scratch) {
+  for (let i = 0; i < n; i++) scratch[i] = buf[i];
+  for (let i = 1; i < n; i++) {
+    const x = scratch[i];
+    let j = i - 1;
+    while (j >= 0 && scratch[j] > x) { scratch[j + 1] = scratch[j]; j--; }
+    scratch[j + 1] = x;
+  }
+  const mid = n >> 1;
+  return n & 1 ? scratch[mid] : (scratch[mid - 1] + scratch[mid]) / 2;
 }
 
 function computeDealias(sweep) {
@@ -45,10 +67,12 @@ function computeDealias(sweep) {
   const SC = velRadials[0].moments.VEL.scale || 1;
   const OFF2 = 2 - VMIN * SC; // value v -> code = round(v*SC + OFF2) >= 2
 
-  // Process in azimuth order for beam-to-beam seeding.
+  // Process in azimuth order so a fresh run can seed from the adjacent beam.
   const ordered = [...velRadials].sort((a, b) => a.azimuth - b.azimuth);
   const rebuilt = new Map();
-  let prevVals = null;
+  const win = new Float32Array(WIN);
+  const scratch = new Float32Array(WIN);
+  let prevVals = null; // previous radial's unfolded values (for seeding)
 
   for (const r of ordered) {
     const m = r.moments.VEL;
@@ -60,38 +84,31 @@ function computeDealias(sweep) {
     const VN = r.nyquist;
     const canUnfold = VN > 0 && VN < 100;
     const twoVN = 2 * VN;
-    let prevGate = NaN;
+    let wn = 0; // number of valid entries currently in the window
+    let wi = 0; // next write slot in the ring
 
     for (let g = 0; g < gc; g++) {
       const c = raw[g];
-      // Drop the along-beam reference across no-data gaps: a gate on the far
-      // side of a long gap is a poor predictor and seeds false jumps.
-      if (c < 2) { vals[g] = NaN; prevGate = NaN; continue; }
+      // No echo / range folded: emit NaN and break beam continuity, so a gate on
+      // the far side of a gap is never referenced against one before it.
+      if (c < 2) { vals[g] = NaN; wn = 0; wi = 0; continue; }
       let v = (c - mOff) / mSc;
       if (canUnfold) {
-        // Reference this gate against its already-unfolded neighbours and add
-        // the whole number of 2·VN intervals that keeps the field continuous.
-        // Two independent anchors are used: the previous gate along this beam,
-        // and the same gate in the previous (azimuthally adjacent) radial.
-        const along = prevGate;
-        const across = prevVals && g < prevVals.length ? prevVals[g] : NaN;
-        const nAlong = Number.isNaN(along) ? null : Math.round((along - v) / twoVN);
-        const nAcross = Number.isNaN(across) ? null : Math.round((across - v) / twoVN);
-        let n = 0;
-        if (nAlong !== null && nAcross !== null) {
-          // When the anchors disagree the along-beam chain has most likely run
-          // away — one bad gate shifts every gate after it, drawing the radial
-          // "streaks". Trust the cross-beam anchor instead: it samples the same
-          // range from a neighbouring beam and cannot accumulate error down the
-          // beam, so a single bad gate can no longer propagate.
-          n = nAlong === nAcross ? nAlong : nAcross;
-        } else if (nAcross !== null) {
-          n = nAcross;
-        } else if (nAlong !== null) {
-          n = nAlong;
+        let ref;
+        if (wn > 0) {
+          // Anchor to the recent beam: the median rejects a lone bad gate.
+          ref = windowMedian(win, wn, scratch);
+        } else if (prevVals && g < prevVals.length && !Number.isNaN(prevVals[g])) {
+          // Fresh run — seed from the same gate in the previous radial.
+          ref = prevVals[g];
+        } else {
+          // Near the radar with nothing to lean on: assume it's unaliased.
+          ref = NaN;
         }
-        v += n * twoVN;
-        prevGate = v;
+        if (!Number.isNaN(ref)) v += Math.round((ref - v) / twoVN) * twoVN;
+        win[wi] = v;
+        wi = (wi + 1) % WIN;
+        if (wn < WIN) wn++;
       }
       vals[g] = v;
     }
