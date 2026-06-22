@@ -587,6 +587,9 @@ export class AlertsController {
     this._setGroup(id, group);
     if (!this.selectedId) return;
     this.els.preview.hidden = false;
+    // Hide the bottom dock/playback UI while the card is up (mobile) so the card
+    // can sit low without colliding with it.
+    document.querySelector('.app').classList.add('alert-preview-open');
     this.renderPreview();
   }
 
@@ -599,6 +602,7 @@ export class AlertsController {
   }
 
   closePreview() {
+    document.querySelector('.app').classList.remove('alert-preview-open');
     if (!this.els.preview || this.els.preview.hidden) return;
     this.els.preview.hidden = true;
   }

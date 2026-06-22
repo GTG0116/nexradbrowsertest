@@ -78,7 +78,7 @@ export class ExportTool {
 
     // The floating alert preview card, stamped over the map near the bottom
     // (matching where it sits live), without its "View full briefing" footer.
-    if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u);
+    if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile);
 
     // Footer band: legend (left) + credit/timestamp (right), measured so they
     // never collide.
@@ -319,17 +319,25 @@ function drawCredit(ctx, cap, minX, maxX, y, H, u) {
 // card, but omits the "View full briefing" footer since the export captures the
 // first popup, not the expanded briefing. Drawn centred near the bottom of the
 // map region so it overlays the scope the way it does on screen.
-function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u) {
+function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
   const rows = alert.rows || [];
-  const cardW = Math.round(clamp(mapW * 0.32, u * 15, u * 26));
-  const pad = Math.round(u * 0.95);
-  const headH = Math.round(u * 3.1);
-  const rowH = Math.round(u * 2.0);
-  const bodyTop = headH + Math.round(u * 0.5);
-  const cardH = bodyTop + rows.length * rowH + Math.round(u * 0.5);
+  // On phones the live preview card spans almost the whole width, so size the
+  // exported card the same way (near-full-width) instead of the compact desktop
+  // panel — that keeps the popup the same size in the export as on screen. The
+  // card's internal text is then driven by a card-local unit `cu` derived from
+  // the card width, mirroring the fixed-px proportions of the live .apv-* card.
+  const cardW = mobile
+    ? Math.round(Math.min(mapW * 0.9, mapW - u * 2))
+    : Math.round(clamp(mapW * 0.32, u * 15, u * 26));
+  const cu = mobile ? cardW / 22 : u;
+  const pad = Math.round(cu * 0.95);
+  const headH = Math.round(cu * 3.1);
+  const rowH = Math.round(cu * 2.0);
+  const bodyTop = headH + Math.round(cu * 0.5);
+  const cardH = bodyTop + rows.length * rowH + Math.round(cu * 0.5);
   const x = Math.round(mapX + (mapW - cardW) / 2);
-  const y = Math.round(mapY + mapH - cardH - u * 1.6);
-  const r = Math.round(u * 0.7);
+  const y = Math.round(mapY + mapH - cardH - cu * 1.6);
+  const r = Math.round(cu * 0.7);
 
   ctx.save();
   // Card body + border, clipped to the rounded rect so the header band and
@@ -338,7 +346,7 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u) {
   ctx.fillStyle = 'rgba(9, 16, 32, 0.97)';
   ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-  ctx.lineWidth = Math.max(1, Math.round(u / 16));
+  ctx.lineWidth = Math.max(1, Math.round(cu / 16));
   ctx.stroke();
   ctx.clip();
 
@@ -351,13 +359,13 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u) {
   ctx.textAlign = 'left';
   ctx.fillStyle = '#fff';
   const hx = x + pad;
-  ctx.font = `700 ${Math.round(u * 1.3)}px ${SANS}`;
+  ctx.font = `700 ${Math.round(cu * 1.3)}px ${SANS}`;
   ctx.fillText('⚠', hx, y + headH / 2);
-  const tx = hx + ctx.measureText('⚠').width + Math.round(u * 0.55);
+  const tx = hx + ctx.measureText('⚠').width + Math.round(cu * 0.55);
   const availW = x + cardW - pad - tx;
-  ctx.font = `700 ${Math.round(u * 1.05)}px ${SANS}`;
+  ctx.font = `700 ${Math.round(cu * 1.05)}px ${SANS}`;
   ctx.fillText(clip(ctx, (alert.title || '').toUpperCase(), availW), tx, y + Math.round(headH * 0.38));
-  ctx.font = `500 ${Math.round(u * 0.68)}px ${SANS}`;
+  ctx.font = `500 ${Math.round(cu * 0.68)}px ${SANS}`;
   ctx.globalAlpha = 0.9;
   ctx.fillText(clip(ctx, alert.area || '', availW), tx, y + Math.round(headH * 0.72));
   ctx.globalAlpha = 1;
@@ -373,13 +381,13 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u) {
     }
     ctx.textAlign = 'left';
     ctx.fillStyle = '#8a98a8';
-    ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
+    ctx.font = `600 ${Math.round(cu * 0.62)}px ${MONO}`;
     ctx.fillText(String(label).toUpperCase(), x + pad, ry);
     const labelW = ctx.measureText(String(label).toUpperCase()).width;
     ctx.textAlign = 'right';
     ctx.fillStyle = '#fff';
-    ctx.font = `700 ${Math.round(u * 0.95)}px ${SANS}`;
-    ctx.fillText(clip(ctx, String(value), cardW - pad * 2 - labelW - u), x + cardW - pad, ry);
+    ctx.font = `700 ${Math.round(cu * 0.95)}px ${SANS}`;
+    ctx.fillText(clip(ctx, String(value), cardW - pad * 2 - labelW - cu), x + cardW - pad, ry);
     ry += rowH;
   }
   ctx.restore();
