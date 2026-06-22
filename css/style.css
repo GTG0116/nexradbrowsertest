@@ -2124,8 +2124,15 @@ input[type='range']::-moz-range-thumb {
   .map-tools {
     display: none;
   }
+  /* The card drops to the very bottom (the dock/playback UI is hidden while it
+     is open, so there's nothing to clear) to save vertical space. */
   .alert-preview {
-    bottom: 150px;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Hide the bottom dock + playback bar while an alert preview card is open. */
+  .app.alert-preview-open .mobile-dock,
+  .app.alert-preview-open .playback-bar {
+    display: none !important;
   }
   /* Storm-track controls used to sit at the very bottom, under the dock/sheet,
      where they were unreachable. Lift them clear of the bottom UI, widen them,
