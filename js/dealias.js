@@ -6,12 +6,15 @@
 // green-next-to-red boundary. Dealiasing adds the right whole number of 2·VN
 // intervals to each gate so the field is continuous again.
 //
-// This is a lightweight continuity unfold: radials are walked in azimuth order;
-// within a radial each gate is referenced against the previous (already
-// unfolded) gate, and the first gate of a radial is seeded from the same gate of
-// the previous radial. That keeps both along-beam and beam-to-beam continuity
-// without the cost/complexity of a full region-based 4DD. Near the radar the
-// velocities are small and unaliased, which anchors the unfolding outward.
+// This is a lightweight continuity unfold: radials are walked in azimuth order
+// and every gate is anchored against two already-unfolded neighbours — the
+// previous gate along the beam and the same gate in the previous radial. Using
+// both anchors keeps along-beam and beam-to-beam continuity while stopping a
+// single mis-unfolded gate from shifting the rest of its beam (which otherwise
+// draws long radial "streaks"): when the two anchors disagree the cross-beam one
+// wins, since it cannot accumulate error down the beam. This avoids the
+// cost/complexity of a full region-based 4DD. Near the radar the velocities are
+// small and unaliased, which anchors the unfolding outward.
 //
 // The result is a sweep whose VEL moment blocks carry re-encoded 16-bit codes
 // (so unfolded values beyond the original ±VN range still fit) with a matching
@@ -61,13 +64,33 @@ function computeDealias(sweep) {
 
     for (let g = 0; g < gc; g++) {
       const c = raw[g];
-      if (c < 2) { vals[g] = NaN; continue; }
+      // Drop the along-beam reference across no-data gaps: a gate on the far
+      // side of a long gap is a poor predictor and seeds false jumps.
+      if (c < 2) { vals[g] = NaN; prevGate = NaN; continue; }
       let v = (c - mOff) / mSc;
       if (canUnfold) {
-        let ref = !Number.isNaN(prevGate) ? prevGate
-          : (prevVals && g < prevVals.length && !Number.isNaN(prevVals[g])) ? prevVals[g]
-          : NaN;
-        if (!Number.isNaN(ref)) v += Math.round((ref - v) / twoVN) * twoVN;
+        // Reference this gate against its already-unfolded neighbours and add
+        // the whole number of 2·VN intervals that keeps the field continuous.
+        // Two independent anchors are used: the previous gate along this beam,
+        // and the same gate in the previous (azimuthally adjacent) radial.
+        const along = prevGate;
+        const across = prevVals && g < prevVals.length ? prevVals[g] : NaN;
+        const nAlong = Number.isNaN(along) ? null : Math.round((along - v) / twoVN);
+        const nAcross = Number.isNaN(across) ? null : Math.round((across - v) / twoVN);
+        let n = 0;
+        if (nAlong !== null && nAcross !== null) {
+          // When the anchors disagree the along-beam chain has most likely run
+          // away — one bad gate shifts every gate after it, drawing the radial
+          // "streaks". Trust the cross-beam anchor instead: it samples the same
+          // range from a neighbouring beam and cannot accumulate error down the
+          // beam, so a single bad gate can no longer propagate.
+          n = nAlong === nAcross ? nAlong : nAcross;
+        } else if (nAcross !== null) {
+          n = nAcross;
+        } else if (nAlong !== null) {
+          n = nAlong;
+        }
+        v += n * twoVN;
         prevGate = v;
       }
       vals[g] = v;

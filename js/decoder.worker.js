@@ -19,6 +19,7 @@ self.onmessage = (e) => {
     const slimSweeps = sweeps.map((sw) => ({
       elevationNumber: sw.elevationNumber,
       elevation: sw.elevation,
+      time: sw.time,
       moments: [...sw.moments],
       radials: sw.radials.map((r) => {
         const moments = {};

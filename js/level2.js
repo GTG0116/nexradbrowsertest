@@ -233,6 +233,19 @@ export function buildSweeps(volume) {
     for (const m of Object.keys(rad.moments)) sw.moments.add(m);
   }
   const list = [...sweeps.values()].sort((a, b) => a.elevation - b.elevation);
-  for (const sw of list) sw.radials.sort((a, b) => a.azimuth - b.azimuth);
+  for (const sw of list) {
+    sw.radials.sort((a, b) => a.azimuth - b.azimuth);
+    // Collection time of the sweep (epoch ms). VCPs with SAILS revisit the
+    // lowest tilt several times per volume, producing multiple sweeps at the
+    // same elevation; this lets the viewer prefer the freshest of them.
+    sw.time = radialTimeMs(sw.radials[0]);
+  }
   return list;
+}
+
+// Epoch-ms timestamp of a radial. NEXRAD stores a 1-based "modified Julian
+// date" (day 1 = 1970-01-01) plus milliseconds past UTC midnight.
+function radialTimeMs(rad) {
+  if (!rad || !rad.julianDate) return 0;
+  return (rad.julianDate - 1) * 86400000 + (rad.collectTimeMs || 0);
 }

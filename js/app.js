@@ -518,22 +518,42 @@ function sweepsForProduct(productId = state.productId) {
   return state.sweeps.filter((sw) => sw.moments.includes(moment));
 }
 
+// Sweeps at (effectively) the same tilt — a SAILS VCP scans the lowest
+// elevation several times per volume, so its 0.5° cut shows up as multiple
+// sweeps a few hundredths of a degree apart. Distinct cuts differ by ≥0.2°.
+const TILT_EPS = 0.1;
+
 // Pick the sweep from an arbitrary sweeps array that carries the given product's
-// moment closest to the chosen tilt. Shared by the live view and playback.
+// moment closest to the chosen tilt. Shared by the live view and playback. When
+// a VCP revisits that tilt (SAILS), the most recently collected sweep wins, so
+// the low-level products show the freshest scan rather than the volume's first.
 function pickSweep(sweeps, productId = state.productId, elev = state.selectedElevation) {
   const moment = PRODUCTS[productId].moment;
   const list = sweeps.filter((sw) => sw.moments.includes(moment));
   if (!list.length) return null;
-  let best = list[0];
   let bestDiff = Infinity;
+  for (const sw of list) bestDiff = Math.min(bestDiff, Math.abs(sw.elevation - elev));
+  let best = null;
   for (const sw of list) {
-    const d = Math.abs(sw.elevation - elev);
-    if (d < bestDiff) {
-      bestDiff = d;
-      best = sw;
-    }
+    if (Math.abs(sw.elevation - elev) > bestDiff + TILT_EPS) continue;
+    if (!best || (sw.time || 0) > (best.time || 0)) best = sw;
   }
   return best;
+}
+
+// Collapse repeated tilts (SAILS) to one entry each, keeping the freshest, for
+// the elevation list. Input is assumed sorted by elevation ascending.
+function dedupeTilts(list) {
+  const out = [];
+  for (const sw of list) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(sw.elevation - last.elevation) <= TILT_EPS) {
+      if ((sw.time || 0) > (last.time || 0)) out[out.length - 1] = sw;
+    } else {
+      out.push(sw);
+    }
+  }
+  return out;
 }
 
 function currentSweep() {
@@ -587,7 +607,7 @@ function buildProductButtons() {
 
 function buildTiltList() {
   el.tiltList.innerHTML = '';
-  const list = sweepsForProduct();
+  const list = dedupeTilts(sweepsForProduct());
   if (!list.length) {
     el.tiltList.innerHTML = '<div class="empty">No tilts for this product.</div>';
     return;
