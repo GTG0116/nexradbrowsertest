@@ -172,6 +172,34 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   number of frames a loop preloads is adjustable (the **Playback frames** slider,
   default 5).
 
+## Map tools
+
+A compact toolbar on the top-right of the map adds analysis and annotation tools
+that draw straight onto the scope:
+
+- **METAR station plots** (`js/metars.js`) — live surface observations from the
+  public `aviationweather.gov` data API, drawn as classic WMO station models:
+  a sky-cover circle with temperature (°F, upper-left), dewpoint (°F, lower-left),
+  the coded sea-level-pressure group (upper-right) and a wind barb. Plots are
+  fetched for the current view (debounced on pan/zoom) and refreshed on a slow
+  timer; toggled off by default.
+- **Draw** — freehand annotation paths (drag to sketch).
+- **Measure** — click vertices to read great-circle distance and, once a shape
+  closes, its area (miles and kilometres).
+- **Storm track** (`js/maptools.js`) — mark a storm's position and heading,
+  project its path forward at an adjustable speed/time, and label the **towns in
+  its path with ETAs** (town names from the `api.weather.gov` point endpoint).
+- **Split screen** (`js/splitview.js`) — a second, camera-synced pane showing a
+  **different product** over the exact same view: side-by-side on desktop,
+  stacked (chosen product on top) on mobile. For radar, any moment from the
+  loaded volume renders for free; satellite shows any channel/RGB; MRMS/models
+  fetch the chosen product on demand. Annotations drawn with the tools above are
+  mirrored into the second pane.
+
+The first time an alert is clicked it now opens a compact **preview card that
+floats over the map** rather than taking over the screen, so the map stays fully
+interactive; its "view full briefing" button still opens the full NWS-style panel.
+
 ## Architecture
 
 ```
@@ -181,6 +209,9 @@ js/app.js                         controller: UI, state, interaction
  ├─ js/products.js                color scales + LUTs per product
  ├─ js/radarLayer.js              custom WebGL layer: polar gates → GPU, per pixel
  ├─ js/renderer.js                sweep range + point-sample helpers
+ ├─ js/metars.js                  METAR station-plot markers (aviationweather.gov)
+ ├─ js/maptools.js                draw / measure / storm-track tools
+ ├─ js/splitview.js               second synced pane: compare products
  ├─ Mapbox GL JS (CDN)            vector basemap; radar/alerts inserted below labels
  └─ js/decoder.worker.js          off-thread decode
      └─ js/level2.js              Archive II / Message 31 parser

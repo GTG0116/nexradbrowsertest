@@ -773,22 +773,25 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* Compact preview card shown when an alert is first clicked, before the full
-   briefing. Matches the console glass aesthetic; centred over a dim backdrop. */
+   briefing. It floats over the lower map so the map stays fully interactive —
+   no dim backdrop, and the container itself ignores pointer events so only the
+   card is clickable. */
 .alert-preview {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 88px;
   z-index: 1250;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: 18px;
-  background: rgba(3, 7, 16, 0.55);
-  backdrop-filter: blur(3px);
+  padding: 0 16px;
+  pointer-events: none;
 }
 .alert-preview[hidden] {
   display: none;
 }
 .alert-preview-card {
+  pointer-events: auto;
   width: 360px;
   max-width: 100%;
   border-radius: var(--radius);
@@ -1816,5 +1819,223 @@ input[type='range']::-moz-range-thumb {
   }
   .snd-pgrid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================= */
+/* Map tools — toolbar, METAR station plots, storm panel, split  */
+/* ============================================================= */
+
+/* Vertical toolbar pinned to the map's top-right. */
+.map-tools {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.map-tool {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.82);
+  backdrop-filter: blur(6px);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: 0.12s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.map-tool:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.map-tool.active {
+  background: rgba(54, 224, 200, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--glow);
+}
+
+/* METAR station plots (HTML markers). */
+.metar-plot {
+  pointer-events: auto;
+  cursor: help;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
+}
+.metar-plot-svg {
+  overflow: visible;
+}
+.metar-plot-svg text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+.metar-plot-svg .mp-t { fill: #ff6a6a; }
+.metar-plot-svg .mp-d { fill: #57d98a; }
+.metar-plot-svg .mp-p { fill: #cdd9f0; font-size: 10px; }
+.metar-plot-svg .mp-w { fill: #c79bff; font-size: 9px; }
+
+/* Map-tool text labels (measure distances, storm-track ETAs). */
+.mt-label {
+  pointer-events: none;
+  white-space: pre;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(6, 14, 28, 0.9);
+  border: 1px solid var(--panel-edge);
+  color: var(--ink);
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+.mt-label.faint {
+  opacity: 0.85;
+  font-weight: 500;
+}
+.mt-label-measure { border-color: #ffd54a; color: #ffe49a; }
+.mt-label-storm { border-color: #ff5a7a; color: #ffb3c2; }
+
+/* Storm-track control panel (bottom-center of the map). */
+.storm-panel {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 620;
+  max-width: 92%;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: rgba(8, 16, 32, 0.94);
+  border: 1px solid #ff5a7a;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
+.storm-msg {
+  font-size: 12px;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+.storm-inputs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.storm-inputs input {
+  width: 56px;
+  margin: 0 2px;
+  background: rgba(4, 10, 22, 0.9);
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  padding: 3px 5px;
+}
+.storm-inputs button {
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.8);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.storm-inputs button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- Split screen (second synced pane) ---- */
+#map2 {
+  position: absolute;
+  inset: 0;
+  background: #04080f;
+  border-left: 1px solid var(--panel-edge);
+}
+#map2[hidden] {
+  display: none;
+}
+/* Desktop: side-by-side. Main map shrinks to the left half. */
+.map-wrap.split #map {
+  right: 50%;
+}
+.map-wrap.split #map2 {
+  left: 50%;
+}
+.split-picker {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 610;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(8, 16, 32, 0.88);
+  border: 1px solid var(--panel-edge);
+  backdrop-filter: blur(6px);
+}
+.split-picker-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--ink-dim);
+  margin-right: 4px;
+}
+.split-prod {
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.7);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.split-prod:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.split-prod.active {
+  background: rgba(54, 224, 200, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Mobile: stack panes (chosen product on top), and keep the toolbar reachable
+   above the bottom dock. */
+@media (max-width: 900px) {
+  .map-wrap.split #map {
+    right: 0;
+    top: 50%;
+  }
+  .map-wrap.split #map2 {
+    left: 0;
+    bottom: 50%;
+    border-left: none;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  .map-tools {
+    top: auto;
+    bottom: 150px;
+    right: 8px;
+  }
+  .alert-preview {
+    bottom: 150px;
   }
 }

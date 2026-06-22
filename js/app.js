@@ -16,6 +16,9 @@ import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, foreca
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
 import { fetchSounding, drawSkewT, drawHodograph, paramRows } from './sounding.js';
+import { MetarController } from './metars.js';
+import { MapTools } from './maptools.js';
+import { SplitView } from './splitview.js';
 
 // Grid products (MRMS / models) flagged `reflectivity` borrow the single-site
 // radar reflectivity color table, so all reflectivity is colored identically and
@@ -254,6 +257,10 @@ const state = {
   playback: null,
   // How many frames each playback loop preloads (user-adjustable).
   playbackFrames: 5,
+  // Map-tool controllers (METAR station plots, draw/measure/storm, split view).
+  metars: null,
+  mapTools: null,
+  splitView: null,
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -373,6 +380,14 @@ function cacheEls() {
   el.playSpeedVal = $('#playSpeedVal');
   el.crosshair = $('#crosshair');
   el.crosshairRead = $('#crosshairRead');
+
+  // Map tools toolbar.
+  el.toolDraw = $('#toolDraw');
+  el.toolMeasure = $('#toolMeasure');
+  el.toolStorm = $('#toolStorm');
+  el.toolMetars = $('#toolMetars');
+  el.toolSplit = $('#toolSplit');
+  el.toolClear = $('#toolClear');
   el.playbackBar = $('#playbackBar');
   el.playToggle = $('#playToggle');
   el.playScrub = $('#playScrub');
@@ -485,6 +500,7 @@ function setBasemap(key) {
   state.basemap = key;
   state.styleReady = false;
   state.map.setStyle(BASEMAPS[key].url);
+  if (state.splitView) state.splitView.setBasemap(BASEMAPS[key].url);
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -891,6 +907,20 @@ function resolveSweep(sweep) {
   return sweep;
 }
 
+// Resolve the sweep for an arbitrary radar product at the current elevation,
+// applying velocity dealiasing for VEL. Used by the split-screen pane to draw a
+// different moment from the same loaded volume.
+function radarSweepFor(productId) {
+  let sweep = pickSweep(state.sweeps, productId);
+  if (sweep && state.dealias && productId === 'VEL') sweep = dealiasSweep(sweep);
+  return sweep;
+}
+
+// Mirror the current view into the second split-screen pane (no-op when off).
+function syncSplit() {
+  if (state.splitView && state.splitView.active) state.splitView.render();
+}
+
 // Format a native physical value in the product's imperial display units.
 function fmtValue(product, v) {
   const u = dispUnitOf(product);
@@ -918,6 +948,7 @@ function displaySweep(sweep, site) {
   if (state.mode !== 'radar' && !state.radarOverlay) {
     clearRadarSource(map);
     drawRings(null, 0);
+    syncSplit();
     return;
   }
 
@@ -925,6 +956,7 @@ function displaySweep(sweep, site) {
     clearRadarSource(map);
     drawRings(null, 0);
     updateInspect();
+    syncSplit();
     return;
   }
 
@@ -932,6 +964,7 @@ function displaySweep(sweep, site) {
   setRadarSource(map, sweep, product, site);
   drawRings(site, maxR);
   updateInspect();
+  syncSplit();
 }
 
 // Show or hide the single-site radar overlay in a non-radar mode. Draws the
@@ -1010,6 +1043,7 @@ function setMode(mode) {
   } else if (mode === 'models') {
     loadModelList();
   }
+  if (state.splitView) state.splitView.onModeChange();
   updateMeta();
 }
 
@@ -1181,6 +1215,7 @@ function renderSatellite() {
   const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
   const bbox = state.sat._bbox || (state.sat._bbox = sceneBBox(scene));
   drawSatScene(scene, rgba, bbox);
+  syncSplit();
 }
 
 // The projection metadata the satellite layer needs to draw a scene — small
@@ -1350,6 +1385,7 @@ function renderMrms() {
   setMrmsSource(map);
   state.mrms.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.mrms.layer.setOpacity(state.opacity);
+  syncSplit();
 }
 
 // Display a pre-prepared MRMS grid payload (see prepareGridTexture) — used by
@@ -1551,6 +1587,7 @@ function renderModels() {
   state.models.layer.setOpacity(state.opacity);
   // Upper-air products carry wind + height overlays; others clear them.
   renderModelOverlays(map, grid);
+  syncSplit();
 }
 
 // Display a pre-prepared model grid payload — used by forecast-hour playback.
@@ -2198,6 +2235,62 @@ function isoDate(d) {
 }
 
 // ---------------------------------------------------------------------------
+// Map tools — METAR station plots, draw / measure / storm-track, split screen
+// ---------------------------------------------------------------------------
+function setupMapTools() {
+  // Surface observations (METAR station plots).
+  state.metars = new MetarController(state.map);
+  state.metars.onStatus = (msg) => setStatus(msg);
+  el.toolMetars.addEventListener('click', () => {
+    const on = state.metars.setEnabled(!state.metars.enabled);
+    el.toolMetars.classList.toggle('active', on);
+    if (!on) setStatus('METARs off');
+  });
+
+  // Draw / measure / storm-track annotations.
+  state.mapTools = new MapTools(state.map);
+  // Mirror committed drawings into the split pane.
+  state.mapTools.onChange = (fc) => {
+    if (state.splitView) state.splitView.setDrawings(fc);
+  };
+  // When a tool finishes (or is cancelled), drop the pressed state on its button.
+  state.mapTools.onToolEnd = () => syncToolButtons();
+
+  const toolButtons = [
+    [el.toolDraw, 'draw'],
+    [el.toolMeasure, 'measure'],
+    [el.toolStorm, 'storm'],
+  ];
+  function syncToolButtons() {
+    for (const [btn, name] of toolButtons)
+      btn.classList.toggle('active', state.mapTools.tool === name);
+  }
+  for (const [btn, name] of toolButtons) {
+    btn.addEventListener('click', () => {
+      state.mapTools.setTool(name);
+      syncToolButtons();
+    });
+  }
+  el.toolClear.addEventListener('click', () => {
+    state.mapTools.clearAll();
+    syncToolButtons();
+  });
+
+  // Split screen — a second synced pane showing a different product.
+  state.splitView = new SplitView({
+    state,
+    MAPBOX_TOKEN,
+    BASEMAPS,
+    radarSweepFor,
+  });
+  el.toolSplit.addEventListener('click', () => {
+    const on = state.splitView.toggle();
+    el.toolSplit.classList.toggle('active', on);
+    if (on) state.splitView.setDrawings(state.mapTools.getFeatureCollection());
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 function init() {
@@ -2240,6 +2333,7 @@ function init() {
     if (state.sat.layer) state.sat.layer.setOpacity(state.opacity);
     if (state.mrms.layer) state.mrms.layer.setOpacity(state.opacity);
     if (state.models.layer) state.models.layer.setOpacity(state.opacity);
+    if (state.splitView) state.splitView.setOpacity(state.opacity);
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
@@ -2315,6 +2409,9 @@ function init() {
     el.alertsToggle.textContent = on ? 'ON' : 'OFF';
     state.alerts.setEnabled(on);
   });
+
+  // ---- Map tools: METARs, draw / measure / storm track, split view ----
+  setupMapTools();
 
   // ---- Mobile dock + sheet + playback + inspect wiring ----
   el.dockStatus.addEventListener('click', () =>
