@@ -4,7 +4,8 @@
 // the storm-based polygons over the map, and (because the request asked
 // for "only the alerts in the screenshot") shows only the alerts whose polygon
 // actually intersects the current map view in both the side list and on the
-// map. Clicking an alert opens a full-screen briefing panel.
+// map. Clicking an alert opens a compact preview card summarising it, with a
+// button to open the full-screen briefing panel.
 //
 // Two flavours of "upgrade" are applied on top of the raw NWS event name:
 //   • Impact-Based Warning damage tags — a Tornado Warning tagged CONSIDERABLE
@@ -167,6 +168,27 @@ const fmtTime = (iso) => {
     return iso;
   }
 };
+
+// Wall-clock time only (e.g. "9:00 PM"), for the compact preview card.
+const fmtClock = (iso) => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return iso;
+  }
+};
+
+// Human countdown to an expiry instant: "44m", "2h 5m", or "expired".
+function untilText(iso) {
+  if (!iso) return '';
+  const ms = new Date(iso).getTime() - Date.now();
+  if (Number.isNaN(ms)) return '';
+  if (ms <= 0) return 'expired';
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
 
 function degToCompass(deg) {
   const dirs = [
@@ -386,7 +408,7 @@ export class AlertsController {
       const feats = e.features || [];
       if (!feats.length) return;
       const ids = feats.map((f) => f.properties.id);
-      this.openDetail(ids[0], ids);
+      this.openPreview(ids[0], ids);
     };
     map.on('click', 'alerts-fill', openFromEvent);
     map.on('click', 'alerts-line', openFromEvent);
@@ -398,9 +420,24 @@ export class AlertsController {
       this._refreshTimer = setTimeout(() => this.refreshVisible(), 120);
     });
     els.close.addEventListener('click', () => this.closeDetail());
+    // Dismiss the preview by clicking its dim backdrop (outside the card).
+    if (els.preview) {
+      els.preview.addEventListener('click', (e) => {
+        if (e.target === els.preview) this.closePreview();
+      });
+    }
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') return this.closeDetail();
-      // Left/right arrows cycle through the alerts stacked at this location.
+      if (e.key === 'Escape') {
+        if (!this.els.preview || this.els.preview.hidden) return this.closeDetail();
+        return this.closePreview();
+      }
+      // Left/right arrows cycle through the alerts stacked at this location, in
+      // whichever view is open (preview card or full briefing).
+      if (this.els.preview && !this.els.preview.hidden) {
+        if (e.key === 'ArrowLeft') this.cyclePreview(-1);
+        else if (e.key === 'ArrowRight') this.cyclePreview(1);
+        return;
+      }
       if (this.els.detail.hidden) return;
       if (e.key === 'ArrowLeft') this.cycle(-1);
       else if (e.key === 'ArrowRight') this.cycle(1);
@@ -424,6 +461,7 @@ export class AlertsController {
     if (!on) {
       this._setSourceData([]);
       this.els.list.innerHTML = '<div class="empty">Alerts hidden.</div>';
+      this.closePreview();
       this.closeDetail();
     } else {
       this.refreshVisible();
@@ -517,17 +555,16 @@ export class AlertsController {
       )}</span><span class="alert-row-area">${esc(
         (a.feature.properties.areaDesc || '').split(';')[0]
       )}</span>`;
-      row.addEventListener('click', () => this.openDetail(a.id));
+      row.addEventListener('click', () => this.openPreview(a.id));
       list.appendChild(row);
     }
   }
 
-  // Open the briefing. `group` (optional) is the list of alert ids found under
-  // the same click, so the panel can offer arrows to step through every alert
-  // active at that location; `id` is the one to show first.
-  openDetail(id, group) {
-    // Keep only ids we still hold, drop duplicates, and put the most
-    // significant alert first (so cycling reads top-down by severity).
+  // Resolve a click into the ordered group of alert ids stacked there. Keeps
+  // only ids we still hold, drops duplicates, and puts the most significant
+  // alert first (so cycling reads top-down by severity). Sets group state and
+  // returns nothing — callers then render.
+  _setGroup(id, group) {
     let ids = (group && group.length ? group : [id]).filter(
       (gid, i, arr) => arr.indexOf(gid) === i && this.alerts.some((a) => a.id === gid)
     );
@@ -540,6 +577,113 @@ export class AlertsController {
     this.group = ids;
     this.groupIndex = Math.max(0, ids.indexOf(id));
     this.selectedId = ids[this.groupIndex];
+  }
+
+  // Show the compact preview card first. `group` (optional) is the list of
+  // alert ids found under the same click, so the card can step through every
+  // alert active at that location; `id` is the one to show first.
+  openPreview(id, group) {
+    if (!this.els.preview) return this.openDetail(id, group);
+    this._setGroup(id, group);
+    if (!this.selectedId) return;
+    this.els.preview.hidden = false;
+    this.renderPreview();
+  }
+
+  // Step the preview card to another alert stacked here (delta = ±1, wraps).
+  cyclePreview(delta) {
+    if (!this.group || this.group.length < 2) return;
+    this.groupIndex = (this.groupIndex + delta + this.group.length) % this.group.length;
+    this.selectedId = this.group[this.groupIndex];
+    this.renderPreview();
+  }
+
+  closePreview() {
+    if (!this.els.preview || this.els.preview.hidden) return;
+    this.els.preview.hidden = true;
+  }
+
+  renderPreview() {
+    const a = this.alerts.find((x) => x.id === this.selectedId);
+    if (!a) {
+      this.closePreview();
+      return;
+    }
+    const p = a.feature.properties;
+    const params = p.parameters || {};
+    const expiry = p.ends || p.expires;
+    const until = untilText(expiry);
+    const tor = firstParam(params, 'tornadoDetection');
+    const torThreat = firstParam(params, 'tornadoDamageThreat');
+    const hail = firstParam(params, 'maxHailSize');
+    const wind = firstParam(params, 'maxWindGust');
+
+    const rows = [
+      `<div class="apv-row"><span>Expires</span><b>${esc(fmtClock(expiry))}${
+        until ? ` <i>(${esc(until)})</i>` : ''
+      }</b></div>`,
+    ];
+    if (tor) {
+      const t = String(tor).replace(/\b\w/g, (m) => m.toUpperCase());
+      rows.push(
+        `<div class="apv-row"><span>Tornado</span><b>${esc(t)}${
+          torThreat ? ` · ${esc(String(torThreat).toUpperCase())}` : ''
+        }</b></div>`
+      );
+    }
+    if (hail) {
+      rows.push(
+        `<div class="apv-row"><span>Hail</span><b>${esc(hail)}${
+          /in/i.test(hail) ? '' : ' in'
+        }</b></div>`
+      );
+    }
+    if (wind) rows.push(`<div class="apv-row"><span>Wind</span><b>${esc(wind)}</b></div>`);
+
+    const multi = this.group && this.group.length > 1;
+    const dots = multi
+      ? `<div class="apv-dots">${this.group
+          .map((_, i) => `<span class="apv-dot${i === this.groupIndex ? ' on' : ''}"></span>`)
+          .join('')}</div>`
+      : '';
+    const nav = multi
+      ? `<div class="apv-nav">
+           <button class="apv-nav-btn" data-dir="-1" aria-label="Previous alert">‹</button>
+           <button class="apv-nav-btn" data-dir="1" aria-label="Next alert">›</button>
+         </div>`
+      : '';
+
+    this.els.previewCard.innerHTML = `
+      <header class="apv-head" style="--ac:${a.cls.color}">
+        <span class="apv-icon">⚠</span>
+        <div class="apv-htext">
+          <h3>${esc(a.cls.display)}</h3>
+          <span class="apv-area">${esc((p.areaDesc || '').split(';')[0])}</span>
+        </div>
+        <button class="apv-close" aria-label="Close">✕</button>
+      </header>
+      <div class="apv-body">${rows.join('')}${dots}</div>
+      <footer class="apv-foot">
+        ${nav}
+        <button class="apv-details">View full briefing →</button>
+      </footer>`;
+
+    this.els.previewCard
+      .querySelector('.apv-close')
+      .addEventListener('click', () => this.closePreview());
+    this.els.previewCard
+      .querySelector('.apv-details')
+      .addEventListener('click', () => this.openDetail(this.selectedId, this.group));
+    this.els.previewCard
+      .querySelectorAll('.apv-nav-btn')
+      .forEach((b) => b.addEventListener('click', () => this.cyclePreview(Number(b.dataset.dir))));
+  }
+
+  // Open the full briefing. `group` (optional) is the list of alert ids found
+  // under the same click; `id` is the one to show first.
+  openDetail(id, group) {
+    this.closePreview();
+    this._setGroup(id, group);
 
     document.querySelector('.app').classList.add('alert-mode');
     this.els.detail.hidden = false;

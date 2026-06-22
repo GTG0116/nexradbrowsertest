@@ -324,6 +324,8 @@ function cacheEls() {
   el.alertDetail = $('#alertDetail');
   el.alertDetailPanel = $('#alertDetailPanel');
   el.alertClose = $('#alertClose');
+  el.alertPreview = $('#alertPreview');
+  el.alertPreviewCard = $('#alertPreviewCard');
 
   // Source modes (radar / satellite / MRMS).
   el.modeSwitch = $('#modeSwitch');
@@ -2289,6 +2291,8 @@ function init() {
     detail: el.alertDetail,
     detailPanel: el.alertDetailPanel,
     close: el.alertClose,
+    preview: el.alertPreview,
+    previewCard: el.alertPreviewCard,
   });
   state.alerts.start();
   el.alertsToggle.addEventListener('click', () => {
