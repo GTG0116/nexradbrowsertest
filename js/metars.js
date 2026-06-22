@@ -1,16 +1,25 @@
 // metars.js — live surface observations (METARs) drawn as classic station plots.
 //
-// Pulls current METARs from the public aviationweather.gov data API (CORS
-// enabled) for whatever the map currently shows, and renders each as a WMO
-// station-model plot: a sky-cover circle with the temperature (upper-left, °F),
-// dewpoint (lower-left, °F), sea-level pressure (upper-right, coded) and a wind
-// barb. Plots are HTML markers (mapboxgl.Marker) so they stay crisp and sit
-// above the radar without touching the WebGL layer stack.
+// Source: the Iowa Environmental Mesonet (IEM) current-observations API. We
+// switched off aviationweather.gov because it serves no Access-Control-Allow-
+// Origin header, so browser fetches were blocked by CORS; IEM responds with
+// `access-control-allow-origin: *` and is already this app's radar feed. IEM
+// has no bbox query, so we map the visible view to the US states it covers and
+// pull each state's `{ST}_ASOS` network, then filter to the view client-side.
+//
+// Each station renders as a WMO station-model plot: a sky-cover circle with the
+// temperature (upper-left, °F), dewpoint (lower-left, °F), sea-level pressure
+// (upper-right, coded) and a wind barb. Plots are HTML markers (mapboxgl.Marker)
+// so they stay crisp and sit above the radar without touching the WebGL stack.
 //
 // Toggled off by default; only fetches while enabled and only for the current
 // view, refetching (debounced) on pan/zoom and on a slow timer.
 
-const METAR_URL = 'https://aviationweather.gov/api/data/metar';
+const IEM_URL = 'https://mesonet.agron.iastate.edu/api/1/currents.json';
+// Drop observations older than this (minutes) so a stale ASOS doesn't mislead.
+const MAX_AGE_MIN = 150;
+// Cap how many state networks one view fans out to (a tight view spans 1–3).
+const MAX_STATES = 6;
 const REFRESH_MS = 5 * 60 * 1000;
 // Below this zoom the plots would overlap into mush, so we hide them and show a
 // hint instead of fetching the whole country.
@@ -20,6 +29,8 @@ const MIN_ZOOM = 6.5;
 const MAX_STATIONS = 400;
 
 const cToF = (c) => (c * 9) / 5 + 32;
+const fToC = (f) => (f == null || Number.isNaN(f) ? null : ((f - 32) * 5) / 9);
+const IN_HG_TO_HPA = 33.8639;
 
 // Eighths of sky covered, by METAR cloud-cover token, for the station circle.
 const COVER_OKTAS = { SKC: 0, CLR: 0, CAVOK: 0, NSC: 0, FEW: 2, SCT: 4, BKN: 6, OVC: 8, OVX: 8 };
@@ -130,7 +141,9 @@ function plotSVG(ob) {
   // Coded pressure group uses sea-level pressure (hPa); skip it when absent.
   const code = pressureCode(ob.slp);
   const oktas = maxCover(ob.clouds);
-  const barb = windBarb(ob.wdir === 'VRB' ? null : Number(ob.wdir), Number(ob.wspd), r);
+  // Variable ('VRB') or missing direction → no staff; windBarb guards on null.
+  const dir = ob.wdir == null || ob.wdir === 'VRB' ? null : Number(ob.wdir);
+  const barb = windBarb(dir, Number(ob.wspd), r);
 
   const tTxt = tF == null ? '' : `<text x="-11" y="-7" text-anchor="end" class="mp-t">${tF}</text>`;
   const dTxt = dF == null ? '' : `<text x="-11" y="13" text-anchor="end" class="mp-d">${dF}</text>`;
@@ -189,16 +202,36 @@ export class MetarController {
       return;
     }
     const b = this.map.getBounds();
-    const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()]
-      .map((v) => v.toFixed(2)).join(',');
-    const url = `${METAR_URL}?format=json&bbox=${bbox}`;
+    const view = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]; // W,S,E,N
+    const states = statesInView(view).slice(0, MAX_STATES);
+    if (!states.length) {
+      this.clearMarkers();
+      if (this.onStatus) this.onStatus('no surface obs in view');
+      return;
+    }
     const seq = ++this._seq;
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      // One request per state network; tolerate individual failures (a state
+      // network may briefly 5xx) as long as at least one returns.
+      const settled = await Promise.allSettled(states.map((st) => fetchStateObs(st)));
       if (seq !== this._seq || !this.enabled) return;
-      this.obs = Array.isArray(data) ? data : [];
+      const ok = settled.filter((s) => s.status === 'fulfilled');
+      if (!ok.length) throw new Error('all state requests failed');
+
+      const seen = new Set();
+      const obs = [];
+      for (const s of ok) {
+        for (const rec of s.value) {
+          if (rec.lat == null || rec.lon == null) continue;
+          // Keep only stations inside the current view.
+          if (rec.lon < view[0] || rec.lon > view[2] || rec.lat < view[1] || rec.lat > view[3]) continue;
+          const id = rec.station;
+          if (id && seen.has(id)) continue;
+          if (id) seen.add(id);
+          obs.push(normalizeIem(rec));
+        }
+      }
+      this.obs = obs;
       this.render();
       if (this.onStatus) this.onStatus(`${this.markers.size} METARs`);
     } catch (e) {
@@ -241,3 +274,96 @@ export class MetarController {
     }
   }
 }
+
+// ---- IEM source helpers --------------------------------------------------
+
+// Fetch one state's ASOS network current obs (the lean per-network endpoint;
+// the broader state query also pulls COOP/DCP/SCAN sites we don't plot).
+async function fetchStateObs(st) {
+  const url = `${IEM_URL}?network=${st}_ASOS&minutes=${MAX_AGE_MIN}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  return (json && Array.isArray(json.data)) ? json.data : [];
+}
+
+// Up to four reported cloud layers → [{ cover }] for maxCover().
+function cloudsFrom(rec) {
+  const out = [];
+  for (const k of ['skyc1', 'skyc2', 'skyc3', 'skyc4']) {
+    if (rec[k]) out.push({ cover: rec[k] });
+  }
+  return out;
+}
+
+// IEM current-obs record → the `ob` shape the station-plot renderer expects
+// (temps in °C, pressure in hPa, wind in knots).
+function normalizeIem(rec) {
+  // Prefer reported MSLP; fall back to the altimeter setting (QNH, already
+  // sea-level-reduced) converted to hPa so the coded pressure group still shows.
+  const slp = rec.mslp != null ? rec.mslp
+    : (rec.alti != null ? rec.alti * IN_HG_TO_HPA : null);
+  return {
+    icaoId: rec.station,
+    lat: rec.lat,
+    lon: rec.lon,
+    temp: fToC(rec.tmpf),
+    dewp: fToC(rec.dwpf),
+    slp,
+    clouds: cloudsFrom(rec),
+    wdir: rec.drct,          // numeric degrees, or null when variable/missing
+    wspd: rec.sknt,          // knots
+    wxString: rec.wxcodes || '',
+    rawOb: rec.raw || rec.station,
+  };
+}
+
+// US states whose bounding box intersects the view [W,S,E,N], roughly ordered
+// by proximity of the state's center to the view center so the MAX_STATES cap
+// keeps the most relevant networks.
+function statesInView(view) {
+  const [w, s, e, n] = view;
+  const cx = (w + e) / 2;
+  const cy = (s + n) / 2;
+  const hits = [];
+  for (const st in STATE_BBOX) {
+    const [sw, ss, se, sn] = STATE_BBOX[st];
+    if (se < w || sw > e || sn < s || ss > n) continue; // no overlap
+    const dx = (sw + se) / 2 - cx;
+    const dy = (ss + sn) / 2 - cy;
+    hits.push({ st, d: dx * dx + dy * dy });
+  }
+  return hits.sort((a, b) => a.d - b.d).map((h) => h.st);
+}
+
+// Approximate [west, south, east, north] bounding boxes for the 50 states + DC.
+// Slightly padded; only used to decide which `{ST}_ASOS` networks to query, so
+// over-selecting a neighbor is harmless (obs are filtered to the exact view).
+const STATE_BBOX = {
+  AL: [-88.5, 30.1, -84.9, 35.1], AZ: [-114.9, 31.3, -109.0, 37.1],
+  AR: [-94.7, 33.0, -89.6, 36.6], CA: [-124.5, 32.5, -114.1, 42.1],
+  CO: [-109.1, 36.9, -102.0, 41.1], CT: [-73.8, 40.9, -71.7, 42.1],
+  DC: [-77.2, 38.7, -76.8, 39.1], DE: [-75.8, 38.4, -75.0, 39.9],
+  FL: [-87.7, 24.4, -79.9, 31.1], GA: [-85.7, 30.3, -80.8, 35.1],
+  IA: [-96.7, 40.3, -90.1, 43.6], ID: [-117.3, 41.9, -111.0, 49.1],
+  IL: [-91.6, 36.9, -87.0, 42.6], IN: [-88.1, 37.7, -84.7, 41.8],
+  KS: [-102.1, 36.9, -94.5, 40.1], KY: [-89.6, 36.4, -81.9, 39.2],
+  LA: [-94.1, 28.9, -88.8, 33.1], MA: [-73.6, 41.2, -69.9, 42.9],
+  MD: [-79.5, 37.8, -75.0, 39.8], ME: [-71.2, 42.9, -66.9, 47.5],
+  MI: [-90.5, 41.6, -82.3, 48.3], MN: [-97.3, 43.4, -89.4, 49.5],
+  MO: [-95.8, 35.9, -89.0, 40.7], MS: [-91.7, 30.1, -88.0, 35.1],
+  MT: [-116.1, 44.3, -104.0, 49.1], NC: [-84.4, 33.8, -75.4, 36.7],
+  ND: [-104.1, 45.9, -96.5, 49.1], NE: [-104.1, 39.9, -95.2, 43.1],
+  NH: [-72.6, 42.6, -70.5, 45.4], NJ: [-75.6, 38.9, -73.8, 41.4],
+  NM: [-109.1, 31.2, -102.9, 37.1], NV: [-120.1, 35.0, -114.0, 42.1],
+  NY: [-79.8, 40.4, -71.8, 45.1], OH: [-84.9, 38.3, -80.5, 42.4],
+  OK: [-103.1, 33.6, -94.4, 37.1], OR: [-124.6, 41.9, -116.4, 46.3],
+  PA: [-80.6, 39.7, -74.6, 42.4], RI: [-71.9, 41.1, -71.1, 42.1],
+  SC: [-83.4, 32.0, -78.5, 35.3], SD: [-104.1, 42.4, -96.4, 46.0],
+  TN: [-90.4, 34.9, -81.6, 36.7], TX: [-106.7, 25.8, -93.5, 36.6],
+  UT: [-114.1, 36.9, -109.0, 42.1], VA: [-83.7, 36.5, -75.2, 39.5],
+  VT: [-73.5, 42.7, -71.5, 45.1], WA: [-124.8, 45.5, -116.9, 49.1],
+  WI: [-92.9, 42.4, -86.8, 47.1], WV: [-82.7, 37.1, -77.7, 40.7],
+  WY: [-111.1, 40.9, -104.0, 45.1],
+  AK: [-179.2, 51.0, -129.9, 71.5], HI: [-160.3, 18.9, -154.8, 22.3],
+};
