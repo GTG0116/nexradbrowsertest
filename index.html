@@ -103,6 +103,18 @@
         <section class="stage">
           <div id="mapWrap" class="map-wrap">
             <div id="map"></div>
+            <div id="map2" hidden></div>
+
+            <!-- Map tools: draw / measure / storm track / METARs / split view -->
+            <div id="mapTools" class="map-tools">
+              <button id="toolDraw" class="map-tool" title="Draw (freehand)">✎</button>
+              <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area">📏</button>
+              <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
+              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
+              <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
+              <button id="toolClear" class="map-tool" title="Clear drawings">✕</button>
+            </div>
+
             <div id="mapReadout" class="map-readout"></div>
             <!-- Inspect crosshair: a fixed picker at screen centre that reads the
                  gate value beneath it as you pan the map. -->
