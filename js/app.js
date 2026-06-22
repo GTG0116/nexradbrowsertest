@@ -382,6 +382,10 @@ function cacheEls() {
   el.dockTime = $('#dockTime');
   el.playBtn = $('#playBtn');
   el.inspectBtn = $('#inspectBtn');
+  el.dockToolSlot = $('#dockToolSlot');
+  el.dockToolMore = $('#dockToolMore');
+  el.dockToolBtn = $('#dockToolBtn');
+  el.dockToolMenu = $('#dockToolMenu');
   el.sheet = $('#mobileSheet');
   el.sheetBody = $('#sheetBody');
   el.sheetScrim = $('#sheetScrim');
@@ -539,7 +543,7 @@ function selectSite(icao, name) {
 function onSiteSwitch(icao) {
   if (state.playback && state.playback.active) state.playback.stop();
   state.site = icao;
-  state._centered = false;
+  state._recenterRadar = true; // explicit pick → recenter/zoom on the next load
   state._forceLatest = true; // show the latest frame without needing LIVE
   // TDWR is Doppler-only: drop a dual-pol selection and rebuild the product row
   // so its dual-pol buttons disappear (and reappear when leaving a TDWR site).
@@ -929,10 +933,12 @@ async function loadVolume(key) {
     const list = sweepsForProduct();
     if (list.length) state.selectedElevation = list[0].elevation;
 
-    // Centre the map on the radar the first time we get a site fix.
-    if (volume.site && !state._centered) {
+    // Only recenter/zoom when the user explicitly picked this radar (from the
+    // site list, a dot, right-click or long-press). Plain frame loads and the
+    // LIVE auto-refresh leave the user's current pan/zoom untouched.
+    if (volume.site && state._recenterRadar) {
       state.map.jumpTo({ center: [volume.site.lon, volume.site.lat], zoom: 8 });
-      state._centered = true;
+      state._recenterRadar = false;
     }
 
     refreshSiteDots();
@@ -1089,6 +1095,7 @@ function setMode(mode) {
   if (mode !== 'models') clearModels();
   if (mode !== 'radar') applyRadarOverlay(); // hide radar unless its overlay is on
   applyModePanels();
+  refreshSiteDots(); // show the radar dots only in radar mode
   buildProductButtons();
   buildLegend();
   state._forceLatest = true;
@@ -1279,6 +1286,7 @@ function renderSatellite() {
   const bbox = state.sat._bbox || (state.sat._bbox = sceneBBox(scene));
   drawSatScene(scene, rgba, bbox);
   syncSplit();
+  updateDock();
 }
 
 // The projection metadata the satellite layer needs to draw a scene — small
@@ -1450,6 +1458,7 @@ function renderMrms() {
   state.mrms.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.mrms.layer.setOpacity(state.opacity);
   syncSplit();
+  updateDock();
 }
 
 // Display a pre-prepared MRMS grid payload (see prepareGridTexture) — used by
@@ -1653,6 +1662,7 @@ function renderModels() {
   // Upper-air products carry wind + height overlays; others clear them.
   renderModelOverlays(map, grid);
   syncSplit();
+  updateDock();
 }
 
 // Display a pre-prepared model grid payload — used by forecast-hour playback.
@@ -1771,6 +1781,10 @@ function closeSounding() {
 function refreshSiteDots() {
   const map = state.map;
   if (!map || !map.getSource('sites')) return;
+  // The all-radar dots only belong to radar mode — in satellite / MRMS / model
+  // modes there's no site to pick, so hide them rather than littering the map.
+  if (map.getLayer('sites'))
+    map.setLayoutProperty('sites', 'visibility', state.mode === 'radar' ? 'visible' : 'none');
   map.getSource('sites').setData(sitesGeoJSON());
   const mobile = mqMobile.matches;
   map.setPaintProperty('sites', 'circle-radius', [
@@ -1898,13 +1912,71 @@ function updateInspect() {
 // ---------------------------------------------------------------------------
 // Mobile dock + settings sheet
 // ---------------------------------------------------------------------------
+// Describe what the dock chip should show for the active source: a short product
+// code, the source it comes from (radar site / satellite / MRMS / model), the
+// human product name (reflectivity, infrared…) and the frame time. This is what
+// lets the dock follow the user off radar onto another product entirely.
+function dockInfo() {
+  if (state.mode === 'satellite') {
+    const id = state.sat.productId;
+    let prod, name;
+    if (id.startsWith('C')) {
+      const band = parseInt(id.slice(1), 10);
+      const ch = SAT_CHANNELS[band - 1];
+      prod = id;
+      name = ch ? ch.name : id;
+    } else {
+      const rgb = SAT_RGB[id.replace(/^RGB_/, '')];
+      prod = rgb ? rgb.short : id;
+      name = rgb ? rgb.name : id;
+    }
+    const sat = SATELLITES[state.sat.satKey];
+    const t = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
+    return {
+      prod,
+      name,
+      source: sat ? sat.label.replace(/\s*\(.*\)$/, '') : 'GOES',
+      time: t ? t.label : '—',
+    };
+  }
+  if (state.mode === 'mrms') {
+    const p = MRMS_PRODUCTS[state.mrms.productId];
+    const t = state.mrms.frames.find((x) => x.key === state.mrms.frameKey);
+    return {
+      prod: state.mrms.productId,
+      name: p ? p.name : state.mrms.productId,
+      source: 'MRMS',
+      time: t ? t.label : '—',
+    };
+  }
+  if (state.mode === 'models') {
+    const p = MODEL_PRODUCTS[state.models.productId];
+    const m = MODELS[state.models.modelKey];
+    return {
+      prod: state.models.productId,
+      name: p ? p.name : state.models.productId,
+      source: m ? m.label.split(' ')[0] : 'MODEL',
+      time: `F${String(state.models.fhour).padStart(2, '0')}`,
+    };
+  }
+  // Radar (default).
+  const p = PRODUCTS[state.productId];
+  const t = state.volumes.find((x) => x.key === state.volumeKey);
+  return {
+    prod: state.productId,
+    name: p ? p.name : state.productId,
+    source: (state.volume && state.volume.icao) || state.site,
+    time: t ? t.label : '—',
+  };
+}
+
 function updateDock() {
   if (!el.dockProd) return;
-  el.dockProd.textContent = state.productId;
-  el.dockSite.textContent = (state.volume && state.volume.icao) || state.site;
+  const info = dockInfo();
+  el.dockProd.textContent = info.prod;
+  el.dockSite.textContent = info.source;
   if (state.playback && state.playback.active) return; // dock time owned by playback
-  const t = state.volumes.find((x) => x.key === state.volumeKey);
-  el.dockTime.textContent = t ? t.label : '—';
+  el.dockTime.textContent = info.name ? `${info.name} · ${info.time}` : info.time;
 }
 
 const SHEET_EASE = 'cubic-bezier(.22,1,.36,1)';
@@ -1996,6 +2068,7 @@ function applyResponsiveLayout() {
   // hidden until playback stops.
   const playing = state.playback && state.playback.active;
   el.mobileDock.hidden = !mobile || playing;
+  if ((!mobile || playing) && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
     // In the sheet, stack Product/tilt/basemap first, then Source/volumes and
@@ -2120,6 +2193,7 @@ function createPlayback() {
       if (el.loopBtn) el.loopBtn.classList.add('active');
       // The loop UI takes over the dock's space: hide the dock while playing
       // and reveal it again on stop (the ✕ on the bar).
+      if (state._closeDockMenu) state._closeDockMenu();
       el.mobileDock.hidden = true;
       el.playbackBar.hidden = false;
       el.sheetPlayback.hidden = false;
@@ -2272,15 +2346,28 @@ function updateReadout(latlng) {
 // Live mode + clock
 // ---------------------------------------------------------------------------
 function toggleLive() {
-  state.live = !state.live;
-  el.liveBtn.classList.toggle('active', state.live);
-  el.liveBtn.textContent = state.live ? '● LIVE' : '○ LIVE';
-  if (state.live) {
-    state.date = new Date();
-    el.dateInput.value = isoDate(state.date);
-    refreshActive();
-    state.liveTimer = setInterval(() => refreshActive(), 60000);
-  } else if (state.liveTimer) {
+  if (state.live) stopLive();
+  else startLive();
+}
+
+// Turn LIVE on: snap to "now", load the latest frame and auto-refresh every 60s.
+// Idempotent, so it's safe to call on startup (the app boots into LIVE).
+function startLive() {
+  state.live = true;
+  el.liveBtn.classList.add('active');
+  el.liveBtn.textContent = '● LIVE';
+  state.date = new Date();
+  el.dateInput.value = isoDate(state.date);
+  refreshActive();
+  if (state.liveTimer) clearInterval(state.liveTimer);
+  state.liveTimer = setInterval(() => refreshActive(), 60000);
+}
+
+function stopLive() {
+  state.live = false;
+  el.liveBtn.classList.remove('active');
+  el.liveBtn.textContent = '○ LIVE';
+  if (state.liveTimer) {
     clearInterval(state.liveTimer);
     state.liveTimer = null;
   }
@@ -2367,6 +2454,101 @@ function setupMapTools() {
       setStatus('Export failed');
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Mobile dock tool slot — a single dock button that can be any of the map tools.
+// Tapping ▴ opens a menu to choose which tool occupies the slot; tapping the
+// slot itself runs that tool. The tools themselves live on the (now mobile-
+// hidden) toolbar buttons, so the slot just delegates clicks to them and mirrors
+// their pressed state — no tool logic is duplicated here.
+// ---------------------------------------------------------------------------
+const DOCK_TOOLS = [
+  { id: 'storm', icon: '➤', label: 'Storm track', btn: () => el.toolStorm },
+  { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
+  { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
+  { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
+  { id: 'export', icon: '⤓', label: 'Export image', btn: () => el.toolExport },
+  { id: 'clear', icon: '✕', label: 'Clear drawings', btn: () => el.toolClear },
+];
+
+function setupDockTools() {
+  if (!el.dockToolBtn) return;
+  state.dockTool = state.dockTool || 'storm';
+
+  const current = () => DOCK_TOOLS.find((t) => t.id === state.dockTool) || DOCK_TOOLS[0];
+
+  // Reflect the underlying tool button's pressed state on the slot.
+  function syncActive() {
+    const t = current();
+    const btn = t.btn();
+    el.dockToolBtn.classList.toggle('active', !!(btn && btn.classList.contains('active')));
+  }
+
+  function buildMenu() {
+    el.dockToolMenu.innerHTML = '';
+    for (const t of DOCK_TOOLS) {
+      const item = document.createElement('button');
+      item.className = 'dock-tool-item';
+      if (t.id === state.dockTool) item.classList.add('active');
+      item.innerHTML = `<span class="ti-icon">${t.icon}</span><span>${t.label}</span>`;
+      item.addEventListener('click', () => {
+        setDockTool(t.id);
+        closeDockMenu();
+      });
+      el.dockToolMenu.appendChild(item);
+    }
+  }
+
+  function setDockTool(id) {
+    state.dockTool = id;
+    const t = current();
+    el.dockToolBtn.textContent = t.icon;
+    el.dockToolBtn.title = t.label;
+    syncActive();
+  }
+
+  function openDockMenu() {
+    buildMenu();
+    el.dockToolMenu.hidden = false;
+    el.dockToolSlot.classList.add('open');
+  }
+  function closeDockMenu() {
+    el.dockToolMenu.hidden = true;
+    el.dockToolSlot.classList.remove('open');
+  }
+  state._closeDockMenu = closeDockMenu;
+
+  el.dockToolMore.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (el.dockToolMenu.hidden) openDockMenu();
+    else closeDockMenu();
+  });
+
+  // Tapping the slot delegates to the chosen tool's toolbar button, then mirrors
+  // its new pressed state (after the tool controllers settle on the next tick).
+  el.dockToolBtn.addEventListener('click', () => {
+    closeDockMenu();
+    const btn = current().btn();
+    if (btn) btn.click();
+    setTimeout(syncActive, 0);
+  });
+
+  // The map-tool controllers flip button state when a tool ends; keep in sync.
+  if (state.mapTools) {
+    const prevEnd = state.mapTools.onToolEnd;
+    state.mapTools.onToolEnd = () => { if (prevEnd) prevEnd(); syncActive(); };
+  }
+
+  // Dismiss the menu on any outside tap.
+  document.addEventListener('click', (e) => {
+    if (el.dockToolMenu.hidden) return;
+    if (el.dockToolSlot.contains(e.target) || el.dockToolMenu.contains(e.target)) return;
+    closeDockMenu();
+  });
+
+  setDockTool(state.dockTool);
 }
 
 // Gather the canvases, caption and legend for the export tool. In split view
@@ -2559,6 +2741,8 @@ function init() {
 
   // ---- Map tools: METARs, draw / measure / storm track, split view ----
   setupMapTools();
+  // ---- Mobile dock swappable tool slot (delegates to the map tools above) ----
+  setupDockTools();
 
   // ---- Mobile dock + sheet + playback + inspect wiring ----
   el.dockStatus.addEventListener('click', () =>
@@ -2608,7 +2792,11 @@ function init() {
 
   tickClock();
   setInterval(tickClock, 1000);
-  loadVolumeList();
+
+  // Start in LIVE mode so the newest data streams in automatically — the user
+  // shouldn't have to flip the LIVE switch to get a self-updating view. This
+  // also kicks off the first load (refreshActive) and the 60s auto-refresh.
+  startLive();
 }
 
 document.addEventListener('DOMContentLoaded', init);

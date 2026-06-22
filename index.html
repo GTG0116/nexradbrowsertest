@@ -232,8 +232,16 @@
         </button>
         <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
         <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
+        <!-- Swappable tool slot: tap ▴ to choose which map tool (storm track,
+             measure, draw, METARs…) lives in the slot, then tap the slot to use
+             it. Keeps all the side tools one thumb-reach away on mobile. -->
+        <div id="dockToolSlot" class="dock-tool-slot">
+          <button id="dockToolMore" class="dock-tool-more" title="Choose tool">▴</button>
+          <button id="dockToolBtn" class="dock-tool" title="Storm track">➤</button>
+        </div>
         <button id="dockSoundingBtn" class="dock-tool" title="HRRR sounding at map center" hidden>⊙</button>
       </div>
+      <div id="dockToolMenu" class="dock-tool-menu" hidden></div>
 
       <div id="sheetScrim" class="sheet-scrim" hidden></div>
       <div id="mobileSheet" class="mobile-sheet" hidden>
