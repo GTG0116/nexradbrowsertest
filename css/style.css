@@ -1469,32 +1469,34 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--glow);
 }
 
-/* Swappable map-tool slot + its "choose tool" pop-up. The slot reuses the
-   .dock-tool look; the ▴ tab sits on its top edge and opens the menu. */
+/* Swappable map-tool slot + its "choose tool" pop-up. The slot is itself a
+   flex box so the inner button stretches to exactly the same size as the other
+   dock buttons; the ▴ chooser sits inside the slot's top-right corner so it
+   never pokes out of the dock and overlaps the map. */
 .dock-tool-slot {
   position: relative;
   flex: none;
   width: 50px;
+  display: flex;
 }
 .dock-tool-slot .dock-tool {
   width: 100%;
 }
 .dock-tool-more {
   position: absolute;
-  top: -11px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 34px;
-  height: 18px;
+  top: 3px;
+  right: 3px;
+  width: 17px;
+  height: 15px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(14, 24, 44, 0.96);
+  padding: 0;
+  background: rgba(8, 14, 28, 0.9);
   border: 1px solid var(--panel-edge);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 6px;
   color: var(--ink-dim);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
   cursor: pointer;
   z-index: 2;

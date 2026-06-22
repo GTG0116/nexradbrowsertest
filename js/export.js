@@ -44,7 +44,17 @@ export class ExportTool {
     // Size the banners relative to the image width so the layout keeps the same
     // proportions whatever the map's resolution/DPR — with a floor so a small
     // (mobile) capture stays legible and a ceiling so a huge one isn't blown up.
-    const u = clamp(mapW / 78, 13, 30); // base text unit, ~px
+    // On phones the captured map is narrow, so the default unit comes out tiny
+    // and the header/legend are unreadable when shared. Scale the unit up there
+    // (bigger divisor floor) — the header, legend and credit are all measured
+    // against `u` and clipped/dropped if space runs out, so a larger unit makes
+    // the text far more readable without ever letting the colour table overlap.
+    const mobile =
+      typeof window !== 'undefined' &&
+      Math.min(window.innerWidth || Infinity, window.innerHeight || Infinity) <= 820;
+    const u = mobile
+      ? clamp(mapW / 44, 22, 40) // phones: chunkier, readable banners
+      : clamp(mapW / 78, 13, 30); // base text unit, ~px
     const padX = Math.round(u * 1.4);
     const headerH = Math.round(u * 4.4);
     const footerH = Math.round(legend ? u * 4.6 : u * 2.4);
