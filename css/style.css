@@ -2074,3 +2074,109 @@ input[type='range']::-moz-range-thumb {
   .map-wrap.split #map .split-badge { top: 8px; }
   .map-wrap.split #map2 .split-badge { top: auto; bottom: 8px; }
 }
+
+/* ---------------------------------------------------------------------------
+   Export / share modal
+   --------------------------------------------------------------------------- */
+.export-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 14, 0.74);
+  backdrop-filter: blur(4px);
+}
+.export-card {
+  width: min(880px, 100%);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--panel-edge);
+  background: var(--bg-2);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.export-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--panel-edge);
+}
+.export-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.export-x {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-edge);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 15px;
+  transition: 0.12s;
+}
+.export-x:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.export-preview {
+  padding: 16px;
+  overflow: auto;
+  background:
+    repeating-conic-gradient(rgba(255, 255, 255, 0.02) 0% 25%, transparent 0% 50%) 50% / 22px 22px;
+}
+.export-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--panel-edge);
+}
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--panel-edge);
+}
+.export-btn {
+  flex: 1 1 auto;
+  min-width: 120px;
+  padding: 10px 16px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.6);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.export-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.export-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+.export-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #04121a;
+}
+.export-btn.primary:hover:not(:disabled) {
+  color: #04121a;
+  box-shadow: var(--glow);
+}

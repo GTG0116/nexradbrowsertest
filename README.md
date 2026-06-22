@@ -46,6 +46,12 @@ the radar imagery — entirely client-side.
   including the dual-pol ones, displays correctly.
 - Heavy decode runs in a **Web Worker** (`js/decoder.worker.js`) so the UI never
   freezes, even on 7 MB+ volumes.
+- **Full radar network** (`js/s3.js`): the complete WSR-88D network plus the FAA's
+  **TDWR** terminal radars (the `T###` sites guarding major airports). TDWR shares
+  the same realtime feed and Archive-II message format — AWS keys just end `_V08`
+  instead of `_V06`, handled transparently — so its tighter ~90 nmi, finer-beam
+  view of the near-airport environment loads through the identical path. Pick any
+  site from the dropdown, or right-click the map to jump to the nearest tower.
 
 ## Beyond radar: Satellite and MRMS
 
@@ -195,6 +201,14 @@ that draw straight onto the scope:
   loaded volume renders for free; satellite shows any channel/RGB; MRMS/models
   fetch the chosen product on demand. Annotations drawn with the tools above are
   mirrored into the second pane.
+- **Export / share** (`js/export.js`) — snapshot the live scope to a PNG. The
+  basemap, radar/satellite WebGL layers and any drawings all render into the
+  map's single canvas (created with `preserveDrawingBuffer`), so the capture is
+  composited onto a captioned banner — site/product/scan-time header plus the
+  color legend reconstructed from the live DOM — entirely client-side, no
+  libraries. A preview modal then offers native **Share** (Web Share API, for
+  AirDrop / messaging / social on supported devices), **Copy** to the clipboard,
+  and **Download**. Split view exports both panes side by side.
 
 The first time an alert is clicked it now opens a compact **preview card that
 floats over the map** rather than taking over the screen, so the map stays fully
