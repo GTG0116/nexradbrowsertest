@@ -3,7 +3,7 @@
 // S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
 import { listVolumes, fetchVolume, RADARS, nearestSite } from './s3.js';
-import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals, reflectivityProduct } from './products.js';
+import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals, reflectivityProduct, displayFactorFor } from './products.js';
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
@@ -706,13 +706,23 @@ function writePalStore(store) {
 function applyPal(targetId, pal, name) {
   const p = PRODUCTS[targetId];
   if (!p) return;
-  p.scale = makeScale(pal.segments);
+  // A .pal lists its thresholds in its own `Units`, but the shader and point
+  // sampler work in the product's NATIVE unit (e.g. m/s for velocity). When the
+  // table is authored in an alternate unit we know how to convert (mph, kt, …),
+  // rescale the thresholds back to native so the colors land on the right gates,
+  // and keep the native->table factor so the legend/readout still read in the
+  // table's unit. Otherwise (native unit, or an unknown one) show verbatim.
+  const factor = displayFactorFor(p.defaultUnit, pal.units);
+  if (factor && factor !== 1) {
+    p.scale = makeScale(pal.segments.map((sg) => ({ ...sg, v: sg.v / factor })));
+    p.dispUnit = pal.units;
+    p.dispFactor = factor;
+  } else {
+    p.scale = makeScale(pal.segments);
+    p.dispUnit = pal.units || p.unit;
+    p.dispFactor = 1;
+  }
   p.range = [p.scale.lo, p.scale.hi];
-  if (pal.units) p.unit = pal.units;
-  // A custom palette defines values in its own units, so show them verbatim
-  // (no imperial conversion on top of the author's scale).
-  p.dispUnit = pal.units || p.unit;
-  p.dispFactor = 1;
   p.dispOffset = 0;
   p.customPal = name;
 }

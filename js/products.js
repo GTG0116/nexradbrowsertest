@@ -185,6 +185,31 @@ export function dispUnitOf(product) {
   return product.dispUnit || product.unit;
 }
 
+// Conversion from a product's NATIVE physical unit to a display unit. A loaded
+// .pal color table lists its thresholds in its own `Units`, but the shader and
+// point sampler work in the native unit (m/s for velocity), so when a table is
+// authored in an alternate unit we use this to (a) convert its thresholds back
+// to native for the color LUT and (b) keep the native->display factor for the
+// legend and readout. Keys are lower-cased display units.
+const UNIT_FACTORS = {
+  'm/s': {
+    'm/s': 1, mps: 1, ms: 1,
+    mph: MS_TO_MPH,
+    kt: 1.9438445, kts: 1.9438445, knot: 1.9438445, knots: 1.9438445,
+    'km/h': 3.6, kph: 3.6, kmh: 3.6,
+  },
+};
+
+// Factor converting `nativeUnit` -> `dispUnit`, or null when the pair is unknown
+// (caller then shows thresholds verbatim, as before).
+export function displayFactorFor(nativeUnit, dispUnit) {
+  if (!dispUnit) return null;
+  const table = UNIT_FACTORS[nativeUnit];
+  if (!table) return null;
+  const f = table[String(dispUnit).trim().toLowerCase()];
+  return f == null ? null : f;
+}
+
 export const PRODUCT_ORDER = ['REF', 'VEL', 'SW', 'RHO', 'ZDR', 'PHI'];
 
 // The reflectivity color table is shared across single-site radar, MRMS and the
