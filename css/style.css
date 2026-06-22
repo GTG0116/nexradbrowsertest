@@ -1973,55 +1973,55 @@ input[type='range']::-moz-range-thumb {
 .map-wrap.split #map2 {
   left: 50%;
 }
-.split-picker {
+/* Each pane carries a badge naming it, showing its current product, and whether
+   it's the pane the bottom UI is driving. Click a panel (or its badge) to aim
+   the controls at it. */
+.split-badge {
   position: absolute;
   top: 10px;
   left: 50%;
   transform: translateX(-50%);
-  /* Centered + single scrollable row so it clears the nav control (pane 1,
-     top-left) and the map-tools toolbar (top-right) instead of covering them. */
-  max-width: calc(100% - 110px);
   z-index: 610;
   display: flex;
-  flex-wrap: nowrap;
-  overflow-x: auto;
   align-items: center;
-  gap: 5px;
-  padding: 6px 8px;
-  border-radius: 10px;
-  background: rgba(8, 16, 32, 0.88);
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(8, 16, 32, 0.9);
   border: 1px solid var(--panel-edge);
   backdrop-filter: blur(6px);
-  scrollbar-width: thin;
-}
-.split-picker-label,
-.split-prod { flex: 0 0 auto; }
-.split-picker-label {
   font-family: 'JetBrains Mono', monospace;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+  user-select: none;
+}
+.split-badge .sb-name {
   font-size: 9px;
   letter-spacing: 1.5px;
   color: var(--ink-dim);
-  margin-right: 4px;
 }
-.split-prod {
-  border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.7);
+.split-badge .sb-prod {
+  font-size: 12px;
+  font-weight: 700;
   color: var(--ink);
-  border-radius: 6px;
-  padding: 3px 7px;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-  cursor: pointer;
-  transition: 0.12s;
 }
-.split-prod:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+.split-badge .sb-dot {
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--ink-dim);
 }
-.split-prod.active {
-  background: rgba(54, 224, 200, 0.18);
+.split-badge.active {
   border-color: var(--accent);
-  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.split-badge.active .sb-prod { color: var(--accent); }
+.split-badge.active .sb-dot { color: var(--accent); }
+.split-badge .sb-dot.tap { opacity: 0.7; }
+
+/* Glow the border of the pane the bottom UI is currently editing. */
+.map-wrap.split #map.pane-active,
+.map-wrap.split #map2.pane-active {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 /* Mobile: stack panes (chosen product on top), and keep the toolbar reachable
@@ -2045,4 +2045,32 @@ input[type='range']::-moz-range-thumb {
   .alert-preview {
     bottom: 150px;
   }
+  /* Storm-track controls used to sit at the very bottom, under the dock/sheet,
+     where they were unreachable. Lift them clear of the bottom UI, widen them,
+     and enlarge the touch targets. */
+  .storm-panel {
+    bottom: 200px;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    transform: none;
+    padding: 12px;
+  }
+  .storm-inputs {
+    gap: 12px;
+    font-size: 13px;
+  }
+  .storm-inputs input {
+    width: 72px;
+    font-size: 15px;
+    padding: 7px 8px;
+  }
+  .storm-inputs button {
+    padding: 8px 14px;
+    font-size: 14px;
+  }
+  /* Pane badges drop to the inner edge of each stacked pane so they don't
+     collide with the nav control / toolbar at the top. */
+  .map-wrap.split #map .split-badge { top: 8px; }
+  .map-wrap.split #map2 .split-badge { top: auto; bottom: 8px; }
 }

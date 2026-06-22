@@ -41,6 +41,10 @@ export class SplitView {
     this.syncing = false;
     this.drawings = { type: 'FeatureCollection', features: [] };
     this._gridCache = new Map();
+    // Which pane the shared bottom UI currently drives: 1 = main map, 2 = this
+    // pane. Click a panel to switch. Starts on the main map so behaviour is
+    // unchanged until the user picks the second pane.
+    this.activePane = 1;
   }
 
   // ---- Enable / disable ----
@@ -75,8 +79,10 @@ export class SplitView {
       this._setDrawSource();
     });
     this._bindSync();
-    this._buildPicker();
-    this._buildMainPicker();
+    this._buildBadges();
+    this._bindPaneSelect();
+    this.activePane = 1;
+    this._updatePaneUI();
     setTimeout(() => { main.resize(); map.resize(); }, 60);
   }
 
@@ -86,13 +92,21 @@ export class SplitView {
     const wrap = document.getElementById('mapWrap');
     wrap.classList.remove('split');
     document.getElementById('map2').hidden = true;
-    if (this._picker) { this._picker.remove(); this._picker = null; }
-    if (this._mainPicker) { this._mainPicker.remove(); this._mainPicker = null; }
+    if (this._badge1) { this._badge1.remove(); this._badge1 = null; }
+    if (this._badge2) { this._badge2.remove(); this._badge2 = null; }
+    this._unbindPaneSelect();
+    const mapEl = document.getElementById('map');
+    const map2El = document.getElementById('map2');
+    if (mapEl) mapEl.classList.remove('pane-active');
+    if (map2El) map2El.classList.remove('pane-active');
+    this.activePane = 1;
     // Detach the camera-sync listener from the main map before tearing down the
     // pane, or its next move would call jumpTo on a removed map.
     if (this._onMainMove) { this.ctx.state.map.off('move', this._onMainMove); this._onMainMove = null; }
     if (this.map) { this.map.remove(); this.map = null; }
     this.layers = { radar: null, mrms: null, models: null, sat: null };
+    // Repaint the bottom UI to reflect the main map again.
+    if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
     setTimeout(() => this.ctx.state.map && this.ctx.state.map.resize(), 60);
   }
 
@@ -204,12 +218,12 @@ export class SplitView {
     return [];
   }
 
-  // Called by app when the mode changes so the picker tracks the active source.
+  // Called by app when the mode changes so the second pane tracks the new
+  // source and the badges relabel.
   onModeChange() {
     if (!this.active) return;
     this.productId = this._defaultProduct();
-    this._buildPicker();
-    this._buildMainPicker();
+    this._updateBadges();
     this.render();
   }
 
@@ -222,63 +236,88 @@ export class SplitView {
     return s.productId;
   }
 
-  // Keep the main pane's highlight in step when its product changes elsewhere
-  // (e.g. the toolbar product buttons).
-  syncMainProduct() {
-    if (!this._mainPicker) return;
-    const cur = this._mainProduct();
-    this._mainPicker.querySelectorAll('.split-prod')
-      .forEach((b) => b.classList.toggle('active', b.dataset.id === cur));
+  // The product id of whichever pane the bottom UI is currently driving.
+  activeProductId() {
+    return this.activePane === 2 ? this.productId : this._mainProduct();
   }
 
-  _buildPicker() {
-    if (this._picker) this._picker.remove();
-    const div = document.createElement('div');
-    div.className = 'split-picker';
-    const label = document.createElement('span');
-    label.className = 'split-picker-label';
-    label.textContent = 'PANE 2';
-    div.appendChild(label);
-    for (const [id, txt] of this._productList()) {
-      const b = document.createElement('button');
-      b.textContent = txt;
-      b.className = 'split-prod' + (id === this.productId ? ' active' : '');
-      b.addEventListener('click', () => {
-        this.productId = id;
-        div.querySelectorAll('.split-prod').forEach((x) => x.classList.toggle('active', x === b));
-        this.render();
-      });
-      div.appendChild(b);
-    }
-    document.getElementById('map2').appendChild(div);
-    this._picker = div;
+  // Set pane 2's product (called by the app when the bottom UI is aimed here).
+  setProduct(id) {
+    this.productId = id;
+    this._updateBadges();
+    this.render();
   }
 
-  // A matching picker on the main (left/top) pane so each panel's data can be
-  // chosen by clicking that panel. Selecting here drives the main app's product
-  // through ctx.setMainProduct, reusing the normal product-switch path.
-  _buildMainPicker() {
-    if (this._mainPicker) this._mainPicker.remove();
-    const div = document.createElement('div');
-    div.className = 'split-picker split-picker-main';
-    const label = document.createElement('span');
-    label.className = 'split-picker-label';
-    label.textContent = 'PANE 1';
-    div.appendChild(label);
-    const cur = this._mainProduct();
-    for (const [id, txt] of this._productList()) {
-      const b = document.createElement('button');
-      b.textContent = txt;
-      b.dataset.id = id;
-      b.className = 'split-prod' + (id === cur ? ' active' : '');
-      b.addEventListener('click', () => {
-        div.querySelectorAll('.split-prod').forEach((x) => x.classList.toggle('active', x === b));
-        if (this.ctx.setMainProduct) this.ctx.setMainProduct(id);
-      });
-      div.appendChild(b);
+  // ---- Pane selection: click a panel to aim the bottom UI at it ----
+  _bindPaneSelect() {
+    this._sel1 = () => this.setActivePane(1);
+    this._sel2 = () => this.setActivePane(2);
+    const a = document.getElementById('map');
+    const b = document.getElementById('map2');
+    if (a) a.addEventListener('mousedown', this._sel1, true);
+    if (a) a.addEventListener('touchstart', this._sel1, true);
+    if (b) b.addEventListener('mousedown', this._sel2, true);
+    if (b) b.addEventListener('touchstart', this._sel2, true);
+  }
+
+  _unbindPaneSelect() {
+    const a = document.getElementById('map');
+    const b = document.getElementById('map2');
+    if (a && this._sel1) { a.removeEventListener('mousedown', this._sel1, true); a.removeEventListener('touchstart', this._sel1, true); }
+    if (b && this._sel2) { b.removeEventListener('mousedown', this._sel2, true); b.removeEventListener('touchstart', this._sel2, true); }
+    this._sel1 = this._sel2 = null;
+  }
+
+  setActivePane(n) {
+    if (!this.active || this.activePane === n) return;
+    this.activePane = n;
+    this._updatePaneUI();
+    // Rebuild the bottom UI's product buttons so they highlight (and now drive)
+    // the newly selected pane.
+    if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
+  }
+
+  _updatePaneUI() {
+    const a = document.getElementById('map');
+    const b = document.getElementById('map2');
+    if (a) a.classList.toggle('pane-active', this.activePane === 1);
+    if (b) b.classList.toggle('pane-active', this.activePane === 2);
+    this._updateBadges();
+  }
+
+  // A small badge on each pane: which pane it is, its current product, and
+  // whether it's the one the bottom UI controls.
+  _buildBadges() {
+    const make = (host, n) => {
+      if (!host) return null;
+      const d = document.createElement('div');
+      d.className = 'split-badge';
+      d.addEventListener('click', (e) => { e.stopPropagation(); this.setActivePane(n); });
+      host.appendChild(d);
+      return d;
+    };
+    if (this._badge1) this._badge1.remove();
+    if (this._badge2) this._badge2.remove();
+    this._badge1 = make(document.getElementById('map'), 1);
+    this._badge2 = make(document.getElementById('map2'), 2);
+    this._updateBadges();
+  }
+
+  _updateBadges() {
+    const fmt = (n, prod) => {
+      const on = this.activePane === n;
+      return `<span class="sb-name">PANE ${n}</span>` +
+        `<span class="sb-prod">${prod || '—'}</span>` +
+        (on ? '<span class="sb-dot">● editing</span>' : '<span class="sb-dot tap">tap to edit</span>');
+    };
+    if (this._badge1) {
+      this._badge1.innerHTML = fmt(1, this._mainProduct());
+      this._badge1.classList.toggle('active', this.activePane === 1);
     }
-    document.getElementById('map').appendChild(div);
-    this._mainPicker = div;
+    if (this._badge2) {
+      this._badge2.innerHTML = fmt(2, this.productId);
+      this._badge2.classList.toggle('active', this.activePane === 2);
+    }
   }
 
   // ---- Render the chosen product into the second pane ----

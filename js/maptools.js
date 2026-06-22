@@ -86,7 +86,12 @@ export class MapTools {
     this.stormMinutes = 60;
     this._storm = null; // { a, b }
 
-    this._setup();
+    // Add our source/layers now if the style is already up, otherwise on
+    // style.load. We must NOT gate the style.load path on isStyleLoaded():
+    // inside that event the style spec is parsed (addSource/addLayer work) but
+    // pending tile sources can still make isStyleLoaded() report false, which
+    // previously made _setup bail permanently — so nothing ever drew.
+    if (map.isStyleLoaded && map.isStyleLoaded()) this._setup();
     map.on('style.load', () => this._setup());
 
     this._bindPointer();
@@ -94,9 +99,6 @@ export class MapTools {
 
   _setup() {
     const map = this.map;
-    // Sources/layers can only be added once the style is loaded; the style.load
-    // handler re-runs this after the initial load and any basemap switch.
-    if (!map.isStyleLoaded || !map.isStyleLoaded()) return;
     if (!map.getSource('mt-shapes'))
       map.addSource('mt-shapes', { type: 'geojson', data: this._fc() });
     const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };

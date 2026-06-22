@@ -598,6 +598,28 @@ function buildSiteSelect() {
   el.siteSelect.addEventListener('change', () => onSiteSwitch(el.siteSelect.value));
 }
 
+// In split view the product buttons drive whichever pane is selected. This
+// returns the product id currently shown in that pane so the buttons highlight
+// the right one.
+function activeProductId() {
+  const sv = state.splitView;
+  if (sv && sv.active && sv.activePane === 2) return sv.productId;
+  if (state.mode === 'satellite') return state.sat.productId;
+  if (state.mode === 'mrms') return state.mrms.productId;
+  if (state.mode === 'models') return state.models.productId;
+  return state.productId;
+}
+
+// If the bottom UI is aimed at split pane 2, route a product change there and
+// skip the main-map path. Returns true when it handled the click.
+function routeProductToPane(id) {
+  const sv = state.splitView;
+  if (!(sv && sv.active && sv.activePane === 2)) return false;
+  document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+  sv.setProduct(id);
+  return true;
+}
+
 function buildProductButtons() {
   if (state.mode === 'satellite') return buildSatProductButtons();
   if (state.mode === 'mrms') return buildMrmsProductButtons();
@@ -610,13 +632,13 @@ function buildProductButtons() {
     btn.className = 'product-btn';
     btn.dataset.id = id;
     btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
-    if (id === state.productId) btn.classList.add('active');
+    if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', () => {
+      if (routeProductToPane(id)) return;
       state.productId = id;
       document
         .querySelectorAll('.product-btn')
         .forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      if (state.splitView) state.splitView.syncMainProduct();
       // Reflect this product's custom palette (if any) in the .pal name label.
       el.palName.textContent = p.customPal ? `${p.customPal} → ${id}` : '';
       buildTiltList();
@@ -1109,11 +1131,11 @@ function buildSatProductButtons() {
     btn.className = 'product-btn';
     btn.dataset.id = id;
     btn.innerHTML = `<span class="pb-id">${label}</span><span class="pb-name">${name}</span>`;
-    if (id === state.sat.productId) btn.classList.add('active');
+    if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', async () => {
+      if (routeProductToPane(id)) return;
       state.sat.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      if (state.splitView) state.splitView.syncMainProduct();
       buildSatLegend();
       // Decode any extra bands this product needs from the cached file first.
       if (state.sat.scene) {
@@ -1296,11 +1318,11 @@ function buildMrmsProductButtons() {
     btn.className = 'product-btn';
     btn.dataset.id = id;
     btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
-    if (id === state.mrms.productId) btn.classList.add('active');
+    if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', () => {
+      if (routeProductToPane(id)) return;
       state.mrms.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      if (state.splitView) state.splitView.syncMainProduct();
       buildMrmsLegend();
       loadMrmsList(); // each product is a different S3 folder
     });
@@ -1447,11 +1469,11 @@ function buildModelProductButtons() {
       btn.className = 'product-btn';
       btn.dataset.id = id;
       btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
-      if (id === state.models.productId) btn.classList.add('active');
+      if (id === activeProductId()) btn.classList.add('active');
       btn.addEventListener('click', () => {
+        if (routeProductToPane(id)) return;
         state.models.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      if (state.splitView) state.splitView.syncMainProduct();
         buildModelLegend();
         loadModelFrame(); // same run/forecast hour, different field
       });
@@ -2286,12 +2308,9 @@ function setupMapTools() {
     MAPBOX_TOKEN,
     BASEMAPS,
     radarSweepFor,
-    // Change the main pane's product by reusing the normal product-switch path
-    // (the toolbar button click wires up legend/tilts/render for every mode).
-    setMainProduct: (id) => {
-      const btn = document.querySelector(`.product-btn[data-id="${id}"]`);
-      if (btn) btn.click();
-    },
+    // When the user clicks a pane to select it, repaint the product buttons so
+    // they highlight — and drive — the newly active pane.
+    onActivePaneChange: () => buildProductButtons(),
   });
   el.toolSplit.addEventListener('click', () => {
     const on = state.splitView.toggle();
