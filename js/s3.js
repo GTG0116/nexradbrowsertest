@@ -437,13 +437,26 @@ export const RADARS = [
   ['TTUL', 'Tulsa, OK (TDWR)', 36.071, -95.827],
 ];
 
-// Find the radar site nearest to a geographic point. Returns [ICAO, name, lat,
-// lon] of the closest tower by great-circle distance.
+// The TDWR terminal radars, derived from the "(TDWR)" tag in their names so the
+// list above stays the single source of truth. Used to color their map dots and
+// to drop dual-pol products (they scan to Doppler only), and to keep them out of
+// nearest-site selection (right-click / long-press snaps to NEXRAD only).
+export const TDWR_CODES = new Set(
+  RADARS.filter((r) => /\(TDWR\)/.test(r[1])).map((r) => r[0])
+);
+export function isTDWR(icao) {
+  return TDWR_CODES.has((icao || '').toUpperCase());
+}
+
+// Find the WSR-88D site nearest to a geographic point. Returns [ICAO, name, lat,
+// lon] of the closest tower by great-circle distance. TDWR towers are skipped so
+// a click/long-press always lands on the parent NEXRAD, not the terminal radar.
 export function nearestSite(lat, lon) {
   const toRad = (d) => (d * Math.PI) / 180;
   let best = null;
   let bestD = Infinity;
   for (const r of RADARS) {
+    if (TDWR_CODES.has(r[0])) continue;
     const dLat = toRad(r[2] - lat);
     const dLon = toRad(r[3] - lon);
     const a =

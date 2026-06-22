@@ -13,7 +13,7 @@
 export class ExportTool {
   // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl }
   //   canvases : one map canvas, or two for split view (left → right)
-  //   caption  : { brand, tagline, title, sub, time, stamp }
+  //   caption  : { brand, title, sub, time, stamp }
   //   legendEl : the live legend element to redraw, or null
   constructor({ getScene }) {
     this.getScene = getScene;
@@ -35,15 +35,17 @@ export class ExportTool {
     const cap = scene.caption || {};
     const legend = readLegend(scene.legendEl);
 
-    // Device-pixel ratio of the backing store, so banner text matches the map's
-    // crispness on hi-dpi screens.
-    const dpr = (maps[0].width / maps[0].clientWidth) || 1;
-    const gap = maps.length > 1 ? Math.round(2 * dpr) : 0;
+    const gap = maps.length > 1 ? 2 : 0;
     const mapW = maps.reduce((s, c) => s + c.width, 0) + gap * (maps.length - 1);
     const mapH = Math.max(...maps.map((c) => c.height));
 
-    const headerH = Math.round(70 * dpr);
-    const footerH = Math.round((legend ? 58 : 34) * dpr);
+    // Size the banners relative to the image width so the layout keeps the same
+    // proportions whatever the map's resolution/DPR — with a floor so a small
+    // (mobile) capture stays legible and a ceiling so a huge one isn't blown up.
+    const u = clamp(mapW / 78, 13, 30); // base text unit, ~px
+    const padX = Math.round(u * 1.4);
+    const headerH = Math.round(u * 4.4);
+    const footerH = Math.round(legend ? u * 4.6 : u * 2.4);
 
     const out = document.createElement('canvas');
     out.width = mapW;
@@ -51,9 +53,9 @@ export class ExportTool {
     const ctx = out.getContext('2d');
 
     // Header band.
-    ctx.fillStyle = '#0a0e14';
+    ctx.fillStyle = '#0a0f18';
     ctx.fillRect(0, 0, out.width, headerH);
-    drawHeader(ctx, cap, out.width, headerH, dpr);
+    drawHeader(ctx, cap, out.width, headerH, u, padX);
 
     // The map panes.
     let x = 0;
@@ -62,12 +64,20 @@ export class ExportTool {
       x += c.width + gap;
     }
 
-    // Footer band: legend (left) + credit/timestamp (right).
+    // Footer band: legend (left) + credit/timestamp (right), measured so they
+    // never collide.
     const fy = headerH + mapH;
-    ctx.fillStyle = '#0a0e14';
+    ctx.fillStyle = '#0a0f18';
     ctx.fillRect(0, fy, out.width, footerH);
-    if (legend) drawLegend(ctx, legend, out.width, fy, footerH, dpr);
-    drawCredit(ctx, cap, out.width, fy, footerH, dpr, !!legend);
+    // Hairline separators between the map and each band.
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(0, headerH - 1, out.width, 1);
+    ctx.fillRect(0, fy, out.width, 1);
+
+    const legendRight = legend
+      ? drawLegend(ctx, legend, padX, fy, footerH, u, out.width - padX * 2)
+      : padX;
+    drawCredit(ctx, cap, legendRight + Math.round(u), out.width - padX, fy, footerH, u);
 
     return out;
   }
@@ -192,86 +202,104 @@ export class ExportTool {
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
 const SANS = "'Space Grotesk', system-ui, sans-serif";
 
-function drawHeader(ctx, cap, W, H, dpr) {
-  const padX = Math.round(20 * dpr);
-  // Brand accent bar.
+// Header: "◆ AETHER" wordmark on the left, title + sub stacked in the middle,
+// scan time on the right. Everything is measured and clipped so the three blocks
+// never overlap, whatever the image width. `u` is the base text unit (~px).
+function drawHeader(ctx, cap, W, H, u, padX) {
+  // Brand accent bar down the left edge.
   ctx.fillStyle = '#36e2c4';
-  ctx.fillRect(0, 0, Math.round(4 * dpr), H);
+  ctx.fillRect(0, 0, Math.max(2, Math.round(u * 0.22)), H);
 
+  const midY = Math.round(H / 2);
+  // Wordmark (left), vertically centred.
   ctx.textBaseline = 'middle';
-  // Brand mark + tagline (left).
-  ctx.fillStyle = '#36e2c4';
-  ctx.font = `700 ${Math.round(15 * dpr)}px ${MONO}`;
   ctx.textAlign = 'left';
-  ctx.fillText((cap.brand || 'AETHER'), padX, Math.round(H * 0.34));
-  ctx.fillStyle = '#6b7785';
-  ctx.font = `400 ${Math.round(10 * dpr)}px ${MONO}`;
-  ctx.fillText((cap.tagline || ''), padX, Math.round(H * 0.66));
+  ctx.fillStyle = '#36e2c4';
+  ctx.font = `700 ${Math.round(u * 1.15)}px ${MONO}`;
+  const brand = cap.brand || 'AETHER';
+  ctx.fillText(brand, padX, midY);
+  const brandRight = padX + ctx.measureText(brand).width;
 
-  // Title + sub (centre-left, after the brand block).
-  const tx = padX + Math.round(150 * dpr);
-  ctx.fillStyle = '#e8eef5';
-  ctx.font = `700 ${Math.round(20 * dpr)}px ${SANS}`;
-  ctx.fillText(clip(ctx, cap.title || '', W - tx - Math.round(150 * dpr)), tx, Math.round(H * 0.34));
-  ctx.fillStyle = '#9aa7b4';
-  ctx.font = `500 ${Math.round(12 * dpr)}px ${SANS}`;
-  ctx.fillText(clip(ctx, cap.sub || '', W - tx - Math.round(150 * dpr)), tx, Math.round(H * 0.68));
-
-  // Scan time (right).
+  // Scan time (right), vertically centred — measured first so the title block
+  // knows where it must stop.
+  let timeLeft = W - padX;
   if (cap.time) {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#36e2c4';
-    ctx.font = `700 ${Math.round(16 * dpr)}px ${MONO}`;
-    ctx.fillText(cap.time, W - padX, Math.round(H * 0.5));
+    ctx.font = `700 ${Math.round(u * 1.05)}px ${MONO}`;
+    ctx.fillText(cap.time, W - padX, midY);
+    timeLeft = W - padX - ctx.measureText(cap.time).width;
+  }
+
+  // Title + sub (middle block) between the wordmark and the time.
+  const tx = brandRight + Math.round(u * 1.3);
+  const availW = timeLeft - Math.round(u * 1.3) - tx;
+  if (availW > u * 2) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#e8eef5';
+    ctx.font = `700 ${Math.round(u * 1.25)}px ${SANS}`;
+    ctx.fillText(clip(ctx, cap.title || '', availW), tx, Math.round(H * 0.36));
+    ctx.fillStyle = '#9aa7b4';
+    ctx.font = `500 ${Math.round(u * 0.82)}px ${SANS}`;
+    ctx.fillText(clip(ctx, cap.sub || '', availW), tx, Math.round(H * 0.68));
   }
   ctx.textAlign = 'left';
 }
 
-function drawLegend(ctx, legend, W, y, H, dpr) {
-  const padX = Math.round(20 * dpr);
-  const barW = Math.min(Math.round(260 * dpr), Math.round(W * 0.4));
-  const barH = Math.round(12 * dpr);
-  const barX = padX;
-  const barY = y + Math.round(H * 0.32);
+// Legend: caption above a gradient bar with low/mid/high ticks beneath. Returns
+// the x of its right edge so the credit can be placed clear of it.
+function drawLegend(ctx, legend, x, y, H, u, maxW) {
+  const barW = Math.round(clamp(maxW * 0.42, u * 8, u * 16));
+  const barH = Math.round(u * 0.62);
+  const barY = y + Math.round(H * 0.42);
 
-  // Title above the bar.
+  // Caption above the bar.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#9aa7b4';
-  ctx.font = `600 ${Math.round(10 * dpr)}px ${MONO}`;
-  ctx.fillText((legend.title || '').toUpperCase(), barX, barY - Math.round(5 * dpr));
+  ctx.font = `600 ${Math.round(u * 0.72)}px ${MONO}`;
+  ctx.fillText(clip(ctx, (legend.title || '').toUpperCase(), barW + u * 4), x, barY - Math.round(u * 0.45));
 
   // Gradient bar.
   if (legend.stops && legend.stops.length) {
-    const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
-    for (const [pos, color] of legend.stops) grad.addColorStop(Math.max(0, Math.min(1, pos)), color);
+    const grad = ctx.createLinearGradient(x, 0, x + barW, 0);
+    for (const [pos, color] of legend.stops) grad.addColorStop(clamp(pos, 0, 1), color);
     ctx.fillStyle = grad;
-    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillRect(x, barY, barW, barH);
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = Math.max(1, dpr);
-    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.lineWidth = Math.max(1, Math.round(u / 14));
+    ctx.strokeRect(x, barY, barW, barH);
   }
 
-  // Ticks under the bar.
+  // Low / mid / high ticks under the bar.
   const ticks = legend.ticks || [];
   ctx.fillStyle = '#6b7785';
-  ctx.font = `400 ${Math.round(10 * dpr)}px ${MONO}`;
-  const ty = barY + barH + Math.round(13 * dpr);
-  if (ticks[0]) { ctx.textAlign = 'left'; ctx.fillText(ticks[0], barX, ty); }
-  if (ticks[1]) { ctx.textAlign = 'center'; ctx.fillText(ticks[1], barX + barW / 2, ty); }
-  if (ticks[2]) { ctx.textAlign = 'right'; ctx.fillText(ticks[2], barX + barW, ty); }
+  ctx.font = `400 ${Math.round(u * 0.7)}px ${MONO}`;
+  const ty = barY + barH + Math.round(u * 0.95);
+  if (ticks[0]) { ctx.textAlign = 'left'; ctx.fillText(ticks[0], x, ty); }
+  if (ticks[1]) { ctx.textAlign = 'center'; ctx.fillText(ticks[1], x + barW / 2, ty); }
+  if (ticks[2]) { ctx.textAlign = 'right'; ctx.fillText(ticks[2], x + barW, ty); }
   ctx.textAlign = 'left';
+  return x + barW;
 }
 
-function drawCredit(ctx, cap, W, y, H, dpr) {
-  const padX = Math.round(20 * dpr);
+// Credit + UTC stamp, right-aligned and clipped to the space left of `maxX` after
+// the legend. Drops the wordmark suffix first, then ellipsises, when space is tight.
+function drawCredit(ctx, cap, minX, maxX, y, H, u) {
+  const avail = maxX - minX;
+  if (avail < u * 6) return; // no room — skip rather than overlap the legend
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#6b7785';
-  ctx.font = `400 ${Math.round(11 * dpr)}px ${MONO}`;
-  const credit = `${cap.stamp || ''}  ·  aether — browser-native NEXRAD scope`;
-  ctx.fillText(credit, W - padX, y + H / 2);
+  ctx.font = `400 ${Math.round(u * 0.72)}px ${MONO}`;
+  const full = `${cap.stamp || ''}  ·  aether`;
+  const text = ctx.measureText(full).width <= avail ? full : (cap.stamp || '');
+  ctx.fillText(clip(ctx, text, avail), maxX, y + H / 2);
   ctx.textAlign = 'left';
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
 }
 
 // Truncate text with an ellipsis so it fits `maxW` px in the current font.

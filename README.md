@@ -50,8 +50,11 @@ the radar imagery — entirely client-side.
   **TDWR** terminal radars (the `T###` sites guarding major airports). TDWR shares
   the same realtime feed and Archive-II message format — AWS keys just end `_V08`
   instead of `_V06`, handled transparently — so its tighter ~90 nmi, finer-beam
-  view of the near-airport environment loads through the identical path. Pick any
-  site from the dropdown, or right-click the map to jump to the nearest tower.
+  view of the near-airport environment loads through the identical path. TDWR
+  towers are drawn as **yellow** dots (NEXRAD is blue), and since they scan only to
+  Doppler, the dual-pol products (ρHV/ZDR/φDP) are hidden when a TDWR site is
+  active. Right-click / long-press snaps to the nearest **WSR-88D** only; pick a
+  TDWR explicitly from the dropdown or by clicking its dot.
 
 ## Beyond radar: Satellite and MRMS
 
