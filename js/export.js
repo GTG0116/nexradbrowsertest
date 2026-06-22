@@ -11,10 +11,12 @@
 // In split view both panes are passed in and laid out side by side.
 
 export class ExportTool {
-  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl }
+  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl, alert }
   //   canvases : one map canvas, or two for split view (left → right)
   //   caption  : { brand, title, sub, time, stamp }
   //   legendEl : the live legend element to redraw, or null
+  //   alert    : the open alert preview card to stamp over the map, or null —
+  //              { color, title, area, rows:[[label, value], …] }
   constructor({ getScene }) {
     this.getScene = getScene;
     this._scrim = null;
@@ -63,6 +65,10 @@ export class ExportTool {
       ctx.drawImage(c, x, headerH, c.width, c.height);
       x += c.width + gap;
     }
+
+    // The floating alert preview card, stamped over the map near the bottom
+    // (matching where it sits live), without its "View full briefing" footer.
+    if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u);
 
     // Footer band: legend (left) + credit/timestamp (right), measured so they
     // never collide.
@@ -296,6 +302,95 @@ function drawCredit(ctx, cap, minX, maxX, y, H, u) {
   const text = ctx.measureText(full).width <= avail ? full : (cap.stamp || '');
   ctx.fillText(clip(ctx, text, avail), maxX, y + H / 2);
   ctx.textAlign = 'left';
+}
+
+// Alert preview card: a rounded panel with a colour-coded header (warning icon
+// + event name + area) over a list of summary rows. Mirrors the live `.apv-*`
+// card, but omits the "View full briefing" footer since the export captures the
+// first popup, not the expanded briefing. Drawn centred near the bottom of the
+// map region so it overlays the scope the way it does on screen.
+function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u) {
+  const rows = alert.rows || [];
+  const cardW = Math.round(clamp(mapW * 0.32, u * 15, u * 26));
+  const pad = Math.round(u * 0.95);
+  const headH = Math.round(u * 3.1);
+  const rowH = Math.round(u * 2.0);
+  const bodyTop = headH + Math.round(u * 0.5);
+  const cardH = bodyTop + rows.length * rowH + Math.round(u * 0.5);
+  const x = Math.round(mapX + (mapW - cardW) / 2);
+  const y = Math.round(mapY + mapH - cardH - u * 1.6);
+  const r = Math.round(u * 0.7);
+
+  ctx.save();
+  // Card body + border, clipped to the rounded rect so the header band and
+  // everything inside keeps the rounded corners.
+  roundRectPath(ctx, x, y, cardW, cardH, r);
+  ctx.fillStyle = 'rgba(9, 16, 32, 0.97)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = Math.max(1, Math.round(u / 16));
+  ctx.stroke();
+  ctx.clip();
+
+  // Coloured header band.
+  ctx.fillStyle = alert.color || '#e0152d';
+  ctx.fillRect(x, y, cardW, headH);
+
+  // Warning icon, then the event title (upper) and area (lower).
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  const hx = x + pad;
+  ctx.font = `700 ${Math.round(u * 1.3)}px ${SANS}`;
+  ctx.fillText('⚠', hx, y + headH / 2);
+  const tx = hx + ctx.measureText('⚠').width + Math.round(u * 0.55);
+  const availW = x + cardW - pad - tx;
+  ctx.font = `700 ${Math.round(u * 1.05)}px ${SANS}`;
+  ctx.fillText(clip(ctx, (alert.title || '').toUpperCase(), availW), tx, y + Math.round(headH * 0.38));
+  ctx.font = `500 ${Math.round(u * 0.68)}px ${SANS}`;
+  ctx.globalAlpha = 0.9;
+  ctx.fillText(clip(ctx, alert.area || '', availW), tx, y + Math.round(headH * 0.72));
+  ctx.globalAlpha = 1;
+
+  // Summary rows: dim mono label on the left, bold value on the right, with a
+  // hairline between rows.
+  let ry = y + bodyTop + rowH / 2;
+  for (let i = 0; i < rows.length; i++) {
+    const [label, value] = rows[i];
+    if (i > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillRect(x + pad, ry - rowH / 2, cardW - pad * 2, 1);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#8a98a8';
+    ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
+    ctx.fillText(String(label).toUpperCase(), x + pad, ry);
+    const labelW = ctx.measureText(String(label).toUpperCase()).width;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#fff';
+    ctx.font = `700 ${Math.round(u * 0.95)}px ${SANS}`;
+    ctx.fillText(clip(ctx, String(value), cardW - pad * 2 - labelW - u), x + cardW - pad, ry);
+    ry += rowH;
+  }
+  ctx.restore();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Trace a rounded-rectangle path (uses the native roundRect where available).
+function roundRectPath(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 function clamp(v, lo, hi) {
