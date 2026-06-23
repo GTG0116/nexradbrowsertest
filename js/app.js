@@ -150,84 +150,99 @@ function addCoastline(map, anchor) {
   );
 }
 
-// Country (admin_level 0), state (admin_level 1) and county (admin_level 2)
-// outlines. Every basemap ships all three levels in its `admin` vector source,
-// but the stock styles only draw 0/1 — and style them wildly differently (crisp
-// on Dark/Light, almost invisible on Satellite/Streets/Outdoors) and never draw
-// counties at all. So we hide the native admin lines and redraw our own from the
-// same source with one consistent, high-contrast look (a bright line over a dark
-// casing) that reads on any basemap. Drawn at the label anchor, so the outlines
-// sit above the radar and the basemap roads, but beneath the town labels.
+// White country/state borders (plus county lines) on every basemap.
+//
+// Every Mapbox style ships country (admin_level 0) and state (admin_level 1)
+// borders in its `admin` vector source as `admin-0-boundary` / `admin-1-boundary`
+// (each with a `-bg` casing layer) — but paints them crisply only on Dark/Light
+// and almost invisibly on Satellite/Streets/Outdoors. Earlier versions tried to
+// hide those native lines and redraw our own beneath them, but the redrawn lines
+// ended up *under* the still-visible native ones, so the faint native borders
+// were what actually showed — fine on Dark/Light, invisible on the rest.
+//
+// Instead we restyle the basemap's OWN admin lines in place. They already sit in
+// the right spot in every style's layer stack (above the roads/radar, below the
+// town labels), so recoloring them to white gives one identical, high-contrast
+// look on every basemap without fighting layer order. Counties (admin_level 2)
+// aren't drawn by the stock styles, so we still add those ourselves.
 function adminSource(map) {
   const layers = map.getStyle().layers || [];
   const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
   return admin && admin.source;
 }
 
-function hideNativeBoundaries(map) {
-  // Hide only the *basemap's* admin lines — never our own redrawn outlines, which
-  // also read from the `admin` source-layer (their ids contain "outline").
-  for (const l of map.getStyle().layers || [])
-    if (l['source-layer'] === 'admin' && !/outline/.test(l.id) && map.getLayer(l.id))
-      map.setLayoutProperty(l.id, 'visibility', 'none');
-}
-
-function addBoundaries(map, anchor) {
-  if (map.getLayer('country-outline')) return;
-  const source = adminSource(map);
-  if (!source) return; // raster-only style with no vector admin source
-  // Match the basemap's own admin filtering: skip maritime/disputed segments and
-  // pin to the US worldview so we don't double-draw contested borders.
-  const filt = (level) => [
-    'all',
-    ['==', ['get', 'admin_level'], level],
-    ['==', ['get', 'maritime'], 'false'],
-    ['==', ['get', 'disputed'], 'false'],
-    ['match', ['get', 'worldview'], ['all', 'US'], true, false],
-  ];
-  const line = (id, level, paint, extra) =>
+function styleBoundaries(map, anchor) {
+  // Override paint on a native admin layer (if the style has it) and make sure
+  // it's visible — setStyle resets these to their stock paint on every load.
+  const repaint = (id, paint) => {
+    if (!map.getLayer(id)) return;
+    for (const [k, v] of Object.entries(paint)) map.setPaintProperty(id, k, v);
+    map.setLayoutProperty(id, 'visibility', 'visible');
+  };
+  // Country (admin_level 0): bright white over a dark casing for contrast on any
+  // basemap, light or dark.
+  repaint('admin-0-boundary-bg', {
+    'line-color': 'rgba(8,14,24,0.5)',
+    'line-opacity': 1,
+    'line-blur': 0,
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.6, 7, 3.8, 11, 4.8],
+  });
+  repaint('admin-0-boundary', {
+    'line-color': '#ffffff',
+    'line-opacity': 1,
+    'line-dasharray': [1, 0], // solid
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.1, 7, 1.9, 11, 2.5],
+  });
+  repaint('admin-0-boundary-disputed', {
+    'line-color': '#ffffff',
+    'line-opacity': 0.9,
+    'line-dasharray': [2, 2],
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.6, 11, 2.1],
+  });
+  // State (admin_level 1): white, thinner and dashed, over a faint dark casing.
+  repaint('admin-1-boundary-bg', {
+    'line-color': 'rgba(8,14,24,0.35)',
+    'line-opacity': 1,
+    'line-blur': 0,
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
+  });
+  repaint('admin-1-boundary', {
+    'line-color': '#ffffff',
+    'line-opacity': 0.85,
+    'line-dasharray': [3, 2],
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.5, 7, 1, 11, 1.5],
+  });
+  // Counties (admin_level 2): not drawn by the stock styles, so add our own from
+  // the same `admin` source — faint white, and only once zoomed in (there are far
+  // too many to read at continental scale).
+  if (!map.getLayer('county-outline')) {
+    const source = adminSource(map);
+    if (!source) return; // raster-only style with no vector admin source
     map.addLayer(
       {
-        id,
+        id: 'county-outline',
         type: 'line',
         source,
         'source-layer': 'admin',
-        filter: filt(level),
+        // Match the basemap's own admin filtering: skip maritime/disputed
+        // segments and pin to the US worldview.
+        filter: [
+          'all',
+          ['==', ['get', 'admin_level'], 2],
+          ['==', ['get', 'maritime'], 'false'],
+          ['==', ['get', 'disputed'], 'false'],
+          ['match', ['get', 'worldview'], ['all', 'US'], true, false],
+        ],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint,
-        ...(extra || {}),
+        minzoom: 5,
+        paint: {
+          'line-color': 'rgba(255,255,255,0.35)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
+        },
       },
       anchor
     );
-  // Drawn bottom→top: county, then state, then country, so the heavier lines win
-  // where levels run together. Counties are thin and only appear once zoomed in
-  // (there are far too many to read at continental scale).
-  line(
-    'county-outline',
-    2,
-    {
-      'line-color': 'rgba(225,232,245,0.34)',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
-    },
-    { minzoom: 5 }
-  );
-  line('state-outline-case', 1, {
-    'line-color': 'rgba(8,14,24,0.35)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
-  });
-  line('state-outline', 1, {
-    'line-color': 'rgba(236,242,255,0.6)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.4, 7, 0.9, 11, 1.4],
-    'line-dasharray': [3, 2],
-  });
-  line('country-outline-case', 0, {
-    'line-color': 'rgba(8,14,24,0.45)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.2, 7, 3.4, 11, 4.4],
-  });
-  line('country-outline', 0, {
-    'line-color': 'rgba(236,242,255,0.92)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.7, 11, 2.3],
-  });
+  }
 }
 
 function sitesGeoJSON() {
@@ -320,11 +335,11 @@ function setupOverlays(map) {
   );
 
   addCoastline(map, anchor);
-  // Redraw country/state/county borders ourselves (above the radar and roads,
-  // below the town labels) and hide the basemap's own faint ones, so the outlines
-  // look the same on every basemap instead of only showing up on Dark/Light.
-  addBoundaries(map, anchor);
-  hideNativeBoundaries(map);
+  // Restyle the basemap's own country/state borders to white (and add county
+  // lines) so they look the same on every basemap instead of only showing up on
+  // Dark/Light. The native admin lines already sit above the radar/roads and
+  // below the town labels, so recoloring them in place keeps that ordering.
+  styleBoundaries(map, anchor);
 
   refreshSiteDots();
 

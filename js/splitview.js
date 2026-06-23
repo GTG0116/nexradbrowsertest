@@ -55,56 +55,70 @@ function adminSource(map) {
   return admin && admin.source;
 }
 
-function hideNativeBoundaries(map) {
-  // Hide only the basemap's admin lines — never our own "outline" layers, which
-  // also read from the `admin` source-layer.
-  for (const l of map.getStyle().layers || [])
-    if (l['source-layer'] === 'admin' && !/outline/.test(l.id) && map.getLayer(l.id))
-      map.setLayoutProperty(l.id, 'visibility', 'none');
-}
-
-// Redraw country/state/county outlines from the basemap's `admin` source with one
-// consistent, high-contrast style, anchored above the radar but below the labels.
-function addBoundaries(map, anchor) {
-  if (map.getLayer('country-outline')) return;
-  const source = adminSource(map);
-  if (!source) return;
-  const filt = (level) => [
-    'all',
-    ['==', ['get', 'admin_level'], level],
-    ['==', ['get', 'maritime'], 'false'],
-    ['==', ['get', 'disputed'], 'false'],
-    ['match', ['get', 'worldview'], ['all', 'US'], true, false],
-  ];
-  const line = (id, level, paint, extra) =>
+// White country/state borders (plus county lines) on every basemap, matching
+// app.js. Rather than hide the basemap's native admin lines and redraw our own
+// beneath them (which left the faint native lines showing through on
+// Satellite/Streets/Outdoors), we restyle the basemap's OWN admin layers in place
+// — they already sit above the radar/roads and below the labels in every style.
+function styleBoundaries(map, anchor) {
+  const repaint = (id, paint) => {
+    if (!map.getLayer(id)) return;
+    for (const [k, v] of Object.entries(paint)) map.setPaintProperty(id, k, v);
+    map.setLayoutProperty(id, 'visibility', 'visible');
+  };
+  repaint('admin-0-boundary-bg', {
+    'line-color': 'rgba(8,14,24,0.5)',
+    'line-opacity': 1,
+    'line-blur': 0,
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.6, 7, 3.8, 11, 4.8],
+  });
+  repaint('admin-0-boundary', {
+    'line-color': '#ffffff',
+    'line-opacity': 1,
+    'line-dasharray': [1, 0],
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.1, 7, 1.9, 11, 2.5],
+  });
+  repaint('admin-0-boundary-disputed', {
+    'line-color': '#ffffff',
+    'line-opacity': 0.9,
+    'line-dasharray': [2, 2],
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.6, 11, 2.1],
+  });
+  repaint('admin-1-boundary-bg', {
+    'line-color': 'rgba(8,14,24,0.35)',
+    'line-opacity': 1,
+    'line-blur': 0,
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
+  });
+  repaint('admin-1-boundary', {
+    'line-color': '#ffffff',
+    'line-opacity': 0.85,
+    'line-dasharray': [3, 2],
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.5, 7, 1, 11, 1.5],
+  });
+  if (!map.getLayer('county-outline')) {
+    const source = adminSource(map);
+    if (!source) return;
     map.addLayer(
       {
-        id, type: 'line', source, 'source-layer': 'admin', filter: filt(level),
-        layout: { 'line-join': 'round', 'line-cap': 'round' }, paint, ...(extra || {}),
+        id: 'county-outline', type: 'line', source, 'source-layer': 'admin',
+        filter: [
+          'all',
+          ['==', ['get', 'admin_level'], 2],
+          ['==', ['get', 'maritime'], 'false'],
+          ['==', ['get', 'disputed'], 'false'],
+          ['match', ['get', 'worldview'], ['all', 'US'], true, false],
+        ],
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        minzoom: 5,
+        paint: {
+          'line-color': 'rgba(255,255,255,0.35)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
+        },
       },
       anchor
     );
-  line('county-outline', 2, {
-    'line-color': 'rgba(225,232,245,0.34)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
-  }, { minzoom: 5 });
-  line('state-outline-case', 1, {
-    'line-color': 'rgba(8,14,24,0.35)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
-  });
-  line('state-outline', 1, {
-    'line-color': 'rgba(236,242,255,0.6)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.4, 7, 0.9, 11, 1.4],
-    'line-dasharray': [3, 2],
-  });
-  line('country-outline-case', 0, {
-    'line-color': 'rgba(8,14,24,0.45)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.2, 7, 3.4, 11, 4.4],
-  });
-  line('country-outline', 0, {
-    'line-color': 'rgba(236,242,255,0.92)',
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.7, 11, 2.3],
-  });
+  }
 }
 
 export class SplitView {
@@ -211,10 +225,9 @@ export class SplitView {
   // ---- Overlay layers on the second pane (drawings mirror) ----
   _setupOverlays() {
     const map = this.map;
-    // Bright, consistent country/state/county outlines above the data (matching
-    // the main map), and hide the basemap's own faint admin lines.
-    addBoundaries(map, firstLabelLayerId(map));
-    hideNativeBoundaries(map);
+    // White, consistent country/state borders (plus county lines) above the data,
+    // matching the main map.
+    styleBoundaries(map, firstLabelLayerId(map));
     if (!map.getSource('mt-shapes'))
       map.addSource('mt-shapes', { type: 'geojson', data: this.drawings });
     const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };
