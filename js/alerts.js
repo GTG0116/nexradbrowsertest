@@ -10,10 +10,10 @@
 // Two flavours of "upgrade" are applied on top of the raw NWS event name:
 //   • Impact-Based Warning damage tags — a Tornado Warning tagged CONSIDERABLE
 //     becomes a PDS Tornado Warning (pink); tagged CATASTROPHIC it becomes a
-//     Tornado Emergency (purple). A Flash Flood Warning tagged CONSIDERABLE
-//     becomes a PDS Flash Flood Warning (pink); tagged CATASTROPHIC it becomes
-//     a Flash Flood Emergency (a darker, distinct green). Severe Thunderstorm
-//     damage threats are noted as tags too.
+//     Tornado Emergency (purple). A Flash Flood Warning tagged CATASTROPHIC
+//     becomes a Flash Flood Emergency (a darker, distinct green); a CONSIDERABLE
+//     tag stays a normal Flash Flood Warning. Severe Thunderstorm damage
+//     threats are noted as tags too.
 //   • Free-text scan — watches (and anything else) whose text contains
 //     "PARTICULARLY DANGEROUS SITUATION" / "EXTREMELY DANGEROUS SITUATION" are
 //     relabelled "PDS <event>" / "EDS <event>" even when no structured tag is
@@ -120,16 +120,12 @@ export function classifyAlert(feature) {
   }
 
   const ffwThreat = (firstParam(params, 'flashFloodDamageThreat') || '').toUpperCase();
-  if (event === 'Flash Flood Warning') {
-    if (ffwThreat === 'CATASTROPHIC') {
-      display = 'Flash Flood Emergency';
-      color = FLASH_FLOOD_EMERGENCY_GREEN;
-      upgraded = true;
-    } else if (ffwThreat === 'CONSIDERABLE') {
-      display = 'PDS Flash Flood Warning';
-      color = PDS_PINK;
-      upgraded = true;
-    }
+  if (event === 'Flash Flood Warning' && ffwThreat === 'CATASTROPHIC') {
+    // CONSIDERABLE stays a normal Flash Flood Warning; only CATASTROPHIC is
+    // upgraded to a Flash Flood Emergency.
+    display = 'Flash Flood Emergency';
+    color = FLASH_FLOOD_EMERGENCY_GREEN;
+    upgraded = true;
   }
 
   // Text scan for PDS/EDS phrasing (mainly watches, where there is no tag).
