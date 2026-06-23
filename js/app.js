@@ -2381,7 +2381,13 @@ function setupSheetPager() {
   }, { passive: true });
 }
 
-const mqMobile = window.matchMedia('(max-width: 900px)');
+// The touch-first "dock + settings sheet" layout is now the universal layout on
+// every screen — phones, iPads and desktops alike. The desktop multi-rail layout
+// was retired in favour of the same simple experience everywhere (the CSS scales
+// the dock/sheet up for tablet and desktop widths). This query therefore always
+// matches; it's kept as a matchMedia so the rest of the code can keep asking
+// "are we in the dock layout?" unchanged.
+const mqMobile = window.matchMedia('(min-width: 0px)');
 function applyResponsiveLayout() {
   const mobile = mqMobile.matches;
   document.querySelector('.app').classList.toggle('mobile', mobile);
@@ -2900,10 +2906,13 @@ function buildExportScene() {
     if (state.splitView.map.redraw) state.splitView.map.redraw();
     canvases.push(state.splitView.map.getCanvas());
   }
-  // If a compact alert preview card is open, include it in the export (minus
-  // its "View full briefing" footer) so the screenshot shows the alert too.
-  const alert = state.alerts ? state.alerts.exportPreview() : null;
-  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert };
+  // Alert overlays: if the full briefing is open, capture the whole detail view
+  // as it appears on screen (a side panel over the scope). Otherwise, if the
+  // compact preview card is open, stamp that instead (minus its "View full
+  // briefing" footer). The full briefing takes precedence over the card.
+  const briefing = state.alerts ? state.alerts.exportDetail() : null;
+  const alert = briefing ? null : (state.alerts ? state.alerts.exportPreview() : null);
+  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert, briefing };
 }
 
 // Describe what's on screen for the export banner: a title, a product/source

@@ -432,6 +432,12 @@ export class AlertsController {
     this.enabled = true;
     this.selectedId = null;
 
+    // Extra maps that mirror the alert polygons (e.g. the split-view second
+    // pane). Each must already carry an `alerts` GeoJSON source + fill/line
+    // layers; we just keep their source data in lock-step with the main map.
+    this.mirrors = [];
+    this._lastFeatures = [];
+
     // The polygons are drawn by the GL `alerts-fill` (below radar) and
     // `alerts-line` (above radar) layers that app.js inserts into the basemap
     // stack; this controller just feeds the `alerts` source the features in
@@ -492,11 +498,33 @@ export class AlertsController {
     this.groupIndex = 0;
   }
 
-  // Push a GeoJSON FeatureCollection to the `alerts` source (no-op until the
-  // style/layers exist).
+  // Push a GeoJSON FeatureCollection to the `alerts` source on the main map and
+  // every registered mirror (no-op for any map whose style/layers don't exist
+  // yet). Remembers the last set so a mirror registered later can be primed.
   _setSourceData(features) {
-    const src = this.map.getSource && this.map.getSource('alerts');
-    if (src) src.setData({ type: 'FeatureCollection', features });
+    this._lastFeatures = features;
+    const apply = (map) => {
+      const src = map && map.getSource && map.getSource('alerts');
+      if (src) src.setData({ type: 'FeatureCollection', features });
+    };
+    apply(this.map);
+    for (const m of this.mirrors) apply(m);
+  }
+
+  // Register a second map that should show the same alert polygons, and prime it
+  // with the current features. Safe to call again after the mirror's style is
+  // reloaded (e.g. a basemap switch rebuilds its empty `alerts` source) — it
+  // re-pushes the latest features without duplicating the registration.
+  addMirror(map) {
+    if (!map) return;
+    if (!this.mirrors.includes(map)) this.mirrors.push(map);
+    const src = map.getSource && map.getSource('alerts');
+    if (src) src.setData({ type: 'FeatureCollection', features: this._lastFeatures });
+  }
+
+  removeMirror(map) {
+    const i = this.mirrors.indexOf(map);
+    if (i >= 0) this.mirrors.splice(i, 1);
   }
 
   setEnabled(on) {
@@ -678,6 +706,56 @@ export class AlertsController {
       title: a.cls.display,
       area: (p.areaDesc || '').split(';')[0],
       rows,
+    };
+  }
+
+  // Structured snapshot of the open full briefing for the export tool, so the
+  // exported image can reproduce the whole alert detail view as it appears on
+  // screen. Returns null when the full briefing isn't open.
+  exportDetail() {
+    if (!this.els.detail || this.els.detail.hidden) return null;
+    const a = this.alerts.find((x) => x.id === this.selectedId);
+    if (!a) return null;
+    const p = a.feature.properties;
+    const params = p.parameters || {};
+
+    const hail = firstParam(params, 'maxHailSize');
+    const wind = firstParam(params, 'maxWindGust');
+    const tor = firstParam(params, 'tornadoDetection');
+    const hazards = [];
+    if (hail) hazards.push(['HAIL', `${hail}${/in/i.test(hail) ? '' : ' in'}`]);
+    if (wind) hazards.push(['WIND', String(wind)]);
+    if (tor) hazards.push(['TORNADO', String(tor).toUpperCase()]);
+
+    const motion = parseMotion(firstParam(params, 'eventMotionDescription'));
+    const g = guidanceFor(a.cls);
+
+    const tags = [];
+    for (const [key, label] of TAG_KEYS) {
+      let val = firstParam(params, key);
+      if (!val) continue;
+      if (key === 'maxHailSize' && !/in/i.test(val)) val = `${val} IN`;
+      tags.push(`${label}: ${String(val).toUpperCase()}`);
+    }
+
+    const group =
+      this.group && this.group.length > 1
+        ? { index: this.groupIndex + 1, total: this.group.length }
+        : null;
+
+    return {
+      color: a.cls.color,
+      title: a.cls.display,
+      expires: fmtTime(p.ends || p.expires),
+      hazards,
+      motion,
+      guidance: g ? { lead: g.lead, points: g.points || [] } : null,
+      issued: `Issued ${fmtTime(p.sent)} · ${p.senderName || 'NWS'}`,
+      location: p.areaDesc || '—',
+      instruction: p.instruction || '',
+      description: p.description || '',
+      tags,
+      group,
     };
   }
 

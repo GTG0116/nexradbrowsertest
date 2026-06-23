@@ -194,6 +194,8 @@ export class SplitView {
     // Detach the camera-sync listener from the main map before tearing down the
     // pane, or its next move would call jumpTo on a removed map.
     if (this._onMainMove) { this.ctx.state.map.off('move', this._onMainMove); this._onMainMove = null; }
+    // Stop mirroring alerts into this pane before its map is torn down.
+    if (this.ctx.state && this.ctx.state.alerts) this.ctx.state.alerts.removeMirror(this.map);
     if (this.map) { this.map.remove(); this.map = null; }
     this.layers = { radar: null, mrms: null, models: null, sat: null };
     // Repaint the bottom UI to reflect the main map again.
@@ -228,6 +230,33 @@ export class SplitView {
     // White, consistent country/state borders (plus county lines) above the data,
     // matching the main map.
     styleBoundaries(map, firstLabelLayerId(map));
+
+    // Live NWS alert polygons, mirrored from the main map so the second pane
+    // (the top panel in the stacked split) shows the same watches and
+    // warnings. Fill sits below the data layer (like the main scope); the
+    // outline sits above the data but beneath the basemap labels. The
+    // AlertsController feeds these via addMirror() below.
+    if (!map.getSource('alerts'))
+      map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    if (!map.getLayer('alerts-fill'))
+      map.addLayer(
+        {
+          id: 'alerts-fill', type: 'fill', source: 'alerts',
+          paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
+        },
+        dataLayerAnchor(map)
+      );
+    if (!map.getLayer('alerts-line'))
+      map.addLayer(
+        {
+          id: 'alerts-line', type: 'line', source: 'alerts',
+          paint: { 'line-color': ['get', 'color'], 'line-width': 2.5, 'line-opacity': 0.95 },
+        },
+        firstLabelLayerId(map)
+      );
+    const alertsCtl = this.ctx.state && this.ctx.state.alerts;
+    if (alertsCtl) alertsCtl.addMirror(map);
+
     if (!map.getSource('mt-shapes'))
       map.addSource('mt-shapes', { type: 'geojson', data: this.drawings });
     const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };

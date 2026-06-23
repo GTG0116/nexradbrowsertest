@@ -1268,9 +1268,12 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
-/* Phones / narrow tablets: the map goes full-bleed and all the controls live in
-   a bottom dock that expands into a settings sheet. */
-@media (max-width: 900px) {
+/* Universal layout: on every screen — phones, iPads and desktops — the map goes
+   full-bleed and all the controls live in a bottom dock that expands into a
+   settings sheet. (Larger screens scale this up in the iPad/desktop tier below.)
+   This used to be gated to `max-width: 900px`; it is now always on so desktop
+   gets the same simple, touch-first experience as the tablet. */
+@media (min-width: 0px) {
   .app {
     padding: 0;
     gap: 0;
@@ -1358,6 +1361,137 @@ input[type='range']::-moz-range-thumb {
 @media (max-width: 520px) {
   .product-grid {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* ===========================================================================
+   iPad & desktop tier — the SAME mobile dock/sheet UI as on phones, just scaled
+   up to the larger canvas. Desktop deliberately mirrors the iPad experience:
+   a full-bleed map with a roomy bottom dock and a centred settings sheet, rather
+   than the old multi-rail desktop layout. Touch targets, type and the floating
+   cards all grow; the dock and sheet are width-capped and centred so they never
+   stretch awkwardly wide on a large monitor.
+   =========================================================================== */
+@media (min-width: 760px) {
+  /* Roomier dock, capped + centred. */
+  .mobile-dock {
+    gap: 12px;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 14px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  .dock-status {
+    padding: 12px 18px;
+    border-radius: 16px;
+    gap: 14px;
+  }
+  .dock-prod {
+    font-size: 19px;
+  }
+  .dock-meta b {
+    font-size: 16px;
+  }
+  .dock-meta span {
+    font-size: 13px;
+  }
+  .dock-caret {
+    font-size: 14px;
+  }
+  .dock-tool,
+  .dock-tool-slot {
+    width: 62px;
+  }
+  .dock-tool {
+    font-size: 22px;
+    border-radius: 16px;
+  }
+  .dock-tool-more {
+    width: 52px;
+    height: 26px;
+    font-size: 15px;
+  }
+  .dock-tool-menu {
+    min-width: 240px;
+    /* Keep the chooser aligned to the right edge of the now centred + capped
+       dock instead of the far screen edge. */
+    right: calc((100% - min(880px, 100%)) / 2 + 14px);
+  }
+
+  /* Match the dock: centre + cap the playback bar (centred via margin so its
+     own transforms, if any, stay free). */
+  .playback-bar {
+    left: 50%;
+    right: auto;
+    width: min(880px, calc(100% - 36px));
+    margin-left: calc(min(880px, calc(100% - 36px)) * -0.5);
+  }
+
+  /* Centred, width-capped settings sheet (centred via margin so the swipe/open
+     translateY transforms never fight a horizontal translate). */
+  .mobile-sheet {
+    width: min(760px, 96vw);
+    left: 50%;
+    right: auto;
+    margin-left: calc(min(760px, 96vw) * -0.5);
+    max-height: 78vh;
+    border-radius: 22px 22px 0 0;
+    padding: 0 20px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  .sheet-tab {
+    font-size: 14px;
+    padding: 9px 16px;
+    max-width: 200px;
+  }
+  .sheet-page {
+    gap: 16px;
+  }
+  .product-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+  }
+  .product-btn,
+  .ghost-btn,
+  .pal-btn,
+  .tilt-btn,
+  .vol-btn,
+  .alert-row {
+    min-height: 50px;
+  }
+  .mobile-sheet .vol-list,
+  .mobile-sheet .alert-list {
+    max-height: 320px;
+  }
+
+  /* Floating cards grow to match the larger scope. */
+  .alert-preview-card {
+    width: 460px;
+  }
+  /* The full alert briefing reads as a side panel (like a scaled-up phone), not
+     a full-bleed wall of text, on the bigger canvas. */
+  .alert-detail-panel {
+    width: 460px;
+    max-width: 60vw;
+  }
+  /* Keep the floating legend a compact, left-anchored card rather than a
+     full-bleed bar across a wide monitor. */
+  .legend {
+    font-size: 12px;
+    right: auto;
+    width: min(440px, 60vw);
+  }
+}
+
+/* Wider desktops: a touch more breathing room again. */
+@media (min-width: 1200px) {
+  .mobile-dock {
+    max-width: 960px;
+  }
+  .dock-tool-menu {
+    right: calc((100% - min(960px, 100%)) / 2 + 14px);
+  }
+  .mobile-sheet {
+    width: min(820px, 90vw);
+    margin-left: calc(min(820px, 90vw) * -0.5);
   }
 }
 
@@ -2147,7 +2281,9 @@ input[type='range']::-moz-range-thumb {
 #map2[hidden] {
   display: none;
 }
-/* Desktop: side-by-side. Main map shrinks to the left half. */
+/* Base side-by-side split (kept as a fallback); the universal stacked rules
+   below override this on every width so the split matches the iPad experience —
+   main map on the bottom, the compared product on top. */
 .map-wrap.split #map {
   right: 50%;
 }
@@ -2205,9 +2341,10 @@ input[type='range']::-moz-range-thumb {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 
-/* Mobile: stack panes (chosen product on top), and keep the toolbar reachable
-   above the bottom dock. */
-@media (max-width: 900px) {
+/* Stacked split panes (chosen product on top), and keep the toolbar reachable
+   above the bottom dock. Applies on every width now that the dock layout is
+   universal; the iPad/desktop tier keeps the same stacked arrangement. */
+@media (min-width: 0px) {
   .map-wrap.split #map {
     right: 0;
     top: 50%;

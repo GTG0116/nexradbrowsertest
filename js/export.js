@@ -11,12 +11,16 @@
 // In split view both panes are passed in and laid out side by side.
 
 export class ExportTool {
-  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl, alert }
+  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl, alert, briefing }
   //   canvases : one map canvas, or two for split view (left → right)
   //   caption  : { brand, title, sub, time, stamp }
   //   legendEl : the live legend element to redraw, or null
   //   alert    : the open alert preview card to stamp over the map, or null —
   //              { color, title, area, rows:[[label, value], …] }
+  //   briefing : the open full alert detail view to reproduce as an on-screen
+  //              side panel, or null — { color, title, expires, hazards, motion,
+  //              guidance, issued, location, instruction, description, tags,
+  //              group }. Takes precedence over `alert` when present.
   constructor({ getScene }) {
     this.getScene = getScene;
     this._scrim = null;
@@ -76,9 +80,12 @@ export class ExportTool {
       x += c.width + gap;
     }
 
-    // The floating alert preview card, stamped over the map near the bottom
-    // (matching where it sits live), without its "View full briefing" footer.
-    if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile);
+    // The full alert briefing reproduced as the on-screen side panel takes
+    // precedence; otherwise the floating preview card is stamped over the map
+    // near the bottom (matching where it sits live), without its "View full
+    // briefing" footer.
+    if (scene.briefing) drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile);
+    else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile);
 
     // Footer band: legend (left) + credit/timestamp (right), measured so they
     // never collide.
@@ -393,6 +400,218 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
   ctx.restore();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
+}
+
+// Full alert briefing: reproduce the on-screen detail panel — a dark side panel
+// over the scope with a colour-coded header, hazard boxes, safety guidance,
+// location and the official alert text — so the export matches what the viewer
+// sees. The panel runs the full height of the map region and its content is
+// clipped to that box (rendered from the top, like the live panel scrolled to
+// its start). On phones the live panel is full-width, so the export panel is too.
+function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
+  const panelW = mobile ? mapW : Math.round(clamp(mapW * 0.36, u * 16, u * 30));
+  const x0 = mapX;
+  const y0 = mapY;
+  const panelH = mapH;
+  const pad = Math.round(u * 1.2);
+  const innerW = panelW - pad * 2;
+  const bottom = y0 + panelH - pad;
+  let y = y0;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, panelW, panelH);
+  ctx.clip();
+
+  // Panel background + right-edge hairline.
+  const grad = ctx.createLinearGradient(0, y0, 0, y0 + panelH);
+  grad.addColorStop(0, 'rgba(8,14,28,0.97)');
+  grad.addColorStop(1, 'rgba(6,10,22,0.98)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(x0, y0, panelW, panelH);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillRect(x0 + panelW - 1, y0, 1, panelH);
+
+  // Optional "X / Y alerts here" cycle bar (stacked alerts).
+  if (b.group) {
+    const barH = Math.round(u * 2.1);
+    ctx.fillStyle = 'rgba(10,18,34,0.92)';
+    ctx.fillRect(x0, y, panelW, barH);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(x0, y + barH - 1, panelW, 1);
+    ctx.fillStyle = '#9aa7b4';
+    ctx.font = `600 ${Math.round(u * 0.78)}px ${MONO}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${b.group.index} / ${b.group.total} alerts here`, x0 + panelW / 2, y + barH / 2);
+    y += barH;
+  }
+
+  // Coloured header band: warning icon + (wrapping) event title.
+  const headH = Math.round(u * 3.0);
+  ctx.fillStyle = b.color || '#e0152d';
+  ctx.fillRect(x0, y, panelW, headH);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.font = `700 ${Math.round(u * 1.3)}px ${SANS}`;
+  ctx.fillText('⚠', x0 + pad, y + headH / 2);
+  const hx = x0 + pad + ctx.measureText('⚠').width + Math.round(u * 0.5);
+  ctx.font = `700 ${Math.round(u * 1.12)}px ${SANS}`;
+  const titleLines = wrapText(ctx, (b.title || '').toUpperCase(), x0 + panelW - pad - hx).slice(0, 2);
+  const tlh = Math.round(u * 1.3);
+  let ty = y + headH / 2 - ((titleLines.length - 1) * tlh) / 2;
+  for (const ln of titleLines) {
+    ctx.fillText(ln, hx, ty);
+    ty += tlh;
+  }
+  y += headH + Math.round(u * 1.1);
+  ctx.textBaseline = 'alphabetic';
+
+  // ---- Content helpers (advance the shared y cursor, clip at the panel) ----
+  const sectionLabel = (t) => {
+    if (y > bottom) return;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#7c8a99';
+    ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
+    ctx.fillText(String(t).toUpperCase(), x0 + pad, y);
+    y += Math.round(u * 1.05);
+  };
+  const paragraph = (t, opts = {}) => {
+    if (!t || y > bottom) return;
+    const size = opts.size || 0.92;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = opts.color || '#cdd6e0';
+    ctx.font = `${opts.weight || '400'} ${Math.round(u * size)}px ${SANS}`;
+    const lh = Math.round(u * size * 1.42);
+    for (const block of String(t).split(/\n+/)) {
+      for (const ln of wrapText(ctx, block, innerW)) {
+        if (y > bottom) return;
+        ctx.fillText(ln, x0 + pad, y);
+        y += lh;
+      }
+      y += Math.round(lh * 0.25);
+    }
+  };
+  const bullet = (t) => {
+    if (!t || y > bottom) return;
+    const size = 0.88;
+    const lh = Math.round(u * size * 1.42);
+    const bx = x0 + pad + Math.round(u * 1.0);
+    ctx.font = `400 ${Math.round(u * size)}px ${SANS}`;
+    const lines = wrapText(ctx, t, innerW - Math.round(u * 1.0));
+    for (let i = 0; i < lines.length; i++) {
+      if (y > bottom) return;
+      ctx.textAlign = 'left';
+      if (i === 0) {
+        ctx.fillStyle = b.color || '#36e2c4';
+        ctx.fillText('•', x0 + pad, y);
+      }
+      ctx.fillStyle = '#cdd6e0';
+      ctx.fillText(lines[i], bx, y);
+      y += lh;
+    }
+  };
+  const gap = (k = 1) => { y += Math.round(u * 0.9 * k); };
+
+  // EXPIRES.
+  sectionLabel('Expires');
+  paragraph(b.expires, { color: '#fff', weight: '700', size: 1.0 });
+  gap();
+
+  // Hazard boxes (HAIL / WIND / TORNADO).
+  if (b.hazards && b.hazards.length && y < bottom) {
+    const n = Math.min(b.hazards.length, 3);
+    const bgap = Math.round(u * 0.5);
+    const bw = Math.round((innerW - (n - 1) * bgap) / n);
+    const bh = Math.round(u * 2.6);
+    let bxp = x0 + pad;
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < b.hazards.length && i < 3; i++) {
+      const [lab, val] = b.hazards[i];
+      roundRectPath(ctx, bxp, y, bw, bh, Math.round(u * 0.4));
+      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth = Math.max(1, Math.round(u / 18));
+      ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#8a98a8';
+      ctx.font = `600 ${Math.round(u * 0.55)}px ${MONO}`;
+      ctx.fillText(lab, bxp + bw / 2, y + bh * 0.36);
+      ctx.fillStyle = '#fff';
+      ctx.font = `700 ${Math.round(u * 0.85)}px ${SANS}`;
+      ctx.fillText(clip(ctx, val, bw - u * 0.5), bxp + bw / 2, y + bh * 0.72);
+      bxp += bw + bgap;
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    y += bh + Math.round(u * 1.0);
+  }
+
+  // Storm motion.
+  if (b.motion) {
+    paragraph(b.motion, { color: b.color, weight: '700', size: 0.88 });
+    gap(0.5);
+  }
+
+  // Safety guidance: lead paragraph + bullet points.
+  if (b.guidance) {
+    sectionLabel('Safety guidance');
+    paragraph(b.guidance.lead, { color: '#e8eef5', size: 0.95 });
+    gap(0.3);
+    for (const pt of b.guidance.points || []) bullet(pt);
+    gap();
+  }
+
+  // Issued line.
+  paragraph(b.issued, { color: '#7c8a99', size: 0.72 });
+  gap(0.6);
+
+  // Location.
+  sectionLabel('Location');
+  paragraph(b.location, { size: 0.88 });
+  gap();
+
+  // What to do (NWS instruction).
+  if (b.instruction) {
+    sectionLabel('What to do');
+    paragraph(b.instruction, { size: 0.9 });
+    gap();
+  }
+
+  // Full alert text.
+  sectionLabel('Full alert text');
+  paragraph(b.description, { color: '#aeb8c4', size: 0.84 });
+  gap();
+
+  // Tags.
+  if (b.tags && b.tags.length) {
+    sectionLabel('Tags');
+    paragraph(b.tags.join('    '), { color: b.color, weight: '600', size: 0.74 });
+  }
+
+  ctx.restore();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Word-wrap `text` to fit `maxW` px in the current font, returning the lines.
+function wrapText(ctx, text, maxW) {
+  const words = String(text == null ? '' : text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const t = line ? line + ' ' + w : w;
+    if (line && ctx.measureText(t).width > maxW) {
+      lines.push(line);
+      line = w;
+    } else {
+      line = t;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [''];
 }
 
 // Trace a rounded-rectangle path (uses the native roundRect where available).
