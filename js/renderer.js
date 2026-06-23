@@ -50,5 +50,5 @@ export function sampleAt(sweep, product, lat, lon, site) {
   if (g < 0 || g >= best.gateCount) return { value: null, range, az };
   const code = best.raw[g];
   if (code < 2) return { value: null, range, az };
-  return { value: (code - best.offset) / best.scale, range, az };
+  return { value: (code - best.offset) / (best.scale || 1), range, az };
 }
