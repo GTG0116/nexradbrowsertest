@@ -14,6 +14,13 @@
   --warn: #ff9d3c;
   --glow: 0 0 24px rgba(54, 224, 200, 0.25);
   --radius: 14px;
+  /* Motion system: shared durations + easing so every transition feels of a
+     piece. --ease-out matches the bottom sheet's existing curve. */
+  --dur-fast: 0.12s;
+  --dur-base: 0.18s;
+  --dur-slow: 0.28s;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -442,10 +449,16 @@ button {
   z-index: 500;
   display: none;
   box-shadow: var(--glow);
-  animation: blink 1.1s steps(2) infinite;
 }
 .decoding.show {
   display: block;
+  /* decIn animates transform (a gentle scale-up entrance); blink animates
+     opacity — separate properties, so they don't fight. */
+  animation: decIn var(--dur-base) var(--ease-out), blink 1.1s steps(2) infinite;
+}
+@keyframes decIn {
+  from { transform: translate(-50%, -50%) scale(0.9); }
+  to { transform: translate(-50%, -50%) scale(1); }
 }
 
 .progress {
@@ -457,7 +470,7 @@ button {
   background: linear-gradient(90deg, var(--accent-2), var(--accent));
   box-shadow: 0 0 12px var(--accent);
   opacity: 0;
-  transition: width 0.15s linear;
+  transition: width var(--dur-fast) linear, opacity var(--dur-fast) var(--ease-out);
   z-index: 500;
 }
 .progress.show {
@@ -625,13 +638,28 @@ input[type='range']::-moz-range-thumb {
 .product-cat .cat-caret {
   display: inline-block;
   font-size: 9px;
-  transition: transform 0.16s ease;
+  will-change: transform;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 .product-cat-section.collapsed .cat-caret {
   transform: rotate(-90deg);
 }
+/* Collapse the category grid with a height/opacity slide instead of an instant
+   display:none. Scoped to category sections so the flat product grids (radar /
+   MRMS) are untouched. The ceiling is generous; real grids are far shorter. */
+.product-cat-section .product-grid {
+  overflow: hidden;
+  max-height: 800px;
+  opacity: 1;
+  transition: max-height var(--dur-slow) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out),
+    margin var(--dur-base) var(--ease-out);
+}
 .product-cat-section.collapsed .product-grid {
-  display: none;
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  margin-bottom: 0;
 }
 .product-btn {
   display: flex;
@@ -823,9 +851,21 @@ input[type='range']::-moz-range-thumb {
   justify-content: center;
   padding: 0 16px;
   pointer-events: none;
+  opacity: 1;
+  transform: none;
+  will-change: opacity, transform;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
+/* Animate the card in and out (fade + rise) rather than popping. */
 .alert-preview[hidden] {
-  display: none;
+  display: flex !important;
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
 }
 .alert-preview-card {
   pointer-events: auto;
@@ -836,11 +876,6 @@ input[type='range']::-moz-range-thumb {
   background: linear-gradient(180deg, rgba(18, 30, 54, 0.97), rgba(8, 14, 28, 0.97));
   border: 1px solid var(--panel-edge);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), var(--glow);
-  animation: apvIn 0.16s ease-out;
-}
-@keyframes apvIn {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: none; }
 }
 .apv-head {
   --ac: #e0152d;
@@ -989,9 +1024,16 @@ input[type='range']::-moz-range-thumb {
   inset: 0;
   z-index: 1200;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-out);
 }
+/* Slide the briefing panel in from the left and fade the scene, both ways. */
 .alert-detail[hidden] {
-  display: none;
+  display: block !important;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
 }
 .alert-detail-panel {
   position: absolute;
@@ -1005,6 +1047,12 @@ input[type='range']::-moz-range-thumb {
   background: linear-gradient(180deg, rgba(8, 14, 28, 0.97), rgba(6, 10, 22, 0.97));
   border-right: 1px solid var(--panel-edge);
   box-shadow: 6px 0 40px rgba(0, 0, 0, 0.6);
+  will-change: transform;
+  transform: translateX(0);
+  transition: transform var(--dur-slow) var(--ease-out);
+}
+.alert-detail[hidden] .alert-detail-panel {
+  transform: translateX(-100%);
 }
 /* Cycle bar for stacked alerts at one location. Sticks to the top of the
    briefing panel so the arrows stay reachable while you scroll the text. */
@@ -1496,14 +1544,59 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* These overlays carry author display rules, so the bare [hidden] attribute
-   needs an explicit override to actually hide them. */
-.mobile-dock[hidden],
-.playback-bar[hidden],
+   needs an explicit override to actually hide them. The mobile sheet is animated
+   in JS (transform) and the sheet sections are plain layout, so they keep the
+   instant display:none; the dock, playback bar, scrim and crosshair are animated
+   via opacity/visibility below instead. */
 .mobile-sheet[hidden],
-.sheet-scrim[hidden],
-.sheet-section[hidden],
-.crosshair[hidden] {
+.sheet-section[hidden] {
   display: none !important;
+}
+
+/* Bottom dock ↔ playback bar swap, the sheet scrim and the inspect crosshair all
+   fade (and the bars slide) in and out instead of popping. They stay laid out
+   while hidden — position:absolute, so no layout cost — and visibility flips
+   after the fade so they're inert when gone. */
+.mobile-dock,
+.playback-bar {
+  opacity: 1;
+  transform: translateY(0);
+  will-change: opacity, transform;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.mobile-dock[hidden],
+.playback-bar[hidden] {
+  display: flex !important;
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
+}
+.sheet-scrim {
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.sheet-scrim[hidden] {
+  display: block !important;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
+}
+.crosshair {
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.crosshair[hidden] {
+  display: block !important;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease-out),
+    visibility 0s linear var(--dur-fast);
 }
 
 /* ---------------- Inspect crosshair ---------------- */
@@ -1691,9 +1784,22 @@ input[type='range']::-moz-range-thumb {
   border-radius: 12px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
   z-index: 800;
+  transform-origin: bottom right;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  will-change: opacity, transform;
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .dock-tool-menu[hidden] {
-  display: none;
+  display: flex !important;
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    visibility 0s linear var(--dur-fast);
 }
 .dock-tool-item {
   display: flex;
@@ -1791,6 +1897,7 @@ input[type='range']::-moz-range-thumb {
   border-radius: 18px 18px 0 0;
   box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.65);
   padding: 0 12px calc(16px + env(safe-area-inset-bottom, 0px));
+  will-change: transform;
 }
 .sheet-header {
   position: relative;
@@ -1948,9 +2055,21 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   background: radial-gradient(1100px 700px at 60% -10%, #0c1730 0%, var(--bg) 60%),
     var(--bg);
+  will-change: opacity, transform;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
+/* Animate open/close: keep it laid out (defeat the global [hidden] display:none)
+   and fade + slide instead, so it doesn't pop. */
 .sounding[hidden] {
-  display: none;
+  display: flex !important;
+  opacity: 0;
+  transform: translateY(1.5%) scale(0.995);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
 }
 .snd-head {
   flex: 0 0 auto;
@@ -2413,6 +2532,13 @@ input[type='range']::-moz-range-thumb {
   padding: 24px;
   background: rgba(2, 6, 14, 0.74);
   backdrop-filter: blur(4px);
+  animation: exScrimIn var(--dur-base) var(--ease-out);
+}
+/* Fade/scale the modal out when closing (the .closing class is set in JS just
+   before the element is removed). */
+.export-scrim.closing {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 .export-card {
   width: min(880px, 100%);
@@ -2424,6 +2550,21 @@ input[type='range']::-moz-range-thumb {
   background: var(--bg-2);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
   overflow: hidden;
+  animation: exCardIn var(--dur-base) var(--ease-out);
+}
+.export-scrim.closing .export-card {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+@keyframes exScrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes exCardIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
 }
 .export-head {
   display: flex;
@@ -2510,4 +2651,22 @@ input[type='range']::-moz-range-thumb {
 .export-btn.primary:hover:not(:disabled) {
   color: #04121a;
   box-shadow: var(--glow);
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion — honour the OS accessibility preference. Animations and
+   transitions collapse to ~instant (durations can't be 0 or transitionend /
+   the visibility-delay trick on overlays would never fire), and the spinning
+   logo / blinking indicators settle to a static frame.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
 }

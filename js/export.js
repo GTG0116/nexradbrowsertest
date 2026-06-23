@@ -213,8 +213,12 @@ export class ExportTool {
       this._onKey = null;
     }
     if (this._scrim) {
-      this._scrim.remove();
+      // Play the exit animation, then remove. Detach immediately from this._scrim
+      // so a re-open doesn't race with the pending removal.
+      const scrim = this._scrim;
       this._scrim = null;
+      scrim.classList.add('closing');
+      setTimeout(() => scrim.remove(), 200);
     }
   }
 }
