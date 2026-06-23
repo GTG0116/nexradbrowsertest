@@ -254,6 +254,8 @@ const state = {
   map: null,
   basemap: 'dark',
   showRings: true,
+  // Persist the map view, last product and settings between visits (toggleable).
+  persist: true,
   radarLayer: null,
   // In satellite / MRMS / model modes the single-site radar is hidden unless
   // this overlay toggle is switched on.
@@ -332,6 +334,7 @@ function cacheEls() {
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
   el.ringsToggle = $('#ringsToggle');
+  el.persistToggle = $('#persistToggle');
   el.dealiasToggle = $('#dealiasToggle');
   el.dealiasField = $('#dealiasField');
   el.radarOverlayField = $('#radarOverlayField');
@@ -391,6 +394,18 @@ function cacheEls() {
   el.sheetScrim = $('#sheetScrim');
   el.sheetGrip = $('#sheetGrip');
   el.sheetHeader = $('#sheetHeader');
+  // Mobile swipe carousel (pages + tabs) and the panels relocated into them.
+  el.sheetTabs = $('#sheetTabs');
+  el.sheetPager = $('#sheetPager');
+  el.pageControls = $('#pageControls');
+  el.pageSettings = $('#pageSettings');
+  el.pageMap = $('#pageMap');
+  el.sourcePanel = $('#sourcePanel');
+  el.volumePanel = $('#volumePanel');
+  el.alertsPanel = $('#alertsPanel');
+  el.productPanel = $('#productPanel');
+  el.basemapPanel = $('#basemapPanel');
+  el.metaPanel = $('#metaPanel');
   el.basemapSelect = $('#basemapSelect');
   el.sheetPlayback = $('#sheetPlayback');
   el.playSpeed = $('#playSpeed');
@@ -404,6 +419,7 @@ function cacheEls() {
   el.toolStorm = $('#toolStorm');
   el.toolMetars = $('#toolMetars');
   el.toolSplit = $('#toolSplit');
+  // (toolSounding cached above with the sounding block)
   el.toolExport = $('#toolExport');
   el.toolClear = $('#toolClear');
   el.playbackBar = $('#playbackBar');
@@ -412,9 +428,9 @@ function cacheEls() {
   el.playLabel = $('#playLabel');
   el.playClose = $('#playClose');
 
-  // HRRR sounding (Skew-T / hodograph / severe parameters).
-  el.soundingBtn = $('#soundingBtn');
-  el.dockSoundingBtn = $('#dockSoundingBtn');
+  // HRRR sounding (Skew-T / hodograph / severe parameters). The launcher now
+  // lives in the map-tools toolbar / dock tool slot (models mode only).
+  el.toolSounding = $('#toolSounding');
   el.sounding = $('#sounding');
   el.sndClose = $('#sndClose');
   el.sndMeta = $('#sndMeta');
@@ -438,8 +454,11 @@ function initMap() {
   const map = new mapboxgl.Map({
     container: 'map',
     style: (BASEMAPS[state.basemap] || BASEMAPS.dark).url,
-    center: [-97.27, 35.33], // Mapbox is [lng, lat]
-    zoom: 6,
+    // Restore the last map position from a previous visit when we have one.
+    center: state._restoreView
+      ? [state._restoreView.lng, state._restoreView.lat]
+      : [-97.27, 35.33], // Mapbox is [lng, lat]
+    zoom: state._restoreView ? state._restoreView.zoom : 6,
     minZoom: 4,
     maxZoom: 14,
     attributionControl: true,
@@ -523,6 +542,7 @@ function setBasemap(key) {
   state.styleReady = false;
   state.map.setStyle(BASEMAPS[key].url);
   if (state.splitView) state.splitView.setBasemap(BASEMAPS[key].url);
+  saveSettings();
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -558,6 +578,7 @@ function onSiteSwitch(icao) {
   refreshSiteDots();
   closeSheet();
   loadVolumeList();
+  saveSettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +709,7 @@ function buildProductButtons() {
       buildLegend();
       renderRadar();
       updateMeta();
+      saveSettings();
     });
     el.productButtons.appendChild(btn);
   }
@@ -896,7 +918,24 @@ async function loadVolumeList() {
   setStatus(`listing ${state.site}…`, true);
   buildVolumeList();
   try {
-    const vols = await listVolumes(state.site, state.date);
+    let vols = await listVolumes(state.site, state.date);
+    // If the selected UTC day has no scans (e.g. just after 00z when the current
+    // day is still empty, or a quiet gap), fall back a day at a time until one
+    // turns up, adopting that day. LIVE keeps resetting the date to "now", so the
+    // view snaps forward to the current UTC day as soon as its first scan lands.
+    if (!vols.length) {
+      const probe = new Date(state.date);
+      for (let i = 0; i < 7 && !vols.length; i++) {
+        probe.setUTCDate(probe.getUTCDate() - 1);
+        const back = await listVolumes(state.site, probe);
+        if (back.length) {
+          state.date = new Date(probe);
+          el.dateInput.value = isoDate(state.date);
+          vols = back;
+          setStatus(`no scans for that day — showing ${isoDate(state.date)}`);
+        }
+      }
+    }
     state.volumes = vols;
     buildVolumeList();
     setStatus(`${vols.length} scans available`);
@@ -1071,9 +1110,10 @@ function applyModePanels() {
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
-  // The sounding launchers (right rail + mobile dock) are HRRR-only.
-  if (el.soundingBtn) el.soundingBtn.hidden = state.mode !== 'models';
-  if (el.dockSoundingBtn) el.dockSoundingBtn.hidden = state.mode !== 'models';
+  // The sounding launcher (a map tool now) is HRRR-only.
+  if (el.toolSounding) el.toolSounding.hidden = state.mode !== 'models';
+  // Keep the dock tool slot in sync — drop the sounding tool when leaving models.
+  if (state._refreshDockTools) state._refreshDockTools();
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar';
@@ -1114,6 +1154,7 @@ function setMode(mode) {
   }
   if (state.splitView) state.splitView.onModeChange();
   updateMeta();
+  saveSettings();
 }
 
 // Dispatch refresh / live / date changes to the active source.
@@ -1150,12 +1191,14 @@ function initSatSelects() {
     state.sat.satKey = el.satSelect.value;
     state.sat._centered = false;
     loadSatScenes();
+    saveSettings();
   });
   el.sectorSelect.addEventListener('change', () => {
     state.sat.sectorKey = el.sectorSelect.value;
     state.sat._centered = false;
     applyModePanels();
     loadSatScenes();
+    saveSettings();
   });
   el.conusViewSelect.addEventListener('change', () => {
     const v = CONUS_VIEWS[+el.conusViewSelect.value];
@@ -1166,6 +1209,7 @@ function initSatSelects() {
     el.irEnhanceToggle.classList.toggle('active', state.sat.enhanceIR);
     el.irEnhanceToggle.textContent = state.sat.enhanceIR ? 'ON' : 'OFF';
     if (state.mode === 'satellite') { renderSatellite(); buildSatLegend(); }
+    saveSettings();
   });
 }
 
@@ -1191,6 +1235,7 @@ function buildSatProductButtons() {
         setStatus('GOES ready');
       }
       updateSatInfo();
+      saveSettings();
     });
     el.productButtons.appendChild(btn);
   };
@@ -1372,6 +1417,7 @@ function buildMrmsProductButtons() {
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       buildMrmsLegend();
       loadMrmsList(); // each product is a different S3 folder
+      saveSettings();
     });
     el.productButtons.appendChild(btn);
   }
@@ -1496,18 +1542,37 @@ function initModelSelects() {
   el.modelSelect.addEventListener('change', () => {
     state.models.modelKey = el.modelSelect.value;
     state._forceLatest = true;
+    saveSettings();
     loadModelList();
   });
 }
+
+// Remember which model product categories the user has expanded, so a rebuild
+// (mode switch, product pick) doesn't snap them all shut again. Everything starts
+// collapsed by default to keep the long model product list compact.
+const modelCatOpen = {};
 
 function buildModelProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-stack';
   for (const cat of MODEL_CATEGORIES) {
-    const head = document.createElement('div');
+    // Every category starts collapsed to keep the long model list compact; the
+    // user's manual expand/collapse choices are remembered across rebuilds.
+    const open = !!modelCatOpen[cat.name];
+
+    const section = document.createElement('div');
+    section.className = 'product-cat-section' + (open ? '' : ' collapsed');
+
+    const head = document.createElement('button');
+    head.type = 'button';
     head.className = 'product-cat';
-    head.textContent = cat.name;
-    el.productButtons.appendChild(head);
+    head.innerHTML = `<span class="cat-caret">▾</span><span>${cat.name}</span>`;
+    head.addEventListener('click', () => {
+      const nowOpen = section.classList.toggle('collapsed') === false;
+      modelCatOpen[cat.name] = nowOpen;
+    });
+    section.appendChild(head);
+
     const grid = document.createElement('div');
     grid.className = 'product-grid';
     for (const id of cat.products) {
@@ -1524,10 +1589,12 @@ function buildModelProductButtons() {
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
         buildModelLegend();
         loadModelFrame(); // same run/forecast hour, different field
+        saveSettings();
       });
       grid.appendChild(btn);
     }
-    el.productButtons.appendChild(grid);
+    section.appendChild(grid);
+    el.productButtons.appendChild(section);
   }
 }
 
@@ -1987,6 +2054,8 @@ function openSheet() {
   el.sheet.hidden = false;
   el.sheetScrim.hidden = false;
   document.querySelector('.app').classList.add('sheet-open');
+  // The current product's controls always lead — open on page 0 every time.
+  requestAnimationFrame(() => setSheetPage(0, false));
   // Slide up from the bottom: start off-screen, then animate to rest next frame.
   el.sheet.style.transition = 'none';
   el.sheet.style.transform = 'translateY(100%)';
@@ -2060,6 +2129,61 @@ function enableSheetSwipe() {
   handle.addEventListener('touchcancel', end, { passive: true });
 }
 
+// Distribute the control panels into the mobile swipe carousel pages. Page 0 is
+// the controls for the current product; page 1 the source settings (its mode
+// switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
+// map settings + metadata. The same DOM nodes are moved, so all wiring is intact.
+function layoutMobilePages() {
+  el.pageControls.append(el.productPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageSettings.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
+  el.pageMap.append(el.basemapPanel, el.metaPanel);
+}
+
+// Put every panel back in its rail (desktop), in the original order.
+function layoutDesktopRails() {
+  el.railLeft.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
+  el.railRight.append(
+    el.productPanel, el.basemapPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel, el.metaPanel
+  );
+}
+
+const SHEET_PAGES = 3;
+// Scroll the carousel to a page index and reflect it on the tabs.
+function setSheetPage(i, smooth = true) {
+  i = Math.max(0, Math.min(SHEET_PAGES - 1, i | 0));
+  state._sheetPage = i;
+  if (el.sheetPager) {
+    el.sheetPager.scrollTo({ left: el.sheetPager.clientWidth * i, behavior: smooth ? 'smooth' : 'auto' });
+  }
+  if (el.sheetTabs) {
+    el.sheetTabs.querySelectorAll('.sheet-tab')
+      .forEach((t) => t.classList.toggle('active', Number(t.dataset.page) === i));
+  }
+}
+
+// Tabs + native horizontal swipe both drive the carousel; keep them in sync.
+function setupSheetPager() {
+  if (!el.sheetPager) return;
+  el.sheetTabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.sheet-tab');
+    if (tab) setSheetPage(Number(tab.dataset.page));
+  });
+  let scrollRaf = null;
+  el.sheetPager.addEventListener('scroll', () => {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = null;
+      const w = el.sheetPager.clientWidth || 1;
+      const i = Math.round(el.sheetPager.scrollLeft / w);
+      if (i !== state._sheetPage) {
+        state._sheetPage = i;
+        el.sheetTabs.querySelectorAll('.sheet-tab')
+          .forEach((t) => t.classList.toggle('active', Number(t.dataset.page) === i));
+      }
+    });
+  }, { passive: true });
+}
+
 const mqMobile = window.matchMedia('(max-width: 900px)');
 function applyResponsiveLayout() {
   const mobile = mqMobile.matches;
@@ -2071,19 +2195,16 @@ function applyResponsiveLayout() {
   if ((!mobile || playing) && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
-    // In the sheet, stack Product/tilt/basemap first, then Source/volumes and
-    // Active alerts as their own full-width sections below — so the alerts list
-    // is no longer crowded out of view by the product grid.
-    if (el.railRight.parentElement !== el.sheetBody) {
-      el.sheetBody.appendChild(el.railRight);
-      el.sheetBody.appendChild(el.railLeft);
+    if (el.productPanel.parentElement !== el.pageControls) {
+      layoutMobilePages();
+      // Re-anchor the carousel to whatever page was last shown (default: controls).
+      requestAnimationFrame(() => setSheetPage(state._sheetPage || 0, false));
     }
   } else {
     closeSheet();
     if (state.inspect) toggleInspect(false);
-    if (el.railLeft.parentElement !== el.layout) {
-      el.layout.insertBefore(el.railLeft, el.stage);
-      el.layout.appendChild(el.railRight);
+    if (el.sourcePanel.parentElement !== el.railLeft) {
+      layoutDesktopRails();
     }
   }
   setTimeout(() => state.map && state.map.resize(), 60);
@@ -2468,16 +2589,24 @@ const DOCK_TOOLS = [
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  // Sounding is HRRR-only, so it only appears in the slot when models is active.
+  { id: 'sounding', icon: '⊙', label: 'HRRR sounding', btn: () => el.toolSounding, modelsOnly: true },
   { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
   { id: 'export', icon: '⤓', label: 'Export image', btn: () => el.toolExport },
   { id: 'clear', icon: '✕', label: 'Clear drawings', btn: () => el.toolClear },
 ];
 
+// The tools offered in the dock slot depend on the active source: the sounding
+// tool is only meaningful in HRRR/models mode.
+function dockToolsForMode() {
+  return DOCK_TOOLS.filter((t) => !t.modelsOnly || state.mode === 'models');
+}
+
 function setupDockTools() {
   if (!el.dockToolBtn) return;
   state.dockTool = state.dockTool || 'storm';
 
-  const current = () => DOCK_TOOLS.find((t) => t.id === state.dockTool) || DOCK_TOOLS[0];
+  const current = () => dockToolsForMode().find((t) => t.id === state.dockTool) || dockToolsForMode()[0];
 
   // Reflect the underlying tool button's pressed state on the slot.
   function syncActive() {
@@ -2488,7 +2617,7 @@ function setupDockTools() {
 
   function buildMenu() {
     el.dockToolMenu.innerHTML = '';
-    for (const t of DOCK_TOOLS) {
+    for (const t of dockToolsForMode()) {
       const item = document.createElement('button');
       item.className = 'dock-tool-item';
       if (t.id === state.dockTool) item.classList.add('active');
@@ -2507,6 +2636,7 @@ function setupDockTools() {
     el.dockToolBtn.textContent = t.icon;
     el.dockToolBtn.title = t.label;
     syncActive();
+    saveSettings();
   }
 
   function openDockMenu() {
@@ -2548,7 +2678,18 @@ function setupDockTools() {
     closeDockMenu();
   });
 
+  // When the source mode changes, the available tools change (sounding appears
+  // only in models mode). Drop a now-unavailable selection back to the default
+  // and rebuild any open menu.
+  state._refreshDockTools = () => {
+    if (!dockToolsForMode().some((t) => t.id === state.dockTool)) {
+      setDockTool(dockToolsForMode()[0].id);
+    }
+    if (!el.dockToolMenu.hidden) buildMenu();
+  };
+
   setDockTool(state.dockTool);
+  state._refreshDockTools(); // drop a restored tool that isn't valid for this mode
 }
 
 // Gather the canvases, caption and legend for the export tool. In split view
@@ -2620,10 +2761,117 @@ function utcStamp(d) {
 }
 
 // ---------------------------------------------------------------------------
+// Persisted settings — remember the user's last source/product, the map view
+// (center + zoom) and every map/display toggle across visits, so a reload drops
+// you right back where you left off. Storage may be blocked (private mode), so
+// every access is guarded. Kept separate from the .pal store above.
+// ---------------------------------------------------------------------------
+const SETTINGS_KEY = 'aether.settings';
+
+function loadSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+let _settingsTimer = null;
+function saveSettings() {
+  if (!state.persist) return; // user opted out of remembering anything
+  // Debounce: map moves and slider drags fire rapidly, and we only need the
+  // resting value.
+  if (_settingsTimer) return;
+  _settingsTimer = setTimeout(() => {
+    _settingsTimer = null;
+    try {
+      const m = state.map;
+      const c = m && m.getCenter ? m.getCenter() : null;
+      const s = {
+        mode: state.mode,
+        site: state.site,
+        productId: state.productId,
+        opacity: state.opacity,
+        basemap: state.basemap,
+        showRings: state.showRings,
+        dealias: state.dealias,
+        radarOverlay: state.radarOverlay,
+        alertsOn: state.alerts ? state.alerts.enabled : true,
+        playbackFrames: state.playbackFrames,
+        dockTool: state.dockTool,
+        sat: {
+          satKey: state.sat.satKey,
+          sectorKey: state.sat.sectorKey,
+          productId: state.sat.productId,
+          enhanceIR: state.sat.enhanceIR,
+        },
+        mrms: { productId: state.mrms.productId },
+        models: { modelKey: state.models.modelKey, productId: state.models.productId },
+        map: c && isFinite(c.lng) ? { lng: c.lng, lat: c.lat, zoom: m.getZoom() } : null,
+      };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch (_) {
+      /* storage full or blocked — settings still apply for this session */
+    }
+  }, 400);
+}
+
+// Fold stored settings into `state` defaults before the map and UI are built, so
+// the first render already reflects them (basemap, last view, last product…).
+function applyStoredSettings(s) {
+  if (!s || typeof s !== 'object') return;
+  if (['radar', 'satellite', 'mrms', 'models'].includes(s.mode)) state.mode = s.mode;
+  if (typeof s.site === 'string') state.site = s.site;
+  if (typeof s.productId === 'string') state.productId = s.productId;
+  if (typeof s.opacity === 'number') state.opacity = s.opacity;
+  if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
+  if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
+  if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
+  if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
+  if (typeof s.playbackFrames === 'number') state.playbackFrames = s.playbackFrames;
+  if (typeof s.dockTool === 'string') state.dockTool = s.dockTool;
+  if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
+  if (s.sat && typeof s.sat === 'object') {
+    if (typeof s.sat.satKey === 'string') state.sat.satKey = s.sat.satKey;
+    if (typeof s.sat.sectorKey === 'string') state.sat.sectorKey = s.sat.sectorKey;
+    if (typeof s.sat.productId === 'string') state.sat.productId = s.sat.productId;
+    if (typeof s.sat.enhanceIR === 'boolean') state.sat.enhanceIR = s.sat.enhanceIR;
+  }
+  if (s.mrms && typeof s.mrms.productId === 'string') state.mrms.productId = s.mrms.productId;
+  if (s.models && typeof s.models === 'object') {
+    if (typeof s.models.modelKey === 'string') state.models.modelKey = s.models.modelKey;
+    if (typeof s.models.productId === 'string') state.models.productId = s.models.productId;
+  }
+  if (s.map && isFinite(s.map.lng) && isFinite(s.map.lat)) state._restoreView = s.map;
+}
+
+// Flip an ON/OFF toggle button to a given state (class + label together).
+function setToggleBtn(btn, on) {
+  if (!btn) return;
+  btn.classList.toggle('active', !!on);
+  btn.textContent = on ? 'ON' : 'OFF';
+}
+
+// Push restored settings onto their UI controls (run once, after the controls
+// exist but before the first data load). state already holds the restored values.
+function reflectStoredControls() {
+  if (el.opacity) {
+    el.opacity.value = String(Math.round(state.opacity * 100));
+    el.opacityVal.textContent = el.opacity.value + '%';
+  }
+  setToggleBtn(el.ringsToggle, state.showRings);
+  setToggleBtn(el.dealiasToggle, state.dealias);
+  setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
+  if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
+  if (el.basemapSelect) el.basemapSelect.value = state.basemap;
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 function init() {
   cacheEls();
+  applyStoredSettings(loadSettings()); // restore last session before building UI
   initMap();
   enableLongPress();
   buildSiteSelect();
@@ -2634,6 +2882,11 @@ function init() {
 
   state.playback = createPlayback();
   state.map.on('move', updateInspect);
+  // Remember the last map position (debounced) so a reload reopens the same view.
+  state.map.on('moveend', saveSettings);
+
+  // Reflect any restored toggle/slider settings onto their controls.
+  reflectStoredControls();
 
   // Source-mode switch + satellite controls.
   initSatSelects();
@@ -2663,6 +2916,7 @@ function init() {
     if (state.mrms.layer) state.mrms.layer.setOpacity(state.opacity);
     if (state.models.layer) state.models.layer.setOpacity(state.opacity);
     if (state.splitView) state.splitView.setOpacity(state.opacity);
+    saveSettings();
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
   el.palReset.addEventListener('click', resetPalettes);
@@ -2676,7 +2930,23 @@ function init() {
     state.showRings = on;
     if (state.map && state.map.getLayer && state.map.getLayer('rings'))
       state.map.setLayoutProperty('rings', 'visibility', on ? 'visible' : 'none');
+    saveSettings();
   });
+
+  // Remember-view-&-settings toggle. Turning it off forgets everything stored.
+  if (el.persistToggle) {
+    el.persistToggle.addEventListener('click', () => {
+      const on = !el.persistToggle.classList.contains('active');
+      setToggleBtn(el.persistToggle, on);
+      state.persist = on;
+      if (on) {
+        saveSettings();
+      } else {
+        try { localStorage.removeItem(SETTINGS_KEY); } catch (_) {}
+      }
+      setStatus(on ? 'remembering view & settings' : 'no longer remembering settings');
+    });
+  }
 
   // Velocity dealiasing — unfold aliased VEL gates. Re-renders the current sweep
   // (and refreshes the inspect/cursor readouts) through the same path.
@@ -2688,6 +2958,7 @@ function init() {
     renderRadar();
     updateInspect();
     setStatus(on ? 'velocity dealiasing on' : 'velocity dealiasing off');
+    saveSettings();
   });
 
   // Single-site radar overlay for the satellite / MRMS / model modes.
@@ -2699,6 +2970,7 @@ function init() {
       state.radarOverlay = on;
       applyRadarOverlay();
       setStatus(on ? `radar overlay on (${state.site})` : 'radar overlay off');
+      saveSettings();
     });
   }
 
@@ -2718,6 +2990,7 @@ function init() {
     el.playFrames.addEventListener('input', () => {
       state.playbackFrames = Number(el.playFrames.value);
       el.playFramesVal.textContent = state.playbackFrames;
+      saveSettings();
     });
   }
 
@@ -2732,11 +3005,14 @@ function init() {
     previewCard: el.alertPreviewCard,
   });
   state.alerts.start();
+  // Apply the restored alerts on/off preference (default on).
+  if (state._alertsOn === false) state.alerts.setEnabled(false);
   el.alertsToggle.addEventListener('click', () => {
     const on = !el.alertsToggle.classList.contains('active');
     el.alertsToggle.classList.toggle('active', on);
     el.alertsToggle.textContent = on ? 'ON' : 'OFF';
     state.alerts.setEnabled(on);
+    saveSettings();
   });
 
   // ---- Map tools: METARs, draw / measure / storm track, split view ----
@@ -2751,6 +3027,7 @@ function init() {
   el.sheetScrim.addEventListener('click', closeSheet);
   el.sheetGrip.addEventListener('click', closeSheet);
   enableSheetSwipe();
+  setupSheetPager();
 
   el.basemapSelect.value = state.basemap;
   el.basemapSelect.addEventListener('change', () =>
@@ -2758,9 +3035,8 @@ function init() {
   );
   el.inspectBtn.addEventListener('click', () => toggleInspect());
 
-  // ---- HRRR sounding launchers + sheet ----
-  el.soundingBtn.addEventListener('click', openSounding);
-  el.dockSoundingBtn.addEventListener('click', openSounding);
+  // ---- HRRR sounding launcher (map tool, models mode only) + sheet ----
+  el.toolSounding.addEventListener('click', openSounding);
   el.sndClose.addEventListener('click', closeSounding);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !el.sounding.hidden) closeSounding();
