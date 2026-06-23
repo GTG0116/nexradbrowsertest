@@ -15,8 +15,8 @@
 // The profile follows whichever model is selected for the active forecast hour:
 // the in-app model key is mapped to the matching Open-Meteo model below. Only
 // HRRR and GFS publish browser-reachable pressure-level columns, so the regional
-// CONUS models (NAM/NAM Nest/RAP) fall back to HRRR — the closest high-resolution
-// column — and the sounding is always labelled with the model actually used.
+// CONUS models (NAM/NAM Nest/RAP) have no sounding and the panel reports it as
+// unavailable rather than substituting a different model's data.
 
 const KT2MS = 0.514444;
 const MS2KT = 1.943844;
@@ -30,20 +30,17 @@ const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
 
 // Map an in-app model key to the Open-Meteo model that serves pressure-level
 // columns for it, plus a short label for the panel. Open-Meteo only publishes
-// browser-reachable soundings for HRRR and GFS, so the regional CONUS models
-// (NAM/NAM Nest/RAP) borrow HRRR — the nearest high-resolution column.
+// browser-reachable soundings for HRRR and GFS; any model not listed here has no
+// sounding (the launcher reports it as unavailable).
 const OM_SOUNDING = {
-  hrrr:    { id: 'gfs_hrrr',   label: 'HRRR' },
-  gfs:     { id: 'gfs_global', label: 'GFS' },
-  nam:     { id: 'gfs_hrrr',   label: 'HRRR' },
-  namnest: { id: 'gfs_hrrr',   label: 'HRRR' },
-  rap:     { id: 'gfs_hrrr',   label: 'HRRR' },
+  hrrr: { id: 'gfs_hrrr',   label: 'HRRR' },
+  gfs:  { id: 'gfs_global', label: 'GFS' },
 };
 
-// The Open-Meteo model + display label for an in-app model key (defaults to HRRR
-// for anything without its own browser-reachable column).
+// The Open-Meteo model + display label for an in-app model key, or null when the
+// model has no browser-reachable sounding.
 export function soundingModel(modelKey) {
-  return OM_SOUNDING[modelKey] || OM_SOUNDING.hrrr;
+  return OM_SOUNDING[modelKey] || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +49,7 @@ export function soundingModel(modelKey) {
 // ---------------------------------------------------------------------------
 export async function fetchSounding(lat, lon, validTime, modelKey = 'hrrr') {
   const model = soundingModel(modelKey);
+  if (!model) throw new Error('Soundings are not available for this model.');
   const perLevel = ['temperature', 'dewpoint', 'geopotential_height', 'windspeed', 'winddirection'];
   const hourly = [];
   for (const p of LEVELS) for (const v of perLevel) hourly.push(`${v}_${p}hPa`);

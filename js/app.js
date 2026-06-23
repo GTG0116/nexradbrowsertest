@@ -95,27 +95,34 @@ function ringsGeoJSON(site, maxR) {
   return { type: 'FeatureCollection', features };
 }
 
-// Stroke the coastline (and lake/large-river shores) by outlining the basemap's
-// own `water` polygons. We reuse whatever vector source the active style packs
-// them in (Mapbox styles call it `composite`), so it works across every basemap
-// without shipping coastline geometry of our own. Drawn at the same anchor as the
-// other overlays, so it sits above the radar fill but beneath the town labels.
-function addCoastline(map, anchor) {
-  if (map.getLayer('coastline')) return;
+// Draw country outlines (admin level 0, including the maritime boundary that
+// traces the coast) on top of the radar/satellite overlays. We clone the
+// basemap's own `admin` border layer — its source and paint — so the outline
+// matches the style's existing state/country borders in thickness and color
+// exactly; we just filter it to country level and re-add it above our overlays
+// (the basemap's copy is drawn beneath them and gets hidden by the radar fill).
+function addCountryOutlines(map, anchor) {
+  if (map.getLayer('country-outline')) return;
   const layers = map.getStyle().layers || [];
-  const water = layers.find((l) => l['source-layer'] === 'water' && l.source);
-  if (!water) return; // a label-free / raster style with no vector water layer
+  // Prefer a plain admin border line (skip the soft "bg" casing and disputed
+  // variants); fall back to any admin line the style provides.
+  const admin = layers.filter((l) =>
+    l.type === 'line' && l['source-layer'] === 'admin' && l.source && l.paint);
+  const border = admin.find((l) => !/bg|disputed/i.test(l.id)) || admin[0];
+  if (!border) return; // a raster / label-free style with no vector admin layer
   map.addLayer(
     {
-      id: 'coastline',
+      id: 'country-outline',
       type: 'line',
-      source: water.source,
-      'source-layer': 'water',
-      layout: { 'line-join': 'round' },
-      paint: {
-        'line-color': 'rgba(130,190,235,0.55)',
-        'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.6, 7, 1.2, 11, 1.8],
-      },
+      source: border.source,
+      'source-layer': 'admin',
+      // admin_level 0 = country boundaries (land borders + coastal maritime line).
+      // The basemap's own border layer filters maritime lines out, which is why
+      // the coast goes undrawn; including them here traces the coastline. Match
+      // both numeric and string-typed admin_level for tileset robustness.
+      filter: ['any', ['==', ['get', 'admin_level'], 0], ['==', ['get', 'admin_level'], '0']],
+      layout: border.layout || {},
+      paint: border.paint,
     },
     anchor
   );
@@ -206,7 +213,7 @@ function setupOverlays(map) {
     anchor
   );
 
-  addCoastline(map, anchor);
+  addCountryOutlines(map, anchor);
 
   refreshSiteDots();
 
@@ -1844,17 +1851,25 @@ async function openSounding() {
   // Follow the model selected for the active forecast hour. The sounding tool is
   // only offered in models mode, so state.models.modelKey is the live selection.
   const modelKey = state.models.modelKey;
-  const label = soundingModel(modelKey).label;
+  const model = soundingModel(modelKey);
+  const label = model ? model.label : (MODELS[modelKey] ? MODELS[modelKey].label : 'this model');
 
   el.sounding.hidden = false;
   document.body.classList.add('snd-open');
-  if (el.sndTitle) el.sndTitle.textContent = `${label} Sounding`;
+  if (el.sndTitle) el.sndTitle.textContent = model ? `${label} Sounding` : 'Sounding';
   el.sndCharts.hidden = true;
   el.sndParams.hidden = true;
   el.sndStatus.hidden = false;
-  el.sndStatus.textContent = `Loading ${label} sounding…`;
   const utc = `${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
   el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
+
+  // Only HRRR and GFS expose point soundings; for any other model report it as
+  // unavailable rather than loading a different model's column.
+  if (!model) {
+    el.sndStatus.textContent = `Soundings aren’t available for ${label}. Switch to HRRR or GFS for a profile.`;
+    return;
+  }
+  el.sndStatus.textContent = `Loading ${label} sounding…`;
 
   try {
     const profile = await fetchSounding(c.lat, c.lng, validTime, modelKey);
