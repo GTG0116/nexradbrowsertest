@@ -89,6 +89,12 @@ void main() {
     float cc = col - 0.5, rr = row - 0.5;
     float c0 = floor(cc), fc = cc - c0;
     float r0 = floor(rr), fr = rr - r0;
+    // Hermite-smooth the blend fractions (zero slope at the cell centres) so the
+    // interpolation is C1 instead of piecewise-linear: rounds off the diamond
+    // facets that make plain bilinear read "pixely", while the pixel centres
+    // still hold their true colour so individual pixels stay legible.
+    fc = fc * fc * (3.0 - 2.0 * fc);
+    fr = fr * fr * (3.0 - 2.0 * fr);
     vec4 t00 = texelAt(c0,       r0);
     vec4 t10 = texelAt(c0 + 1.0, r0);
     vec4 t01 = texelAt(c0,       r0 + 1.0);
