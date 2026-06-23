@@ -56,6 +56,12 @@ void main() {
     float ic = fi - 0.5, jc = fj - 0.5;
     float i0 = floor(ic), fi2 = ic - i0;
     float j0 = floor(jc), fj2 = jc - j0;
+    // Hermite-smooth the blend fractions (zero slope at the cell centres) so the
+    // interpolation is C1 instead of piecewise-linear: rounds off the diamond
+    // facets that make plain bilinear read "pixely", while the cell centres still
+    // hold their true value so pixels stay legible.
+    fi2 = fi2 * fi2 * (3.0 - 2.0 * fi2);
+    fj2 = fj2 * fj2 * (3.0 - 2.0 * fj2);
     vec2 s00 = cellValue(i0,       j0);
     vec2 s10 = cellValue(i0 + 1.0, j0);
     vec2 s01 = cellValue(i0,       j0 + 1.0);

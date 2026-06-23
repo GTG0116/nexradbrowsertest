@@ -98,6 +98,12 @@ void main() {
     float rc = az / 360.0 * u_naz - 0.5;
     float g0 = floor(gc), fg = gc - g0;
     float r0 = floor(rc), fr = rc - r0;
+    // Hermite-smooth the blend fractions (zero slope at the cell centres) so the
+    // interpolation is C1 instead of piecewise-linear: this rounds off the
+    // diamond facets / Mach-band creases that make plain bilinear read "pixely",
+    // while the gate centres still hold their true value so pixels stay legible.
+    fg = fg * fg * (3.0 - 2.0 * fg);
+    fr = fr * fr * (3.0 - 2.0 * fr);
     vec2 s00 = gateValue(g0,       r0);
     vec2 s10 = gateValue(g0 + 1.0, r0);
     vec2 s01 = gateValue(g0,       r0 + 1.0);
