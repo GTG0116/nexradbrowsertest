@@ -55,15 +55,13 @@ const BASEMAPS = {
 // rasterised canvas to size to the zoom: the gates stay pixel-exact at any zoom,
 // so the old resolution/“auto smoothing” machinery is gone.
 
-// Find the basemap layer to insert our overlays *below*, so the style's town
-// labels and administrative borders stay on top of the radar. We anchor on the
-// basemap's first administrative-boundary line: in every Mapbox style the
-// boundaries sit just beneath the whole label stack, so slotting in there puts
-// the radar above the roads/landuse while keeping borders and town names on top.
+// Two insertion anchors keep the basemap legible over the radar.
 //
-// (The old heuristic returned the first *symbol* layer, but in Streets/Outdoors
-// that is a road one-way-arrow near the bottom of the stack — which dragged the
-// radar and every overlay down under the entire road network.)
+// `firstLabelLayerId` (the *label* anchor) is the first administrative-boundary
+// line — in every Mapbox style the boundaries sit just beneath the whole label
+// stack. App annotations (alert outlines, range rings, site dots) and our own
+// redrawn borders slot in here, so they stay above the basemap's roads but below
+// the town-name labels.
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
@@ -77,13 +75,34 @@ function firstLabelLayerId(map) {
   return undefined; // nothing matched → overlays go on top
 }
 
+// `dataLayerAnchor` (the *data* anchor) drops the radar/satellite/MRMS/model
+// layers in just beneath the basemap's road network. Roads/tunnels/bridges all
+// live in the `road` source-layer, so anchoring on the first of those makes the
+// roads, highways, boundaries and labels all draw on top of the data (the classic
+// radar-overlay look) while the data still drapes over the ground/water fills.
+function dataLayerAnchor(map) {
+  const layers = map.getStyle().layers || [];
+  for (const ly of layers) {
+    if ((ly.type === 'line' || ly.type === 'symbol') && ly['source-layer'] === 'road')
+      return ly.id;
+  }
+  // No road layer: fall back to the first line/symbol so the data still sits
+  // above the basemap's ground fills.
+  for (const ly of layers) {
+    if (ly.type === 'line' || ly.type === 'symbol') return ly.id;
+  }
+  return firstLabelLayerId(map);
+}
+
 // ---------------------------------------------------------------------------
 // Overlay layers (radar, alerts, rings, radar-site dots)
 //
-// Everything is slotted into the Mapbox style's own layer stack, beneath the
-// first label/boundary layer, so town names and borders draw on top. Back to
-// front: basemap fills → alert fill → radar → alert borders → range rings →
-// site dots → [basemap labels & boundaries].
+// Slotted into the Mapbox style's own layer stack. Back to front:
+//   basemap ground/water fills → alert fill → radar/data → basemap roads &
+//   highways → our country/state/county outlines → alert outlines → range rings
+//   → site dots → basemap town labels.
+// So the radar drapes over the terrain while every reference line (roads,
+// borders, county lines) and the labels stay legible on top of it.
 // ---------------------------------------------------------------------------
 
 // Build the dashed range-ring geometry (and skip the centre marker — the
@@ -131,13 +150,14 @@ function addCoastline(map, anchor) {
   );
 }
 
-// Country (admin_level 0) and state (admin_level 1) outlines. Every basemap
-// ships these in an `admin` vector source, but styles them wildly differently —
-// crisp on Dark/Light, almost invisible on Satellite/Streets/Outdoors. So we
-// hide the native admin lines and redraw our own from the same source with one
-// consistent, high-contrast look (a dark casing under a bright line) that reads
-// on any basemap and on top of the radar. Drawn at the overlay anchor, so the
-// outlines sit above the radar fill but beneath the town labels.
+// Country (admin_level 0), state (admin_level 1) and county (admin_level 2)
+// outlines. Every basemap ships all three levels in its `admin` vector source,
+// but the stock styles only draw 0/1 — and style them wildly differently (crisp
+// on Dark/Light, almost invisible on Satellite/Streets/Outdoors) and never draw
+// counties at all. So we hide the native admin lines and redraw our own from the
+// same source with one consistent, high-contrast look (a bright line over a dark
+// casing) that reads on any basemap. Drawn at the label anchor, so the outlines
+// sit above the radar and the basemap roads, but beneath the town labels.
 function adminSource(map) {
   const layers = map.getStyle().layers || [];
   const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
@@ -145,8 +165,10 @@ function adminSource(map) {
 }
 
 function hideNativeBoundaries(map) {
+  // Hide only the *basemap's* admin lines — never our own redrawn outlines, which
+  // also read from the `admin` source-layer (their ids contain "outline").
   for (const l of map.getStyle().layers || [])
-    if (l['source-layer'] === 'admin' && map.getLayer(l.id))
+    if (l['source-layer'] === 'admin' && !/outline/.test(l.id) && map.getLayer(l.id))
       map.setLayoutProperty(l.id, 'visibility', 'none');
 }
 
@@ -163,7 +185,7 @@ function addBoundaries(map, anchor) {
     ['==', ['get', 'disputed'], 'false'],
     ['match', ['get', 'worldview'], ['all', 'US'], true, false],
   ];
-  const line = (id, level, paint) =>
+  const line = (id, level, paint, extra) =>
     map.addLayer(
       {
         id,
@@ -173,17 +195,28 @@ function addBoundaries(map, anchor) {
         filter: filt(level),
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint,
+        ...(extra || {}),
       },
       anchor
     );
-  // State borders first, then country on top (so the country line wins where the
-  // two run together). Each is a bright line over a dark casing for contrast.
+  // Drawn bottom→top: county, then state, then country, so the heavier lines win
+  // where levels run together. Counties are thin and only appear once zoomed in
+  // (there are far too many to read at continental scale).
+  line(
+    'county-outline',
+    2,
+    {
+      'line-color': 'rgba(225,232,245,0.34)',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
+    },
+    { minzoom: 5 }
+  );
   line('state-outline-case', 1, {
     'line-color': 'rgba(8,14,24,0.35)',
     'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
   });
   line('state-outline', 1, {
-    'line-color': 'rgba(236,242,255,0.55)',
+    'line-color': 'rgba(236,242,255,0.6)',
     'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.4, 7, 0.9, 11, 1.4],
     'line-dasharray': [3, 2],
   });
@@ -192,7 +225,7 @@ function addBoundaries(map, anchor) {
     'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.2, 7, 3.4, 11, 4.4],
   });
   line('country-outline', 0, {
-    'line-color': 'rgba(236,242,255,0.9)',
+    'line-color': 'rgba(236,242,255,0.92)',
     'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.7, 11, 2.3],
   });
 }
@@ -212,7 +245,10 @@ function sitesGeoJSON() {
 // every style load — including after a basemap switch, which wipes custom
 // layers — and then repopulated with whatever data we currently hold.
 function setupOverlays(map) {
+  // Label anchor → annotations + our borders (above roads, below town labels).
+  // Data anchor → radar/alert-fill (below the basemap roads, over the terrain).
   const anchor = firstLabelLayerId(map);
+  const dataAnchor = dataLayerAnchor(map);
 
   if (!map.getSource('alerts'))
     map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
@@ -221,7 +257,7 @@ function setupOverlays(map) {
   if (!map.getSource('sites'))
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
 
-  // Translucent alert fill — sits below the radar.
+  // Translucent alert fill — sits below the radar (and the basemap roads).
   map.addLayer(
     {
       id: 'alerts-fill',
@@ -229,9 +265,10 @@ function setupOverlays(map) {
       source: 'alerts',
       paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
     },
-    anchor
+    dataAnchor
   );
-  // Alert outline — above the radar (the radar layer is inserted before this).
+  // Alert outline — at the label anchor, so it stays above the radar and the
+  // basemap roads but beneath the town labels.
   map.addLayer(
     {
       id: 'alerts-line',
@@ -283,9 +320,9 @@ function setupOverlays(map) {
   );
 
   addCoastline(map, anchor);
-  // Redraw country/state borders ourselves (above the radar, below labels) and
-  // hide the basemap's own faint ones, so the outlines look the same on every
-  // basemap instead of only showing up on Dark/Light.
+  // Redraw country/state/county borders ourselves (above the radar and roads,
+  // below the town labels) and hide the basemap's own faint ones, so the outlines
+  // look the same on every basemap instead of only showing up on Dark/Light.
   addBoundaries(map, anchor);
   hideNativeBoundaries(map);
 
@@ -302,17 +339,14 @@ function setupOverlays(map) {
   if (state.alerts) state.alerts.refreshVisible();
 }
 
-// Hand the current sweep to the custom WebGL radar layer, inserting the layer
-// beneath the alert outline if it isn't on the map yet. The layer then renders
-// the polar data directly on the GPU every frame — no rasterised image, so the
-// gates stay pixel-exact at every zoom and pan/zoom cost no JavaScript.
+// Hand the current sweep to the custom WebGL radar layer, inserting the layer at
+// the data anchor (beneath the basemap roads/borders) if it isn't on the map yet.
+// The layer then renders the polar data directly on the GPU every frame — no
+// rasterised image, so the gates stay pixel-exact at every zoom and pan/zoom cost
+// no JavaScript.
 function setRadarSource(map, sweep, product, site) {
   if (!state.radarLayer) state.radarLayer = createRadarLayer();
-  if (!map.getLayer('radar'))
-    map.addLayer(
-      state.radarLayer,
-      map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map)
-    );
+  if (!map.getLayer('radar')) map.addLayer(state.radarLayer, dataLayerAnchor(map));
   state.radarLayer.setSweep(sweep, product, site);
   state.radarLayer.setOpacity(state.opacity);
 }
@@ -1427,7 +1461,7 @@ async function loadSatScene(key) {
 function setSatelliteSource(map) {
   if (!state.sat.layer) state.sat.layer = createSatelliteLayer();
   if (!map.getLayer('satellite'))
-    map.addLayer(state.sat.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+    map.addLayer(state.sat.layer, dataLayerAnchor(map));
 }
 
 function clearSatellite() {
@@ -1600,7 +1634,7 @@ async function loadMrmsFrame(key) {
 function setMrmsSource(map) {
   if (!state.mrms.layer) state.mrms.layer = createGridLayer();
   if (!map.getLayer('mrms'))
-    map.addLayer(state.mrms.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+    map.addLayer(state.mrms.layer, dataLayerAnchor(map));
 }
 
 function clearMrms() {
@@ -1852,7 +1886,7 @@ async function loadModelFrame() {
 function setModelSource(map) {
   if (!state.models.layer) state.models.layer = createGridLayer('models');
   if (!map.getLayer('models'))
-    map.addLayer(state.models.layer, map.getLayer('alerts-line') ? 'alerts-line' : firstLabelLayerId(map));
+    map.addLayer(state.models.layer, dataLayerAnchor(map));
 }
 
 function clearModels() {

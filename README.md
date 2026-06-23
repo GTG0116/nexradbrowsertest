@@ -28,12 +28,13 @@ the radar imagery — entirely client-side.
   every frame, over an **interactive Mapbox GL JS map**. Because nothing is
   rasterised to a fixed canvas, the NEXRAD gates stay pixel-exact at any zoom —
   no interpolation, no "auto smoothing", and pan/zoom cost no JavaScript. The
-  radar is slotted *into* the basemap's own layer stack — beneath the town-name
-  and boundary layers — so place names and borders always draw on top of the
-  reflectivity, with meteorologically conventional color scales
-  (`js/products.js`). Country and state outlines are redrawn from the basemap's
-  own `admin` vector source with one high-contrast style, so they read the same
-  above the radar on every basemap (not just Dark/Light).
+  radar is slotted *into* the basemap's own layer stack — just beneath the road
+  network — so roads, highways, boundaries, place names and labels all draw on top
+  of the reflectivity (the classic radar-overlay look), with meteorologically
+  conventional color scales (`js/products.js`). Country, state and county outlines
+  are redrawn from the basemap's own `admin` vector source (levels 0/1/2) with one
+  high-contrast style, so they read the same above the radar on every basemap (not
+  just Dark/Light, and including counties the stock styles never draw).
 - A distinctive **radar-operations-console UI** over a dark basemap: range rings,
   a live cursor readout, opacity control, elevation-tilt selection, and a UTC
   clock. Pan/zoom the map freely. An **inspect** crosshair reads the value under
