@@ -22,10 +22,10 @@ import { ensureBands, sceneBBox } from './goes.js';
 const p2 = (n) => String(n).padStart(2, '0');
 const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
 
-// Anchor on the basemap's first administrative-boundary line (matching app.js):
-// it sits just beneath the label stack, so the data layer draws above the roads
-// while borders and labels stay on top. Grabbing the first symbol instead would
-// land on a road one-way-arrow in Streets/Outdoors and bury the data.
+// Layer-stack helpers — kept in sync with app.js. Two anchors: the label anchor
+// (first admin/boundary line) for annotations + our redrawn borders, and the data
+// anchor (first road layer) for the data layer, so the basemap's roads, borders
+// and labels all draw on top of the radar/satellite/grid data.
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
@@ -35,6 +35,76 @@ function firstLabelLayerId(map) {
     if (ly.type === 'symbol') return ly.id;
   }
   return undefined;
+}
+
+function dataLayerAnchor(map) {
+  const layers = map.getStyle().layers || [];
+  for (const ly of layers) {
+    if ((ly.type === 'line' || ly.type === 'symbol') && ly['source-layer'] === 'road')
+      return ly.id;
+  }
+  for (const ly of layers) {
+    if (ly.type === 'line' || ly.type === 'symbol') return ly.id;
+  }
+  return firstLabelLayerId(map);
+}
+
+function adminSource(map) {
+  const layers = map.getStyle().layers || [];
+  const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
+  return admin && admin.source;
+}
+
+function hideNativeBoundaries(map) {
+  // Hide only the basemap's admin lines — never our own "outline" layers, which
+  // also read from the `admin` source-layer.
+  for (const l of map.getStyle().layers || [])
+    if (l['source-layer'] === 'admin' && !/outline/.test(l.id) && map.getLayer(l.id))
+      map.setLayoutProperty(l.id, 'visibility', 'none');
+}
+
+// Redraw country/state/county outlines from the basemap's `admin` source with one
+// consistent, high-contrast style, anchored above the radar but below the labels.
+function addBoundaries(map, anchor) {
+  if (map.getLayer('country-outline')) return;
+  const source = adminSource(map);
+  if (!source) return;
+  const filt = (level) => [
+    'all',
+    ['==', ['get', 'admin_level'], level],
+    ['==', ['get', 'maritime'], 'false'],
+    ['==', ['get', 'disputed'], 'false'],
+    ['match', ['get', 'worldview'], ['all', 'US'], true, false],
+  ];
+  const line = (id, level, paint, extra) =>
+    map.addLayer(
+      {
+        id, type: 'line', source, 'source-layer': 'admin', filter: filt(level),
+        layout: { 'line-join': 'round', 'line-cap': 'round' }, paint, ...(extra || {}),
+      },
+      anchor
+    );
+  line('county-outline', 2, {
+    'line-color': 'rgba(225,232,245,0.34)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
+  }, { minzoom: 5 });
+  line('state-outline-case', 1, {
+    'line-color': 'rgba(8,14,24,0.35)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
+  });
+  line('state-outline', 1, {
+    'line-color': 'rgba(236,242,255,0.6)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.4, 7, 0.9, 11, 1.4],
+    'line-dasharray': [3, 2],
+  });
+  line('country-outline-case', 0, {
+    'line-color': 'rgba(8,14,24,0.45)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.2, 7, 3.4, 11, 4.4],
+  });
+  line('country-outline', 0, {
+    'line-color': 'rgba(236,242,255,0.92)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.7, 11, 2.3],
+  });
 }
 
 export class SplitView {
@@ -141,6 +211,10 @@ export class SplitView {
   // ---- Overlay layers on the second pane (drawings mirror) ----
   _setupOverlays() {
     const map = this.map;
+    // Bright, consistent country/state/county outlines above the data (matching
+    // the main map), and hide the basemap's own faint admin lines.
+    addBoundaries(map, firstLabelLayerId(map));
+    hideNativeBoundaries(map);
     if (!map.getSource('mt-shapes'))
       map.addSource('mt-shapes', { type: 'geojson', data: this.drawings });
     const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };
@@ -352,7 +426,8 @@ export class SplitView {
       // Drop other data layers so only the active product draws.
       for (const other of ['radar', 'mrms', 'models', 'satellite'])
         if (other !== layerId && map.getLayer(other)) map.removeLayer(other);
-      map.addLayer(this.layers[kind], firstLabelLayerId(map));
+      // Data sits beneath the basemap roads/borders so they draw on top of it.
+      map.addLayer(this.layers[kind], dataLayerAnchor(map));
     }
     return this.layers[kind];
   }
