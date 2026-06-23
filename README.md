@@ -44,10 +44,15 @@ the radar imagery — entirely client-side.
   green-beside-red folds where Doppler velocity exceeds the Nyquist limit.
 - **Data smoothing** (optional, off by default): a **Smooth data** toggle that
   switches the per-pixel lookup in the radar, satellite and model/MRMS shaders
-  from nearest-neighbour to **bilinear interpolation**, blending neighbouring
+  from nearest-neighbour to an in-shader interpolation, blending neighbouring
   gates/cells for the soft, high-res look — without ever rasterising, so it stays
-  resolution-independent at any zoom. Left off, every source keeps its crisp,
-  native-resolution pixels (no auto smoothing); the choice is remembered.
+  resolution-independent at any zoom. The kernel is matched to each source's
+  effective resolution: fine grids (single-site radar, the max-pooled MRMS mosaic)
+  use **hermite-smoothed bilinear**, while the coarser grids whose cells would
+  otherwise stay visible (the ~3 km weather models, ~2 km GOES ABI) use a wider
+  **bicubic B-spline** low-pass so their blocks dissolve into a solid wash. Left
+  off, every source keeps its crisp, native-resolution pixels (no auto smoothing);
+  the choice is remembered.
 - **Split-cut aware product selection**: modern VCPs split the Doppler moments
   (VEL/SW) and dual-pol moments (ρHV/ZDR/φDP) into separate sweeps at nearly the
   same elevation. For the chosen product the viewer renders whichever sweep
