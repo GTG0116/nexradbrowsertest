@@ -28,7 +28,16 @@ uniform float u_xScale, u_xOffset, u_yScale, u_yOffset;
 uniform float u_lon0, u_satH, u_rEq, u_rPol;
 uniform float u_sweepY;
 uniform float u_opacity;
+uniform float u_smooth;          // 0 = nearest (crisp pixels), 1 = bilinear smooth
 const float PI = 3.141592653589793;
+
+// Premultiplied-colour fetch of one grid cell; off-disk / missing texels
+// (alpha 0) contribute nothing so the disk edge stays clean under smoothing.
+vec4 texelAt(float col, float row) {
+  if (col < 0.0 || col >= u_W || row < 0.0 || row >= u_H) return vec4(0.0);
+  vec4 c = texture2D(u_tex, vec2((col + 0.5) / u_W, (row + 0.5) / u_H));
+  return vec4(c.rgb * c.a, c.a);   // premultiply so the blend is colour-correct
+}
 
 void main() {
   // web-mercator [0,1] -> lon/lat (radians)
@@ -65,10 +74,37 @@ void main() {
   float row = (scanY - u_yOffset) / u_yScale;
   if (col < 0.0 || col >= u_W || row < 0.0 || row >= u_H) discard;
 
-  vec4 c = texture2D(u_tex, vec2((col + 0.5) / u_W, (row + 0.5) / u_H));
-  if (c.a == 0.0) discard;
-  float a = c.a * u_opacity;
-  gl_FragColor = vec4(c.rgb * a, a); // premultiplied alpha
+  vec3 rgb;
+  float alpha;
+  if (u_smooth < 0.5) {
+    // NEAREST: each ABI pixel stays exact at any zoom (the crisp default).
+    vec4 c = texture2D(u_tex, vec2((col + 0.5) / u_W, (row + 0.5) / u_H));
+    if (c.a == 0.0) discard;
+    rgb = c.rgb;
+    alpha = c.a;
+  } else {
+    // Bilinear interpolation in (col, row) grid space. The texels are
+    // premultiplied, so a straight bilinear blend of colour and alpha is
+    // colour-correct: off-disk neighbours (alpha 0, rgb 0) just soften the edge.
+    float cc = col - 0.5, rr = row - 0.5;
+    float c0 = floor(cc), fc = cc - c0;
+    float r0 = floor(rr), fr = rr - r0;
+    vec4 t00 = texelAt(c0,       r0);
+    vec4 t10 = texelAt(c0 + 1.0, r0);
+    vec4 t01 = texelAt(c0,       r0 + 1.0);
+    vec4 t11 = texelAt(c0 + 1.0, r0 + 1.0);
+    float b00 = (1.0 - fc) * (1.0 - fr);
+    float b10 = fc         * (1.0 - fr);
+    float b01 = (1.0 - fc) * fr;
+    float b11 = fc         * fr;
+    vec4 sum = t00 * b00 + t10 * b10 + t01 * b01 + t11 * b11;
+    if (sum.a < 1e-4) discard;
+    rgb = sum.rgb / sum.a;   // un-premultiply for the shared output tail
+    alpha = sum.a;
+  }
+
+  float a = alpha * u_opacity;
+  gl_FragColor = vec4(rgb * a, a); // premultiplied alpha
 }`;
 
 function compile(gl, type, src) {
@@ -102,6 +138,7 @@ export function createSatelliteLayer() {
     uni: null,
     quadVerts: null,
     opacity: 0.95,
+    smooth: false,
 
     onAdd(map, gl) {
       this.map = map;
@@ -120,6 +157,7 @@ export function createSatelliteLayer() {
       for (const name of [
         'u_matrix', 'u_tex', 'u_W', 'u_H', 'u_xScale', 'u_xOffset', 'u_yScale',
         'u_yOffset', 'u_lon0', 'u_satH', 'u_rEq', 'u_rPol', 'u_sweepY', 'u_opacity',
+        'u_smooth',
       ]) this.u[name] = gl.getUniformLocation(p, name);
       this.quad = gl.createBuffer();
       this.tex = gl.createTexture();
@@ -174,6 +212,8 @@ export function createSatelliteLayer() {
 
     setOpacity(o) { this.opacity = o; if (this.map) this.map.triggerRepaint(); },
 
+    setSmooth(on) { this.smooth = !!on; if (this.map) this.map.triggerRepaint(); },
+
     clear() {
       this.has = false;
       this.pending = null;
@@ -211,6 +251,7 @@ export function createSatelliteLayer() {
       gl.uniform1f(this.u.u_rPol, U.rPol);
       gl.uniform1f(this.u.u_sweepY, U.sweepY);
       gl.uniform1f(this.u.u_opacity, this.opacity);
+      gl.uniform1f(this.u.u_smooth, this.smooth ? 1 : 0);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);

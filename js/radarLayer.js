@@ -49,9 +49,22 @@ uniform float u_offset, u_scaleM;                      // code -> value
 uniform float u_lo, u_hi, u_steps;                     // value -> LUT index
 uniform float u_siteLat, u_siteLon, u_mPerDegLon;
 uniform float u_opacity;
+uniform float u_smooth;          // 0 = nearest (crisp gates), 1 = bilinear smooth
 
 const float PI = 3.141592653589793;
 const float M_PER_DEG_LAT = 111320.0;
+
+// Decode one gate cell to vec2(value, valid). Below-threshold / range-folded
+// gates (code < 2) report valid = 0 so the smoothing blend can skip them.
+// The azimuth row wraps (the sweep is a closed circle); the gate clamps.
+vec2 gateValue(float g, float row) {
+  if (g < 0.0 || g >= u_ngate) return vec2(0.0, 0.0);
+  float r = mod(row, u_naz);
+  vec4 d = texture2D(u_data, vec2((g + 0.5) / u_ngate, (r + 0.5) / u_naz));
+  float code = floor(d.r * 255.0 + 0.5) + floor(d.g * 255.0 + 0.5) * 256.0;
+  if (code < 2.0) return vec2(0.0, 0.0);
+  return vec2((code - u_offset) / u_scaleM, 1.0);
+}
 
 void main() {
   // mercator [0,1] -> lon/lat (exact inverse, so the gate boundaries are true).
@@ -67,19 +80,39 @@ void main() {
   float az = degrees(atan(dEast, dNorth));   // atan2(east, north)
   if (az < 0.0) az += 360.0;
 
-  // Nearest gate along the beam (no interpolation between gates).
-  float g = floor((range - u_firstGate) / u_gateSpacing + 0.5);
-  if (g < 0.0 || g >= u_ngate) discard;
+  float v;
+  if (u_smooth < 0.5) {
+    // Nearest gate along the beam + nearest azimuth bin (no interpolation):
+    // one screen pixel = one gate's exact value, the crisp default.
+    float g = floor((range - u_firstGate) / u_gateSpacing + 0.5);
+    if (g < 0.0 || g >= u_ngate) discard;
+    float row = floor(az / 360.0 * u_naz);
+    vec2 gv = gateValue(g, row);
+    if (gv.y < 0.5) discard;     // below threshold / range folded
+    v = gv.x;
+  } else {
+    // Bilinear interpolation in (gate, azimuth) data space. Gate centres sit at
+    // integer range steps; azimuth cell centres sit at (row + 0.5), so the
+    // continuous coords below put a sample's neighbours at the integer corners.
+    float gc = (range - u_firstGate) / u_gateSpacing;
+    float rc = az / 360.0 * u_naz - 0.5;
+    float g0 = floor(gc), fg = gc - g0;
+    float r0 = floor(rc), fr = rc - r0;
+    vec2 s00 = gateValue(g0,       r0);
+    vec2 s10 = gateValue(g0 + 1.0, r0);
+    vec2 s01 = gateValue(g0,       r0 + 1.0);
+    vec2 s11 = gateValue(g0 + 1.0, r0 + 1.0);
+    // Weight each corner by its bilinear share AND its validity, then
+    // renormalise — so missing/folded gates neither leak nor darken the blend.
+    float w00 = (1.0 - fg) * (1.0 - fr) * s00.y;
+    float w10 = fg         * (1.0 - fr) * s10.y;
+    float w01 = (1.0 - fg) * fr         * s01.y;
+    float w11 = fg         * fr         * s11.y;
+    float wsum = w00 + w10 + w01 + w11;
+    if (wsum < 1e-4) discard;    // no valid gate nearby
+    v = (s00.x * w00 + s10.x * w10 + s01.x * w01 + s11.x * w11) / wsum;
+  }
 
-  // Nearest azimuth bin (the beam wedge).
-  float row = floor(az / 360.0 * u_naz);
-
-  // NEAREST sample at the cell centre -> one gate's exact code.
-  vec4 d = texture2D(u_data, vec2((g + 0.5) / u_ngate, (row + 0.5) / u_naz));
-  float code = floor(d.r * 255.0 + 0.5) + floor(d.g * 255.0 + 0.5) * 256.0;
-  if (code < 2.0) discard;       // 0 = below threshold, 1 = range folded
-
-  float v = (code - u_offset) / u_scaleM;
   float li = clamp(floor((v - u_lo) * (u_steps - 1.0) / (u_hi - u_lo) + 0.5),
                    0.0, u_steps - 1.0);
   vec4 col = texture2D(u_lut, vec2((li + 0.5) / u_steps, 0.5));
@@ -173,6 +206,7 @@ export function createRadarLayer() {
     uni: null,         // numeric uniforms for the current sweep
     quadVerts: null,   // Float32Array of 6 mercator vertices
     opacity: 0.85,
+    smooth: false,     // bilinear-interpolate gates instead of crisp nearest
 
     onAdd(map, gl) {
       this.map = map;
@@ -192,6 +226,7 @@ export function createRadarLayer() {
         'u_matrix', 'u_data', 'u_lut', 'u_naz', 'u_ngate', 'u_firstGate',
         'u_gateSpacing', 'u_maxRange', 'u_offset', 'u_scaleM', 'u_lo', 'u_hi',
         'u_steps', 'u_siteLat', 'u_siteLon', 'u_mPerDegLon', 'u_opacity',
+        'u_smooth',
       ])
         this.u[name] = gl.getUniformLocation(p, name);
 
@@ -291,6 +326,11 @@ export function createRadarLayer() {
       if (this.map) this.map.triggerRepaint();
     },
 
+    setSmooth(on) {
+      this.smooth = !!on;
+      if (this.map) this.map.triggerRepaint();
+    },
+
     clear() {
       this.has = false;
       this.pending = null;
@@ -337,6 +377,7 @@ export function createRadarLayer() {
       gl.uniform1f(this.u.u_siteLon, U.siteLon);
       gl.uniform1f(this.u.u_mPerDegLon, U.mPerDegLon);
       gl.uniform1f(this.u.u_opacity, this.opacity);
+      gl.uniform1f(this.u.u_smooth, this.smooth ? 1 : 0);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied alpha

@@ -488,6 +488,7 @@ export class SplitView {
     const layer = this._ensureLayer('radar', createRadarLayer);
     layer.setSweep(sweep, product, site);
     layer.setOpacity(state.opacity);
+    layer.setSmooth(state.smooth);
   }
 
   _renderSat() {
@@ -500,6 +501,7 @@ export class SplitView {
       const layer = this._ensureLayer('sat', createSatelliteLayer);
       layer.setScene(scene, rgba, sceneBBox(scene));
       layer.setOpacity(state.opacity);
+      layer.setSmooth(state.smooth);
     };
     // Decode any extra bands this channel/RGB needs, then draw.
     ensureBands(scene, bandsFor(id)).then(draw).catch((e) => console.error(e));
@@ -517,6 +519,7 @@ export class SplitView {
       const layer = this._ensureLayer(mode, () => createGridLayer(mode));
       layer.setGrid(grid, resolveGrid(grid.product));
       layer.setOpacity(state.opacity);
+      layer.setSmooth(state.smooth);
     };
     if (sameAsMain) {
       draw(mode === 'mrms' ? state.mrms.grid : state.models.grid);
@@ -545,5 +548,9 @@ export class SplitView {
 
   setOpacity(o) {
     for (const l of Object.values(this.layers)) if (l && l.setOpacity) l.setOpacity(o);
+  }
+
+  setSmooth(on) {
+    for (const l of Object.values(this.layers)) if (l && l.setSmooth) l.setSmooth(on);
   }
 }

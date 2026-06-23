@@ -364,6 +364,7 @@ function setRadarSource(map, sweep, product, site) {
   if (!map.getLayer('radar')) map.addLayer(state.radarLayer, dataLayerAnchor(map));
   state.radarLayer.setSweep(sweep, product, site);
   state.radarLayer.setOpacity(state.opacity);
+  state.radarLayer.setSmooth(state.smooth);
 }
 
 function clearRadarSource(map) {
@@ -416,6 +417,9 @@ const state = {
   selectedElevation: 0.5,
   productId: 'REF',
   opacity: 0.85,
+  // Bilinear-smooth the plotted data (radar / satellite / model / MRMS) instead
+  // of the crisp native-resolution default. Opt-in: off so nothing auto-smooths.
+  smooth: false,
   // Unfold aliased velocities by default: without this, gates beyond the Nyquist
   // co-interval fold back to small/wrong-signed values, so VEL reads much lower
   // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
@@ -505,6 +509,7 @@ function cacheEls() {
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
+  el.smoothToggle = $('#smoothToggle');
   el.ringsToggle = $('#ringsToggle');
   el.persistToggle = $('#persistToggle');
   el.dealiasToggle = $('#dealiasToggle');
@@ -1543,6 +1548,7 @@ function drawSatScene(meta, rgba, bbox) {
   setSatelliteSource(map);
   state.sat.layer.setScene(meta, rgba, bbox);
   state.sat.layer.setOpacity(state.opacity);
+  state.sat.layer.setSmooth(state.smooth);
 }
 
 function buildSatLegend() {
@@ -1699,6 +1705,7 @@ function renderMrms() {
   setMrmsSource(map);
   state.mrms.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.mrms.layer.setOpacity(state.opacity);
+  state.mrms.layer.setSmooth(state.smooth);
   syncSplit();
   updateDock();
 }
@@ -1711,6 +1718,7 @@ function drawMrmsPayload(payload) {
   setMrmsSource(map);
   state.mrms.layer.showPrepared(payload);
   state.mrms.layer.setOpacity(state.opacity);
+  state.mrms.layer.setSmooth(state.smooth);
 }
 
 function buildMrmsLegend() {
@@ -1952,6 +1960,7 @@ function renderModels() {
   setModelSource(map);
   state.models.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.models.layer.setOpacity(state.opacity);
+  state.models.layer.setSmooth(state.smooth);
   // Upper-air products carry wind + height overlays; others clear them.
   renderModelOverlays(map, grid);
   syncSplit();
@@ -1967,6 +1976,7 @@ function drawModelPayload(payload) {
   clearModelOverlays(map);
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
+  state.models.layer.setSmooth(state.smooth);
 }
 
 function buildModelLegend() {
@@ -3056,6 +3066,7 @@ function saveSettings() {
         site: state.site,
         productId: state.productId,
         opacity: state.opacity,
+        smooth: state.smooth,
         basemap: state.basemap,
         showRings: state.showRings,
         dealias: state.dealias,
@@ -3088,6 +3099,7 @@ function applyStoredSettings(s) {
   if (typeof s.site === 'string') state.site = s.site;
   if (typeof s.productId === 'string') state.productId = s.productId;
   if (typeof s.opacity === 'number') state.opacity = s.opacity;
+  if (typeof s.smooth === 'boolean') state.smooth = s.smooth;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
@@ -3128,6 +3140,7 @@ function reflectStoredControls() {
   }
   setToggleBtn(el.ringsToggle, state.showRings);
   setToggleBtn(el.dealiasToggle, state.dealias);
+  setToggleBtn(el.smoothToggle, state.smooth);
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
   if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
   if (el.basemapSelect) el.basemapSelect.value = state.basemap;
@@ -3227,6 +3240,24 @@ function init() {
     setStatus(on ? 'velocity dealiasing on' : 'velocity dealiasing off');
     saveSettings();
   });
+
+  // Data smoothing — bilinear-interpolate the plotted radar / satellite / model /
+  // MRMS field instead of the crisp native default. It only flips a shader
+  // uniform on the live layers, so there's nothing to recompute or reload.
+  if (el.smoothToggle) {
+    el.smoothToggle.addEventListener('click', () => {
+      const on = !el.smoothToggle.classList.contains('active');
+      setToggleBtn(el.smoothToggle, on);
+      state.smooth = on;
+      if (state.radarLayer) state.radarLayer.setSmooth(on);
+      if (state.sat.layer) state.sat.layer.setSmooth(on);
+      if (state.mrms.layer) state.mrms.layer.setSmooth(on);
+      if (state.models.layer) state.models.layer.setSmooth(on);
+      if (state.splitView) state.splitView.setSmooth(on);
+      setStatus(on ? 'data smoothing on' : 'data smoothing off');
+      saveSettings();
+    });
+  }
 
   // Single-site radar overlay for the satellite / MRMS / model modes.
   if (el.radarOverlayToggle) {
