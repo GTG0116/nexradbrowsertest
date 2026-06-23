@@ -372,24 +372,37 @@ function clearRadarSource(map) {
 }
 
 // Decode volumes off the main thread.
-const worker = new Worker(new URL('./decoder.worker.js', import.meta.url), {
-  type: 'module',
-});
+// A small pool of decode workers so playback can decompress several volumes at
+// once. A single worker serialises every decode, which made building a loop
+// slow (each multi-MB frame waited for the previous one); a pool lets the
+// parallel frame loader below keep more than one core busy. Sized to the
+// hardware but capped so we don't spawn a worker per frame or hog memory.
+const DECODE_POOL_SIZE = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
 let decodeSeq = 0;
+let decodeRR = 0;
 const pending = new Map();
-worker.onmessage = (e) => {
-  const { id, ok, result, error } = e.data;
-  const job = pending.get(id);
-  if (!job) return;
-  pending.delete(id);
-  if (ok) job.resolve(result);
-  else job.reject(new Error(error));
-};
+const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
+  const w = new Worker(new URL('./decoder.worker.js', import.meta.url), {
+    type: 'module',
+  });
+  w.onmessage = (e) => {
+    const { id, ok, result, error } = e.data;
+    const job = pending.get(id);
+    if (!job) return;
+    pending.delete(id);
+    if (ok) job.resolve(result);
+    else job.reject(new Error(error));
+  };
+  return w;
+});
 function decodeVolume(bytes) {
   const id = ++decodeSeq;
+  // Round-robin across the pool; jobs are keyed by a global id so replies route
+  // back correctly regardless of which worker answers first.
+  const w = decodeWorkers[decodeRR++ % decodeWorkers.length];
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    worker.postMessage({ id, bytes }, [bytes.buffer]); // zero-copy transfer
+    w.postMessage({ id, bytes }, [bytes.buffer]); // zero-copy transfer
   });
 }
 
@@ -2446,6 +2459,12 @@ function applyResponsiveLayout() {
 // GPU-ready payload (a max-pooled texture or a prebuilt RGBA) and cache that.
 // ---------------------------------------------------------------------------
 
+// How many playback frames to fetch/decode at once. Higher overlaps more of the
+// per-frame network latency; the decode worker pool caps how much actually runs
+// in parallel for radar, while grid/satellite frames are network-bound so a few
+// extra lanes mostly hide round-trip time.
+const PLAYBACK_CONCURRENCY = 6;
+
 // A short key identifying the current playback context; when it changes (site,
 // product, run, sector…) the cached frames are no longer valid and are dropped.
 function playbackContextKey() {
@@ -2552,23 +2571,40 @@ function createPlayback() {
       if (ctx !== this.cacheCtx) { this.cache.clear(); this.cacheCtx = ctx; }
 
       setStatus('loading playback…', true);
-      const frames = [];
-      let i = 0;
-      for (const fr of provider.frames) {
-        let payload = this.cache.get(fr.ck);
-        if (!payload) {
-          try {
-            payload = await provider.load(fr);
-            this.cache.set(fr.ck, payload);
-          } catch (e) {
-            console.error(e);
-            continue;
+      // Load frames with bounded concurrency instead of one-at-a-time. The old
+      // sequential await chained every frame's fetch+decode end to end; building
+      // a loop now overlaps the network round-trips (and, via the worker pool,
+      // the decodes), which is the bulk of the wait. Results are stitched back
+      // into frame order afterwards so playback stays oldest→newest.
+      const total = provider.frames.length;
+      const results = new Array(total);
+      let done = 0;
+      let next = 0;
+      const runWorker = async () => {
+        while (this.active) {
+          const idx = next++;
+          if (idx >= total) return;
+          const fr = provider.frames[idx];
+          let payload = this.cache.get(fr.ck);
+          if (!payload) {
+            try {
+              payload = await provider.load(fr);
+              this.cache.set(fr.ck, payload);
+            } catch (e) {
+              console.error(e);
+              done++;
+              continue;
+            }
           }
+          if (!this.active) return; // user bailed mid-load
+          results[idx] = { label: fr.label, ck: fr.ck, payload };
+          el.playLabel.textContent = `loading ${++done}/${total}…`;
         }
-        if (!this.active) return; // user bailed mid-load
-        frames.push({ label: fr.label, ck: fr.ck, payload });
-        el.playLabel.textContent = `loading ${++i}/${provider.frames.length}…`;
-      }
+      };
+      const lanes = Math.min(PLAYBACK_CONCURRENCY, total);
+      await Promise.all(Array.from({ length: lanes }, runWorker));
+      if (!this.active) return; // user bailed mid-load
+      const frames = results.filter(Boolean);
       if (!frames.length) {
         setStatus('playback unavailable');
         this.stop();
