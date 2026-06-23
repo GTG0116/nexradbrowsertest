@@ -97,11 +97,27 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **GPU plate-carrée layer** (`js/gridLayer.js`) draws the 7000×3500 CONUS grid
   (max-pooled to a GPU-friendly texture) with per-product colour tables.
 
-### Weather models — HRRR (`noaa-hrrr-bdp-pds`)
+### Weather models — HRRR, NAM, NAM Nest, RAP, GFS
 
-- **Dozens of HRRR fields in three categories**, read straight from the
-  operational High-Resolution Rapid Refresh GRIB2 on S3 and grouped in the
-  product picker:
+- **Five models** read straight from their NODD GRIB2 buckets on S3 and picked
+  from the **Model** dropdown:
+  - **HRRR** (3 km CONUS, `noaa-hrrr-bdp-pds`) — hourly cycles.
+  - **NAM** (12 km CONUS, `noaa-nam-pds`) — 00/06/12/18z, hourly to F36 then
+    3-hourly to F84.
+  - **NAM Nest** (3 km CONUS, `noaa-nam-pds`) — 00/06/12/18z, hourly to F60.
+  - **RAP** (13 km CONUS, `noaa-rap-pds`) — hourly cycles, extended to F51 at
+    03/09/15/21z. JPEG2000-packed (see below).
+  - **GFS** (0.25° global, `noaa-gfs-bdp-pds`) — 00/06/12/18z, hourly to F120
+    then 3-hourly to F384; a true lat/lon grid, recentered to −180…180 for the
+    CONUS-focused map.
+- **Per-model product menus**: each model advertises only the fields its GRIB2
+  output actually carries (`MODEL_PRODUCT_SUPPORT` in `js/models.js`), so the
+  picker hides products a model can't supply — e.g. NAM drops the 90/255 mb-layer
+  CAPE parcels and the composites built on them, RAP keeps only 500 mb vorticity,
+  GFS has no sub-storm-scale shear, and the NAM Nest's reset-every-3-hours precip
+  buckets leave it without the run-total QPF fields.
+- **Field categories**, read straight from the operational GRIB2 and grouped in
+  the product picker:
   - *Surface & Precip* — composite reflectivity, 2 m temperature and dew point,
     10 m wind speed and gusts, relative humidity, total cloud cover, and
     1/6/24-hr and run-total precipitation.
@@ -129,11 +145,22 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **GRIB2 complex packing** decoded in pure JS (`js/grib2.js`): NCEP's complex
   packing with 2nd-order **spatial differencing** (Data Representation Template
   5.3) — group references/widths/lengths and the integrated spatial differences
-  — which is how HRRR (and most model output) is stored. Sign-magnitude integers
+  — which is how HRRR, NAM and GFS store their fields. Sign-magnitude integers
   throughout, as the GRIB2 standard requires.
-- **Lambert Conformal → lat/lon** (`js/models.js`): HRRR rides a 3 km Lambert
-  Conformal Conic grid, so each field is resampled onto a plain lat/lon grid via
-  a forward LCC projection and then drawn through the **same GPU grid layer**
+- **JPEG2000 decode** (`js/jpx.js`): RAP packs its GRIB2 with JPEG2000 (Data
+  Representation Template 5.40), so a standalone J2K codestream decoder (MQ
+  arithmetic coder, EBCOT, 5/3 & 9/7 inverse wavelets — adapted from Mozilla
+  PDF.js, Apache-2.0) reconstructs the raw integer samples before the same
+  reference/scale formula is applied.
+- **Level-string normalization** (`js/models.js`): models label the same physical
+  level differently — NAM tags reflectivity "(considered as a single layer)",
+  layer spans appear as both "0-6000 m" and "6000-0 m", and NAM/RAP store
+  lightning at `surface` — so the `.idx` matcher normalizes the suffix and sorts
+  span endpoints, with a small per-model override map for the rest.
+- **Native grid → lat/lon** (`js/models.js`): the CONUS models ride Lambert
+  Conformal Conic grids (3–13 km), so each field is resampled onto a plain
+  lat/lon grid via a forward LCC projection; GFS is already lat/lon and just gets
+  recentered. Either way it's drawn through the **same GPU grid layer**
   (`js/gridLayer.js`) and inspect path as the lat/lon MRMS products. Surface and
   pressure-level fields share the identical target grid, so multi-message
   products combine cell-for-cell after resampling.

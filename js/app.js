@@ -12,7 +12,8 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScen
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
-import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours } from './models.js';
+import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours,
+  modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
 import { fetchSounding, drawSkewT, drawHodograph, paramRows } from './sounding.js';
@@ -1523,15 +1524,19 @@ function buildMrmsLegend() {
 }
 
 // ---------------------------------------------------------------------------
-// Weather models (HRRR)
+// Weather models (HRRR, NAM, NAM Nest, RAP, GFS)
 //
 // Models reuse the lat/lon grid layer and the time-list / opacity / playback
 // chrome. A model field is decoded straight from a Range request against the
-// HRRR GRIB2 on S3 (see models.js), resampled from its Lambert grid to lat/lon,
-// then drawn through the same GPU path as MRMS.
+// model's GRIB2 on S3 (see models.js), resampled from its native grid to
+// lat/lon, then drawn through the same GPU path as MRMS. Each model advertises
+// which products it can supply, so the picker only shows supported fields.
 // ---------------------------------------------------------------------------
 function initModelSelects() {
   if (!el.modelSelect) return;
+  // A saved product may not exist on the (saved) model — fall back if so.
+  if (!modelSupports(state.models.modelKey, state.models.productId))
+    state.models.productId = defaultProductFor(state.models.modelKey);
   el.modelSelect.innerHTML = '';
   for (const [key, m] of Object.entries(MODELS)) {
     const o = document.createElement('option');
@@ -1541,10 +1546,24 @@ function initModelSelects() {
   }
   el.modelSelect.addEventListener('change', () => {
     state.models.modelKey = el.modelSelect.value;
+    // Switch to a supported product if this model can't supply the current one.
+    if (!modelSupports(state.models.modelKey, state.models.productId))
+      state.models.productId = defaultProductFor(state.models.modelKey);
+    // Keep split pane 2 valid too (it shares the model).
+    if (state.splitView && state.splitView.active &&
+        !modelSupports(state.models.modelKey, state.splitView.productId))
+      state.splitView.onModeChange();
     state._forceLatest = true;
+    buildModelProductButtons();
+    buildModelLegend();
     saveSettings();
     loadModelList();
   });
+}
+
+// Short model name for status lines (HRRR, NAM, RAP, …).
+function modelName() {
+  return (state.models.modelKey || '').toUpperCase() || 'model';
 }
 
 // Remember which model product categories the user has expanded, so a rebuild
@@ -1555,7 +1574,13 @@ const modelCatOpen = {};
 function buildModelProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-stack';
+  const modelKey = state.models.modelKey;
   for (const cat of MODEL_CATEGORIES) {
+    // Only the products this model actually supplies; skip a category that ends
+    // up empty for the current model.
+    const ids = cat.products.filter((id) => MODEL_PRODUCTS[id] && modelSupports(modelKey, id));
+    if (!ids.length) continue;
+
     // Every category starts collapsed to keep the long model list compact; the
     // user's manual expand/collapse choices are remembered across rebuilds.
     const open = !!modelCatOpen[cat.name];
@@ -1575,9 +1600,8 @@ function buildModelProductButtons() {
 
     const grid = document.createElement('div');
     grid.className = 'product-grid';
-    for (const id of cat.products) {
+    for (const id of ids) {
       const p = MODEL_PRODUCTS[id];
-      if (!p) continue;
       const btn = document.createElement('button');
       btn.className = 'product-btn';
       btn.dataset.id = id;
@@ -1643,7 +1667,7 @@ function selectFhour(f) {
 
 async function loadModelList() {
   if (state.mode !== 'models') return;
-  setStatus('listing HRRR…', true);
+  setStatus(`listing ${modelName()}…`, true);
   buildModelList();
   try {
     const when = state.live ? new Date() : state.date;
@@ -1661,7 +1685,7 @@ async function loadModelList() {
       buildFhourList();
     }
   } catch (e) {
-    setStatus(`HRRR list error: ${e.message}`);
+    setStatus(`${modelName()} list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -1669,8 +1693,15 @@ async function loadModelList() {
 function selectModelRun(key) {
   state.models.runKey = key;
   const run = currentModelRun();
-  // Keep the chosen forecast hour if the new run reaches it, else fall back to F00.
-  if (run && state.models.fhour > run.maxFhour) state.models.fhour = 0;
+  // Keep the chosen forecast hour if the new run offers it; otherwise snap down
+  // to the nearest available hour (runs may step non-hourly, e.g. NAM/GFS).
+  if (run) {
+    const fhrs = forecastHours(run);
+    if (!fhrs.includes(state.models.fhour)) {
+      const below = fhrs.filter((f) => f <= state.models.fhour);
+      state.models.fhour = below.length ? below[below.length - 1] : 0;
+    }
+  }
   buildModelList();
   buildFhourList();
   loadModelFrame();
@@ -1683,7 +1714,7 @@ async function loadModelFrame() {
   if (!run) return;
   const fhour = state.models.fhour;
   const seq = ++modelLoadSeq;
-  setStatus('downloading HRRR…', true);
+  setStatus(`downloading ${modelName()}…`, true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
@@ -1691,13 +1722,13 @@ async function loadModelFrame() {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
     if (seq !== modelLoadSeq) return; // a newer selection superseded this one
-    setStatus('decoding HRRR…', true);
+    setStatus(`decoding ${modelName()}…`, true);
     el.decoding.classList.add('show');
     state.models.grid = grid;
     renderModels();
-    setStatus(`HRRR ${run.label} F${p2(fhour)} · ${grid.product.name}`);
+    setStatus(`${modelName()} ${run.label} F${p2(fhour)} · ${grid.product.name}`);
   } catch (e) {
-    if (seq === modelLoadSeq) setStatus(`HRRR error: ${e.message}`);
+    if (seq === modelLoadSeq) setStatus(`${modelName()} error: ${e.message}`);
     console.error(e);
   } finally {
     if (seq === modelLoadSeq) {
@@ -2839,8 +2870,11 @@ function applyStoredSettings(s) {
   }
   if (s.mrms && typeof s.mrms.productId === 'string') state.mrms.productId = s.mrms.productId;
   if (s.models && typeof s.models === 'object') {
-    if (typeof s.models.modelKey === 'string') state.models.modelKey = s.models.modelKey;
+    if (typeof s.models.modelKey === 'string' && MODELS[s.models.modelKey]) state.models.modelKey = s.models.modelKey;
     if (typeof s.models.productId === 'string') state.models.productId = s.models.productId;
+    // A restored product might not exist on the restored model.
+    if (!modelSupports(state.models.modelKey, state.models.productId))
+      state.models.productId = defaultProductFor(state.models.modelKey);
   }
   if (s.map && isFinite(s.map.lng) && isFinite(s.map.lat)) state._restoreView = s.map;
 }

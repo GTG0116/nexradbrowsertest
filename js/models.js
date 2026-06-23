@@ -14,16 +14,28 @@
 import { decodeGrib2 } from './grib2.js';
 import { makeScale } from './products.js';
 
-// Available models (only HRRR for now). `bucket` is CORS-enabled for listing,
-// GET and Range requests, like the other NODD buckets used here.
+// Available models, each backed by a CORS-enabled NODD AWS bucket (listing, GET
+// and Range requests). Per-model fields:
+//   keysFor(day, cycle, fhour, file) → { grib, idx } object keys.
+//   cycleStep   hours between model runs (1 = hourly, 6 = synoptic only).
+//   latencyMin  minutes after a cycle's nominal time before it's posted.
+//   maxForecastHour(cycle) / forecastHoursList(cycle) define the forecast hours
+//     a run offers — the former for plain hourly ranges, the latter for mixed
+//     stepping (e.g. NAM hourly to F36 then 3-hourly).
+//   levelFix    per-variable level-string overrides where a model labels a field
+//     differently than HRRR (e.g. NAM/RAP store lightning at 'surface').
+//   products    the subset of MODEL_PRODUCTS this model can supply (attached
+//     below, once MODEL_ORDER exists); unset means "all".
+// HRRR posts surface ('sfc'/wrfsfc) and pressure ('prs'/wrfprs) files
+// separately; the other models pack everything into one file per forecast hour,
+// so their keysFor ignores the `file` argument.
 export const MODELS = {
   hrrr: {
     id: 'hrrr',
     label: 'HRRR (3 km CONUS)',
     bucket: 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com',
-    // Build the grib + index keys for a UTC day, cycle hour and forecast hour.
-    // `file` selects the product family: 'sfc' (surface, default) or 'prs'
-    // (3-D pressure levels — winds/heights/vorticity aloft).
+    cycleStep: 1,
+    latencyMin: 55,
     keysFor(dayStr, cycle, fhour, file = 'sfc') {
       const kind = file === 'prs' ? 'wrfprs' : 'wrfsfc';
       const grib = `hrrr.${dayStr}/conus/hrrr.t${pad(cycle)}z.${kind}f${pad(fhour)}.grib2`;
@@ -34,7 +46,78 @@ export const MODELS = {
       return cycle % 6 === 0 ? 48 : 18;
     },
   },
+  nam: {
+    id: 'nam',
+    label: 'NAM (12 km CONUS)',
+    bucket: 'https://noaa-nam-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 200,
+    levelFix: { LTNG: 'surface' },
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `nam.${dayStr}/nam.t${pad(cycle)}z.awphys${pad(fhour)}.tm00.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // Hourly to F36, then 3-hourly out to F84.
+    forecastHoursList() {
+      return steppedList(36, 84, 3);
+    },
+  },
+  namnest: {
+    id: 'namnest',
+    label: 'NAM Nest (3 km CONUS)',
+    bucket: 'https://noaa-nam-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 200,
+    levelFix: { LTNG: 'surface' },
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `nam.${dayStr}/nam.t${pad(cycle)}z.conusnest.hiresf${pad(fhour)}.tm00.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    maxForecastHour() {
+      return 60;
+    },
+  },
+  rap: {
+    id: 'rap',
+    label: 'RAP (13 km CONUS)',
+    bucket: 'https://noaa-rap-pds.s3.amazonaws.com',
+    cycleStep: 1,
+    latencyMin: 75,
+    levelFix: { LTNG: 'surface' },
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `rap.${dayStr}/rap.t${pad(cycle)}z.awp130pgrbf${pad(fhour)}.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // Extended (51 h) runs at 03/09/15/21z; the rest reach F21.
+    maxForecastHour(cycle) {
+      return cycle % 6 === 3 ? 51 : 21;
+    },
+  },
+  gfs: {
+    id: 'gfs',
+    label: 'GFS (0.25° Global)',
+    bucket: 'https://noaa-gfs-bdp-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 230,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `gfs.${dayStr}/${pad(cycle)}/atmos/gfs.t${pad(cycle)}z.pgrb2.0p25.f${pad(fhour, 3)}`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // Hourly to F120, then 3-hourly out to F384.
+    forecastHoursList() {
+      return steppedList(120, 384, 3);
+    },
+  },
 };
+
+// Build a forecast-hour list: hourly out to `hourlyMax`, then every `step` hours
+// out to `total` (e.g. NAM = steppedList(36, 84, 3)).
+function steppedList(hourlyMax, total, step) {
+  const out = [];
+  for (let f = 0; f <= hourlyMax; f++) out.push(f);
+  for (let f = hourlyMax + step; f <= total; f += step) out.push(f);
+  return out;
+}
 
 // Products are grouped into categories (MODEL_CATEGORIES, defined after the
 // product table); MODEL_ORDER is the flattened list in display order.
@@ -439,38 +522,110 @@ export const MODEL_CATEGORIES = [
 
 export const MODEL_ORDER = MODEL_CATEGORIES.flatMap((c) => c.products);
 
+// Which products each model can actually supply, verified against the field and
+// level inventory of each model's GRIB2 output. A model omits products whose
+// source fields it doesn't carry — e.g. NAM has no 90/255 mb-layer CAPE so it
+// drops the mixed-/most-unstable parcels and the composites built on them, RAP
+// only stores 500 mb absolute vorticity, GFS carries no 0–6 km shear, and the
+// NAM Nest's reset-every-3-hours precip buckets can't form the run-total fields
+// the QPF products need. HRRR (unlisted) supports the full set.
+const MODEL_PRODUCT_SUPPORT = {
+  nam: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'SBCIN', 'LAPSE', 'SRH3', 'SHEAR6', 'LTNG',
+  ],
+  namnest: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
+    'SRH1', 'SRH3', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG',
+  ],
+  rap: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE',
+    'SRH1', 'SRH3', 'SHEAR6', 'STORM', 'SCP', 'EHI1', 'EHI3', 'LTNG',
+  ],
+  gfs: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'SRH3', 'STORM', 'EHI3',
+  ],
+};
+for (const [key, model] of Object.entries(MODELS)) {
+  model.products = new Set(MODEL_PRODUCT_SUPPORT[key] || MODEL_ORDER);
+}
+
+// Does a model offer a given product?
+export function modelSupports(modelKey, productId) {
+  const m = MODELS[modelKey];
+  return !m || !m.products || m.products.has(productId);
+}
+
+// The product ids a model offers, in display order.
+export function modelProductOrder(modelKey) {
+  return MODEL_ORDER.filter((id) => modelSupports(modelKey, id));
+}
+
+// A sensible default product when switching to a model that doesn't carry the
+// current one — composite reflectivity if available, else the first supported.
+export function defaultProductFor(modelKey) {
+  if (modelSupports(modelKey, 'REFC')) return 'REFC';
+  return modelProductOrder(modelKey)[0] || 'REFC';
+}
+
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 const dayStrOf = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
 
-// List the available model runs (cycles) for a UTC day, newest last. HRRR runs
-// every hour. For the current day we stop at the most recent cycle that should
-// already be posted (HRRR f00 lands ~50 min after the top of the hour).
+// The forecast hours a run offers: an explicit list (mixed stepping, e.g. NAM)
+// or a plain hourly range [0 … maxForecastHour].
+function forecastHoursFor(model, cycle) {
+  if (model.forecastHoursList) return model.forecastHoursList(cycle);
+  const out = [];
+  const max = model.maxForecastHour ? model.maxForecastHour(cycle) : 0;
+  for (let f = 0; f <= max; f++) out.push(f);
+  return out;
+}
+
+// List the available model runs (cycles) for a UTC day, newest last. Cycles step
+// by `model.cycleStep` (hourly for HRRR/RAP, 6-hourly for NAM/GFS). For the
+// current day we drop any cycle that shouldn't have posted yet (its nominal time
+// plus `model.latencyMin`).
 export async function listModels(modelKey, productId, date) {
   const model = MODELS[modelKey];
   if (!model) throw new Error('unknown model');
   const dayStr = dayStrOf(date);
   const now = new Date();
   const isToday = dayStrOf(now) === dayStr;
-  let maxH = 23;
-  if (isToday) {
-    maxH = now.getUTCMinutes() >= 55 ? now.getUTCHours() : now.getUTCHours() - 1;
-  }
+  const step = model.cycleStep || 1;
+  const latencyMs = (model.latencyMin || 55) * 60000;
   const runs = [];
-  for (let h = 0; h <= maxH; h++) {
+  for (let h = 0; h <= 23; h += step) {
+    const time = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h));
+    if (isToday && now.getTime() < time.getTime() + latencyMs) continue; // not posted yet
+    const fhours = forecastHoursFor(model, h);
     runs.push({
       key: `${dayStr}t${pad(h)}`,
       dayStr,
       cycle: h,
       label: `${pad(h)}z`,
-      time: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h)),
-      maxFhour: model.maxForecastHour ? model.maxForecastHour(h) : 0,
+      time,
+      maxFhour: fhours[fhours.length - 1] || 0,
+      fhours,
     });
   }
   return runs;
 }
 
-// The forecast hours available for a run, as integers [0 … maxFhour].
+// The forecast hours available for a run (its precomputed list, or an hourly
+// fallback up to maxFhour).
 export function forecastHours(run) {
+  if (run.fhours) return run.fhours;
   const out = [];
   for (let f = 0; f <= (run.maxFhour || 0); f++) out.push(f);
   return out;
@@ -480,11 +635,27 @@ export function forecastHours(run) {
 // matching a source descriptor (`varName`/`level`, and optional `acc` matched
 // against the accumulation/forecast field). `end` is null for the file's last
 // record (an open-ended Range covers it).
+// Normalize a GRIB `.idx` level string so the same physical level matches across
+// models that label it differently: drop the "(considered as a single layer)"
+// suffix some models add (e.g. NAM's reflectivity / cloud cover), and sort the
+// endpoints of layer spans, since the order is just convention ("6000-0 m" vs
+// "0-6000 m", "90-0 mb" — all denote the layer between the two bounds).
+function normLevel(s) {
+  s = s.replace(' (considered as a single layer)', '');
+  const m = /^(\d+)-(\d+)(\D.*)$/.exec(s);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    return `${Math.min(a, b)}-${Math.max(a, b)}${m[3]}`;
+  }
+  return s;
+}
+
 function rangeFromIdx(text, src) {
   const lines = text.split('\n').filter((l) => l.trim());
+  const level = normLevel(src.level);
   for (let i = 0; i < lines.length; i++) {
     const f = lines[i].split(':');
-    if (f[3] !== src.varName || f[4] !== src.level) continue;
+    if (f[3] !== src.varName || normLevel(f[4]) !== level) continue;
     if (src.acc != null) {
       const fc = f[5] || '';
       if (src.acc instanceof RegExp ? !src.acc.test(fc) : fc !== src.acc) continue;
@@ -632,12 +803,34 @@ export function resampleLambert(grid, step = 0.025) {
 // derived parameters) read each index only once.
 async function loadSource(model, run, fhour, src, idxCache, onProgress) {
   const f = fhour + (src.fhourDelta || 0);
+  // Apply any per-model level-string override (e.g. NAM lightning at 'surface').
+  const fix = model.levelFix && model.levelFix[src.varName];
+  if (fix) src = { ...src, level: fix };
   const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file);
   if (!idxCache.has(grib)) idxCache.set(grib, (await fetch(`${model.bucket}/${idx}`)).text());
   const range = rangeFromIdx(await idxCache.get(grib), src);
   const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
   const decoded = await decodeGrib2(bytes);
-  return decoded.proj === 'lambert' ? resampleLambert(decoded) : decoded;
+  if (decoded.proj === 'lambert') return resampleLambert(decoded);
+  return recenterGlobal(decoded);
+}
+
+// Global lat/lon grids (GFS) start at 0° longitude and run to ~360°, so the
+// western hemisphere lands off the right edge. Roll the columns by half so the
+// grid spans −180…180 and lines up with the CONUS-centered map.
+function recenterGlobal(grid) {
+  if (grid.proj !== 'latlon') return grid;
+  const span = grid.ni * grid.di;
+  if (Math.abs(span - 360) > grid.di || grid.lon1 > 1) return grid; // not a full globe at 0°
+  const { ni, nj, values } = grid;
+  const half = Math.round(180 / grid.di) % ni;
+  if (!half) return grid;
+  const rolled = new Float32Array(ni * nj);
+  for (let j = 0; j < nj; j++) {
+    const row = j * ni;
+    for (let i = 0; i < ni; i++) rolled[row + i] = values[row + ((i + half) % ni)];
+  }
+  return { ...grid, lon1: grid.lon1 - 180, values: rolled };
 }
 
 // Wind + geopotential-height fields for an upper-air overlay, at the product's
