@@ -1899,6 +1899,49 @@ input[type='range']::-moz-range-thumb {
   padding: 0 12px calc(16px + env(safe-area-inset-bottom, 0px));
   will-change: transform;
 }
+
+/* Tablet/desktop positioning needs to live after the base sheet styles so the
+   base mobile `left: 0; right: 0` rules do not win the cascade. Keep horizontal
+   centring on left/margin instead of transform because the open/close and swipe
+   interactions own the sheet's inline `transform: translateY(...)`. */
+@media (min-width: 760px) {
+  .mobile-sheet {
+    left: 50%;
+    right: auto;
+    width: min(760px, 96vw);
+    margin-left: calc(min(760px, 96vw) * -0.5);
+    max-height: 78vh;
+    border-radius: 22px 22px 0 0;
+    padding: 0 20px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .playback-bar {
+    left: 50%;
+    right: auto;
+    width: min(880px, calc(100% - 36px));
+    margin-left: calc(min(880px, calc(100% - 36px)) * -0.5);
+  }
+
+  .dock-tool-menu {
+    right: calc((100% - min(880px, 100%)) / 2 + 14px);
+  }
+}
+
+@media (min-width: 1200px) {
+  .mobile-sheet {
+    width: min(820px, 90vw);
+    margin-left: calc(min(820px, 90vw) * -0.5);
+  }
+
+  .playback-bar {
+    width: min(960px, calc(100% - 36px));
+    margin-left: calc(min(960px, calc(100% - 36px)) * -0.5);
+  }
+
+  .dock-tool-menu {
+    right: calc((100% - min(960px, 100%)) / 2 + 14px);
+  }
+}
 .sheet-header {
   position: relative;
   display: flex;
