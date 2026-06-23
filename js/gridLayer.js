@@ -25,7 +25,7 @@ uniform sampler2D u_lut;
 uniform float u_ni, u_nj;
 uniform float u_lon1, u_lat1, u_di, u_dj;
 uniform float u_steps, u_opacity;
-uniform float u_smooth;          // 0 = nearest (crisp cells), 1 = bilinear smooth
+uniform float u_smooth;          // 0 = nearest, 1 = hermite-bilinear, 2 = bicubic
 const float PI = 3.141592653589793;
 
 // Decode one grid cell to vec2(t, valid), t in [0,1]. Missing cells (code 0)
@@ -36,6 +36,26 @@ vec2 cellValue(float ci, float cj) {
   float code = floor(d.r * 255.0 + 0.5) + floor(d.g * 255.0 + 0.5) * 256.0;
   if (code < 1.0) return vec2(0.0, 0.0);
   return vec2((code - 1.0) / 65534.0, 1.0);
+}
+
+// Cubic B-spline weights for the four taps at offsets -1,0,1,2 around fraction t.
+// (B-spline, not Catmull-Rom: it low-pass *smooths* rather than interpolating, so
+// coarse grids — model / satellite cells — blur into a solid wash instead of
+// reading as blocks, while still tracking the field.) The four weights sum to 1.
+vec4 cubicW(float t) {
+  float t2 = t * t, t3 = t2 * t;
+  return vec4(1.0 - 3.0 * t + 3.0 * t2 - t3,
+              4.0 - 6.0 * t2 + 3.0 * t3,
+              1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3,
+              t3) / 6.0;
+}
+// Pick a vec4 component by index without dynamic indexing (unsupported on some
+// WebGL1 GPUs).
+float pick(vec4 v, int i) {
+  if (i == 0) return v.x;
+  if (i == 1) return v.y;
+  if (i == 2) return v.z;
+  return v.w;
 }
 
 void main() {
@@ -50,7 +70,7 @@ void main() {
     vec2 cv = cellValue(floor(fi), floor(fj));   // NEAREST: crisp cell
     if (cv.y < 0.5) discard;                      // missing
     t = cv.x;
-  } else {
+  } else if (u_smooth < 1.5) {
     // Bilinear interpolation in (i, j) cell space. Cell centres sit at integer
     // indices, so shifting by -0.5 lands a sample's neighbours on the corners.
     float ic = fi - 0.5, jc = fj - 0.5;
@@ -73,6 +93,26 @@ void main() {
     float wsum = w00 + w10 + w01 + w11;
     if (wsum < 1e-4) discard;                     // no valid cell nearby
     t = (s00.x * w00 + s10.x * w10 + s01.x * w01 + s11.x * w11) / wsum;
+  } else {
+    // Bicubic B-spline over the 4x4 cell neighbourhood — a genuinely wide blur,
+    // so even coarse model / satellite cells dissolve into a smooth field
+    // instead of staying visible as blocks. Weights folded with validity and
+    // renormalised so missing cells don't leak or darken the result.
+    float ic = fi - 0.5, jc = fj - 0.5;
+    float i0 = floor(ic), j0 = floor(jc);
+    vec4 wx = cubicW(ic - i0);
+    vec4 wy = cubicW(jc - j0);
+    float st = 0.0, sw = 0.0;
+    for (int m = 0; m < 4; m++) {
+      for (int n = 0; n < 4; n++) {
+        vec2 cv = cellValue(i0 + float(n) - 1.0, j0 + float(m) - 1.0);
+        float w = pick(wx, n) * pick(wy, m) * cv.y;
+        st += cv.x * w;
+        sw += w;
+      }
+    }
+    if (sw < 1e-4) discard;                       // no valid cell nearby
+    t = st / sw;
   }
 
   float li = clamp(floor(t * (u_steps - 1.0) + 0.5), 0.0, u_steps - 1.0);
@@ -160,6 +200,10 @@ export function createGridLayer(id = 'mrms') {
     map: null, gl: null, program: null, quad: null, dataTex: null, lutTex: null,
     has: false, pending: null, uni: null, quadVerts: null, steps: 1024, opacity: 0.9,
     smooth: false,
+    // Smoothing kernel when `smooth` is on: 2 = bicubic for the coarse model
+    // grids (their ~3 km cells stay visible under mere bilinear), 1 = hermite-
+    // bilinear for the fine, max-pooled MRMS grid (already smooth at level 1).
+    smoothLevel: id === 'models' ? 2 : 1,
 
     onAdd(map, gl) {
       this.map = map;
@@ -253,7 +297,7 @@ export function createGridLayer(id = 'mrms') {
       gl.uniform1f(this.u.u_dj, U.dj);
       gl.uniform1f(this.u.u_steps, this.steps);
       gl.uniform1f(this.u.u_opacity, this.opacity);
-      gl.uniform1f(this.u.u_smooth, this.smooth ? 1 : 0);
+      gl.uniform1f(this.u.u_smooth, this.smooth ? this.smoothLevel : 0.0);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.disable(gl.DEPTH_TEST);
