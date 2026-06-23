@@ -31,7 +31,9 @@ the radar imagery — entirely client-side.
   radar is slotted *into* the basemap's own layer stack — beneath the town-name
   and boundary layers — so place names and borders always draw on top of the
   reflectivity, with meteorologically conventional color scales
-  (`js/products.js`).
+  (`js/products.js`). Country and state outlines are redrawn from the basemap's
+  own `admin` vector source with one high-contrast style, so they read the same
+  above the radar on every basemap (not just Dark/Light).
 - A distinctive **radar-operations-console UI** over a dark basemap: range rings,
   a live cursor readout, opacity control, elevation-tilt selection, and a UTC
   clock. Pan/zoom the map freely. An **inspect** crosshair reads the value under

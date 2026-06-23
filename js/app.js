@@ -56,13 +56,23 @@ const BASEMAPS = {
 // so the old resolution/“auto smoothing” machinery is gone.
 
 // Find the basemap layer to insert our overlays *below*, so the style's town
-// labels and administrative borders stay on top of the radar. We slot in just
-// under the first label (symbol) or boundary line layer.
+// labels and administrative borders stay on top of the radar. We anchor on the
+// basemap's first administrative-boundary line: in every Mapbox style the
+// boundaries sit just beneath the whole label stack, so slotting in there puts
+// the radar above the roads/landuse while keeping borders and town names on top.
+//
+// (The old heuristic returned the first *symbol* layer, but in Streets/Outdoors
+// that is a road one-way-arrow near the bottom of the stack — which dragged the
+// radar and every overlay down under the entire road network.)
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
-    if (ly.type === 'symbol') return ly.id;
     if (ly.type === 'line' && /admin|boundary|border/i.test(ly.id)) return ly.id;
+  }
+  // No vector boundaries (e.g. a raster-only style): fall back to the first
+  // label symbol so labels still draw on top of the radar.
+  for (const ly of layers) {
+    if (ly.type === 'symbol') return ly.id;
   }
   return undefined; // nothing matched → overlays go on top
 }
@@ -119,6 +129,72 @@ function addCoastline(map, anchor) {
     },
     anchor
   );
+}
+
+// Country (admin_level 0) and state (admin_level 1) outlines. Every basemap
+// ships these in an `admin` vector source, but styles them wildly differently —
+// crisp on Dark/Light, almost invisible on Satellite/Streets/Outdoors. So we
+// hide the native admin lines and redraw our own from the same source with one
+// consistent, high-contrast look (a dark casing under a bright line) that reads
+// on any basemap and on top of the radar. Drawn at the overlay anchor, so the
+// outlines sit above the radar fill but beneath the town labels.
+function adminSource(map) {
+  const layers = map.getStyle().layers || [];
+  const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
+  return admin && admin.source;
+}
+
+function hideNativeBoundaries(map) {
+  for (const l of map.getStyle().layers || [])
+    if (l['source-layer'] === 'admin' && map.getLayer(l.id))
+      map.setLayoutProperty(l.id, 'visibility', 'none');
+}
+
+function addBoundaries(map, anchor) {
+  if (map.getLayer('country-outline')) return;
+  const source = adminSource(map);
+  if (!source) return; // raster-only style with no vector admin source
+  // Match the basemap's own admin filtering: skip maritime/disputed segments and
+  // pin to the US worldview so we don't double-draw contested borders.
+  const filt = (level) => [
+    'all',
+    ['==', ['get', 'admin_level'], level],
+    ['==', ['get', 'maritime'], 'false'],
+    ['==', ['get', 'disputed'], 'false'],
+    ['match', ['get', 'worldview'], ['all', 'US'], true, false],
+  ];
+  const line = (id, level, paint) =>
+    map.addLayer(
+      {
+        id,
+        type: 'line',
+        source,
+        'source-layer': 'admin',
+        filter: filt(level),
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint,
+      },
+      anchor
+    );
+  // State borders first, then country on top (so the country line wins where the
+  // two run together). Each is a bright line over a dark casing for contrast.
+  line('state-outline-case', 1, {
+    'line-color': 'rgba(8,14,24,0.35)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
+  });
+  line('state-outline', 1, {
+    'line-color': 'rgba(236,242,255,0.55)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.4, 7, 0.9, 11, 1.4],
+    'line-dasharray': [3, 2],
+  });
+  line('country-outline-case', 0, {
+    'line-color': 'rgba(8,14,24,0.45)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.2, 7, 3.4, 11, 4.4],
+  });
+  line('country-outline', 0, {
+    'line-color': 'rgba(236,242,255,0.9)',
+    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.7, 11, 2.3],
+  });
 }
 
 function sitesGeoJSON() {
@@ -207,6 +283,11 @@ function setupOverlays(map) {
   );
 
   addCoastline(map, anchor);
+  // Redraw country/state borders ourselves (above the radar, below labels) and
+  // hide the basemap's own faint ones, so the outlines look the same on every
+  // basemap instead of only showing up on Dark/Light.
+  addBoundaries(map, anchor);
+  hideNativeBoundaries(map);
 
   refreshSiteDots();
 

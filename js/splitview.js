@@ -22,11 +22,17 @@ import { ensureBands, sceneBBox } from './goes.js';
 const p2 = (n) => String(n).padStart(2, '0');
 const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
 
+// Anchor on the basemap's first administrative-boundary line (matching app.js):
+// it sits just beneath the label stack, so the data layer draws above the roads
+// while borders and labels stay on top. Grabbing the first symbol instead would
+// land on a road one-way-arrow in Streets/Outdoors and bury the data.
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
-    if (ly.type === 'symbol') return ly.id;
     if (ly.type === 'line' && /admin|boundary|border/i.test(ly.id)) return ly.id;
+  }
+  for (const ly of layers) {
+    if (ly.type === 'symbol') return ly.id;
   }
   return undefined;
 }
