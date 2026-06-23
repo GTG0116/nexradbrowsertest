@@ -10,8 +10,10 @@
 // Two flavours of "upgrade" are applied on top of the raw NWS event name:
 //   • Impact-Based Warning damage tags — a Tornado Warning tagged CONSIDERABLE
 //     becomes a PDS Tornado Warning (pink); tagged CATASTROPHIC it becomes a
-//     Tornado Emergency (purple). Severe Thunderstorm damage threats are noted
-//     as tags too.
+//     Tornado Emergency (purple). A Flash Flood Warning tagged CONSIDERABLE
+//     becomes a PDS Flash Flood Warning (pink); tagged CATASTROPHIC it becomes
+//     a Flash Flood Emergency (a darker, distinct green). Severe Thunderstorm
+//     damage threats are noted as tags too.
 //   • Free-text scan — watches (and anything else) whose text contains
 //     "PARTICULARLY DANGEROUS SITUATION" / "EXTREMELY DANGEROUS SITUATION" are
 //     relabelled "PDS <event>" / "EDS <event>" even when no structured tag is
@@ -25,6 +27,10 @@ const REFRESH_MS = 120000;
 // states (PDS / Emergency) override these.
 const PDS_PINK = '#ff3fc8';
 const EMERGENCY_PURPLE = '#b02cff';
+// A Flash Flood Emergency stays "green" to read as a flood alert, but uses a
+// deep, saturated green that is clearly distinct from the bright Flash Flood
+// Warning green (#2ecc40) so the most severe flood alert stands out.
+const FLASH_FLOOD_EMERGENCY_GREEN = '#0a6e2a';
 
 const EVENT_COLORS = {
   'Tornado Warning': '#e0152d',
@@ -74,6 +80,8 @@ const PRIORITY = [
   'PDS Tornado Warning',
   'Tornado Warning',
   'Severe Thunderstorm Warning',
+  'Flash Flood Emergency',
+  'PDS Flash Flood Warning',
   'Flash Flood Warning',
   'Snow Squall Warning',
   'Extreme Wind Warning',
@@ -106,6 +114,19 @@ export function classifyAlert(feature) {
       upgraded = true;
     } else if (torThreat === 'CONSIDERABLE') {
       display = 'PDS Tornado Warning';
+      color = PDS_PINK;
+      upgraded = true;
+    }
+  }
+
+  const ffwThreat = (firstParam(params, 'flashFloodDamageThreat') || '').toUpperCase();
+  if (event === 'Flash Flood Warning') {
+    if (ffwThreat === 'CATASTROPHIC') {
+      display = 'Flash Flood Emergency';
+      color = FLASH_FLOOD_EMERGENCY_GREEN;
+      upgraded = true;
+    } else if (ffwThreat === 'CONSIDERABLE') {
+      display = 'PDS Flash Flood Warning';
       color = PDS_PINK;
       upgraded = true;
     }
@@ -290,6 +311,25 @@ const GUIDANCE = {
       'Bring in or secure loose outdoor objects that can become projectiles.',
       'Avoid using corded electronics and plumbing during frequent lightning.',
       'If a tornado warning follows, go to your safe room immediately.',
+    ],
+  },
+  'Flash Flood Emergency': {
+    lead: 'The most urgent flood alert the NWS issues — catastrophic, life-threatening flash flooding is happening now and severe damage is occurring or imminent.',
+    points: [
+      'Move to higher ground immediately. Do not wait — water can rise feet in minutes.',
+      'Never walk or drive into flood waters. Turn Around, Don’t Drown.',
+      'If you are in a low-lying area or near a creek, river, or dam, evacuate now along your highest route.',
+      'If water is entering your home, move to the highest level; only go onto the roof if rising water forces you, and signal for help.',
+      'If water is rising around your vehicle, abandon it and reach higher ground only if you can do so safely.',
+    ],
+  },
+  'PDS Flash Flood Warning': {
+    lead: 'A particularly dangerous situation: severe, fast-rising flash flooding is occurring or imminent. Treat this as a life-threatening emergency.',
+    points: [
+      'Move to higher ground now. Never walk or drive into flood waters.',
+      'Turn Around, Don’t Drown — 6 inches of moving water can knock you down; 12 inches can sweep away most cars.',
+      'Avoid low-water crossings, underpasses, and creek beds.',
+      'If water is rising around your vehicle, abandon it and move to higher ground if you can do so safely.',
     ],
   },
   'Flash Flood Warning': {
