@@ -15,7 +15,7 @@ import { createGridLayer } from './gridLayer.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { PRODUCTS, PRODUCT_ORDER, reflectivityProduct } from './products.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
-import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel } from './models.js';
+import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel, modelSupports } from './models.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
 import { ensureBands, sceneBBox } from './goes.js';
 
@@ -210,7 +210,12 @@ export class SplitView {
     const m = this.ctx.state.mode;
     if (m === 'radar') return PRODUCT_ORDER.map((id) => [id, id]);
     if (m === 'mrms') return MRMS_ORDER.map((id) => [id, id]);
-    if (m === 'models') return MODEL_CATEGORIES.flatMap((c) => c.products).filter((id) => MODEL_PRODUCTS[id]).map((id) => [id, id]);
+    if (m === 'models') {
+      const modelKey = this.ctx.state.models.modelKey;
+      return MODEL_CATEGORIES.flatMap((c) => c.products)
+        .filter((id) => MODEL_PRODUCTS[id] && modelSupports(modelKey, id))
+        .map((id) => [id, id]);
+    }
     if (m === 'satellite') {
       const ch = SAT_CHANNELS.map((c) => ['C' + p2(c.band), 'C' + p2(c.band)]);
       const rgb = SAT_RGB_ORDER.map((id) => ['RGB_' + id, SAT_RGB[id].short]);

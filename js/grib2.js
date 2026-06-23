@@ -6,6 +6,12 @@
 // the GRIB2 sections, then decode the embedded PNG ourselves (so we keep full
 // 16-bit precision — a <canvas> would clamp 16-bit grayscale to 8-bit). A simple
 // (DRT 5.0) fallback is included for the products that aren't PNG-packed.
+//
+// Model grids broaden the packing we have to read: HRRR/NAM/GFS use complex
+// packing (DRT 5.2/5.3), while RAP is JPEG2000-packed (DRT 5.40), decoded by
+// jpx.js.
+
+import { decodeJ2K } from './jpx.js';
 
 async function gunzip(bytes) {
   if (!(bytes[0] === 0x1f && bytes[1] === 0x8b)) return bytes; // not gzipped
@@ -278,8 +284,12 @@ export async function decodeGrib2(input) {
   const scaleD = Math.pow(10, D);
   const values = new Float32Array(grid.ni * grid.nj);
 
-  if (drt === 41 || drt === 40) {
+  if (drt === 41) {
     const { samples } = await decodePNG(dataSection);
+    for (let i = 0; i < values.length; i++) values[i] = (R + samples[i] * scaleE) / scaleD;
+  } else if (drt === 40) {
+    // JPEG2000 (RAP). decodeJ2K returns integer samples in raster order.
+    const { samples } = decodeJ2K(dataSection);
     for (let i = 0; i < values.length; i++) values[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 0) {
     // simple packing: big-endian bit field of `bits` per point.
