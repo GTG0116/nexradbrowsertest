@@ -20,6 +20,15 @@
   box-sizing: border-box;
 }
 
+/* The bare [hidden] attribute must always win. Structural elements such as
+   .panel, .field and .toggle-field set their own `display`, which by the cascade
+   overrides the user-agent `[hidden] { display: none }` rule — so panels toggled
+   off in JS (forecast hour, satellite options, the radar tilt list, and the
+   source-specific fields) would otherwise stay visible in every mode. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -1499,8 +1508,8 @@ input[type='range']::-moz-range-thumb {
 
 /* Swappable map-tool slot + its "choose tool" pop-up. The slot is itself a
    flex box so the inner button stretches to exactly the same size as the other
-   dock buttons; the ▴ chooser sits inside the slot's top-right corner so it
-   never pokes out of the dock and overlaps the map. */
+   dock buttons; the ▴ chooser sits as a wider tab floating just above the tool
+   button so it's an easy thumb target without shrinking the button itself. */
 .dock-tool-slot {
   position: relative;
   flex: none;
@@ -1512,19 +1521,20 @@ input[type='range']::-moz-range-thumb {
 }
 .dock-tool-more {
   position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 17px;
-  height: 15px;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 42px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  background: rgba(8, 14, 28, 0.9);
+  background: rgba(8, 14, 28, 0.92);
   border: 1px solid var(--panel-edge);
-  border-radius: 6px;
+  border-radius: 9px;
   color: var(--ink-dim);
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
   z-index: 2;
@@ -2029,20 +2039,29 @@ input[type='range']::-moz-range-thumb {
 .metar-plot {
   pointer-events: auto;
   cursor: help;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
+  /* A tight dark halo outlines the whole plot (circle, barb and text) so it
+     stays legible over bright radar or satellite fills. */
+  filter: drop-shadow(0 0 1.4px rgba(0, 0, 0, 0.95))
+    drop-shadow(0 1px 1px rgba(0, 0, 0, 0.75));
 }
 .metar-plot-svg {
   overflow: visible;
 }
 .metar-plot-svg text {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
+  /* Paint a dark stroke first, then the colored fill on top — a crisp text
+     outline that reads cleanly against any background. */
+  paint-order: stroke;
+  stroke: rgba(6, 14, 30, 0.92);
+  stroke-width: 2.4px;
+  stroke-linejoin: round;
 }
 .metar-plot-svg .mp-t { fill: #ff6a6a; }
 .metar-plot-svg .mp-d { fill: #57d98a; }
-.metar-plot-svg .mp-p { fill: #cdd9f0; font-size: 10px; }
-.metar-plot-svg .mp-w { fill: #c79bff; font-size: 9px; }
+.metar-plot-svg .mp-p { fill: #cdd9f0; font-size: 9px; }
+.metar-plot-svg .mp-w { fill: #c79bff; font-size: 8px; }
 
 /* Map-tool text labels (measure distances, storm-track ETAs). */
 .mt-label {

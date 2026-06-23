@@ -16,7 +16,7 @@ import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, foreca
   modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
-import { fetchSounding, drawSkewT, drawHodograph, paramRows } from './sounding.js';
+import { fetchSounding, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
 import { SplitView } from './splitview.js';
@@ -93,6 +93,32 @@ function ringsGeoJSON(site, maxR) {
     features.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: ring }, properties: {} });
   }
   return { type: 'FeatureCollection', features };
+}
+
+// Stroke the coastline (and lake/large-river shores) by outlining the basemap's
+// own `water` polygons. We reuse whatever vector source the active style packs
+// them in (Mapbox styles call it `composite`), so it works across every basemap
+// without shipping coastline geometry of our own. Drawn at the same anchor as the
+// other overlays, so it sits above the radar fill but beneath the town labels.
+function addCoastline(map, anchor) {
+  if (map.getLayer('coastline')) return;
+  const layers = map.getStyle().layers || [];
+  const water = layers.find((l) => l['source-layer'] === 'water' && l.source);
+  if (!water) return; // a label-free / raster style with no vector water layer
+  map.addLayer(
+    {
+      id: 'coastline',
+      type: 'line',
+      source: water.source,
+      'source-layer': 'water',
+      layout: { 'line-join': 'round' },
+      paint: {
+        'line-color': 'rgba(130,190,235,0.55)',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.6, 7, 1.2, 11, 1.8],
+      },
+    },
+    anchor
+  );
 }
 
 function sitesGeoJSON() {
@@ -179,6 +205,8 @@ function setupOverlays(map) {
     },
     anchor
   );
+
+  addCoastline(map, anchor);
 
   refreshSiteDots();
 
@@ -434,6 +462,7 @@ function cacheEls() {
   el.toolSounding = $('#toolSounding');
   el.sounding = $('#sounding');
   el.sndClose = $('#sndClose');
+  el.sndTitle = $('#sndTitle');
   el.sndMeta = $('#sndMeta');
   el.sndStatus = $('#sndStatus');
   el.sndCharts = $('#sndCharts');
@@ -1111,7 +1140,8 @@ function applyModePanels() {
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
-  // The sounding launcher (a map tool now) is HRRR-only.
+  // The sounding launcher (a map tool now) follows the selected model, so it's
+  // only offered in models mode.
   if (el.toolSounding) el.toolSounding.hidden = state.mode !== 'models';
   // Keep the dock tool slot in sync — drop the sounding tool when leaving models.
   if (state._refreshDockTools) state._refreshDockTools();
@@ -1811,17 +1841,23 @@ async function openSounding() {
   const validTime = modelValidTime();
   const seq = ++soundingSeq;
 
+  // Follow the model selected for the active forecast hour. The sounding tool is
+  // only offered in models mode, so state.models.modelKey is the live selection.
+  const modelKey = state.models.modelKey;
+  const label = soundingModel(modelKey).label;
+
   el.sounding.hidden = false;
   document.body.classList.add('snd-open');
+  if (el.sndTitle) el.sndTitle.textContent = `${label} Sounding`;
   el.sndCharts.hidden = true;
   el.sndParams.hidden = true;
   el.sndStatus.hidden = false;
-  el.sndStatus.textContent = 'Loading HRRR sounding…';
+  el.sndStatus.textContent = `Loading ${label} sounding…`;
   const utc = `${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
   el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
 
   try {
-    const profile = await fetchSounding(c.lat, c.lng, validTime);
+    const profile = await fetchSounding(c.lat, c.lng, validTime, modelKey);
     if (seq !== soundingSeq) return; // a newer request superseded this one
     state.soundingProfile = profile;
     el.sndStatus.hidden = true;
@@ -2620,8 +2656,8 @@ const DOCK_TOOLS = [
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
-  // Sounding is HRRR-only, so it only appears in the slot when models is active.
-  { id: 'sounding', icon: '⊙', label: 'HRRR sounding', btn: () => el.toolSounding, modelsOnly: true },
+  // The sounding follows the selected model, so it only appears when models is active.
+  { id: 'sounding', icon: '⊙', label: 'Model sounding', btn: () => el.toolSounding, modelsOnly: true },
   { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
   { id: 'export', icon: '⤓', label: 'Export image', btn: () => el.toolExport },
   { id: 'clear', icon: '✕', label: 'Clear drawings', btn: () => el.toolClear },
