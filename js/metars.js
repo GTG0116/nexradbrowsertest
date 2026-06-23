@@ -83,7 +83,7 @@ function windBarb(dir, kt, r) {
   if (dir == null || kt == null || Number.isNaN(dir) || Number.isNaN(kt)) return '';
   if (kt < 1) // calm: a ring around the circle
     return `<circle cx="0" cy="0" r="${r + 3}" fill="none" stroke="#9fd0ff" stroke-width="1"/>`;
-  const L = 26; // staff length
+  const L = 22; // staff length
   const rad = (dir * Math.PI) / 180;
   // Unit vector pointing toward the source (where the wind comes from).
   const ux = Math.sin(rad);
@@ -101,7 +101,7 @@ function windBarb(dir, kt, r) {
   // Walk inward from the outer end placing pennants/full/half barbs.
   let t = r + L; // distance along the staff from the circle centre
   const step = 5;
-  const barbLen = 9;
+  const barbLen = 8;
   const place = () => ({ x: ux * t, y: uy * t });
   const pennants = Math.floor(speed / 50); speed -= pennants * 50;
   const fulls = Math.floor(speed / 10); speed -= fulls * 10;
@@ -135,7 +135,7 @@ function pressureCode(slp) {
 
 // Build the full station-plot SVG for one observation.
 function plotSVG(ob) {
-  const r = 7;
+  const r = 6;
   const tF = ob.temp != null ? Math.round(cToF(ob.temp)) : null;
   const dF = ob.dewp != null ? Math.round(cToF(ob.dewp)) : null;
   // Coded pressure group uses sea-level pressure (hPa); skip it when absent.
@@ -145,12 +145,12 @@ function plotSVG(ob) {
   const dir = ob.wdir == null || ob.wdir === 'VRB' ? null : Number(ob.wdir);
   const barb = windBarb(dir, Number(ob.wspd), r);
 
-  const tTxt = tF == null ? '' : `<text x="-11" y="-7" text-anchor="end" class="mp-t">${tF}</text>`;
-  const dTxt = dF == null ? '' : `<text x="-11" y="13" text-anchor="end" class="mp-d">${dF}</text>`;
-  const pTxt = code ? `<text x="11" y="-7" text-anchor="start" class="mp-p">${code}</text>` : '';
-  const wx = ob.wxString ? `<text x="-11" y="3" text-anchor="end" class="mp-w">${ob.wxString.slice(0, 4)}</text>` : '';
+  const tTxt = tF == null ? '' : `<text x="-9" y="-6" text-anchor="end" class="mp-t">${tF}</text>`;
+  const dTxt = dF == null ? '' : `<text x="-9" y="12" text-anchor="end" class="mp-d">${dF}</text>`;
+  const pTxt = code ? `<text x="9" y="-6" text-anchor="start" class="mp-p">${code}</text>` : '';
+  const wx = ob.wxString ? `<text x="-9" y="3" text-anchor="end" class="mp-w">${ob.wxString.slice(0, 4)}</text>` : '';
 
-  return `<svg width="80" height="56" viewBox="-40 -28 80 56" class="metar-plot-svg" overflow="visible">
+  return `<svg width="70" height="50" viewBox="-35 -25 70 50" class="metar-plot-svg" overflow="visible">
     ${barb}
     <g>${skyGlyph(oktas, r)}</g>
     ${tTxt}${dTxt}${pTxt}${wx}

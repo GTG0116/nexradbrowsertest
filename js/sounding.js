@@ -1,4 +1,4 @@
-// sounding.js — point soundings for the HRRR view: a Skew-T / log-P diagram, a
+// sounding.js — point soundings for the model view: a Skew-T / log-P diagram, a
 // storm-relative hodograph, and the severe-weather parameters meteorologists
 // read off a profile (CAPE, shear, SRH, STP/SCP, …).
 //
@@ -7,10 +7,16 @@
 // work that way — GRIB2 complex packing with spatial differencing can't be
 // subset to one grid cell, so pulling ~40 pressure-level fields to read a single
 // column would mean downloading the entire ~130 MB wrfprs file per tap. Instead
-// we ask Open-Meteo's CORS-enabled HRRR endpoint (`models=gfs_hrrr`) for just
-// that column — one small JSON request — and do all of the meteorology
-// (parcel theory, Bunkers storm motion, helicity, composites) here in the
-// browser, exactly as the rest of the app does its own science.
+// we ask Open-Meteo's CORS-enabled NWP endpoint for just that column — one small
+// JSON request — and do all of the meteorology (parcel theory, Bunkers storm
+// motion, helicity, composites) here in the browser, exactly as the rest of the
+// app does its own science.
+//
+// The profile follows whichever model is selected for the active forecast hour:
+// the in-app model key is mapped to the matching Open-Meteo model below. Only
+// HRRR and GFS publish browser-reachable pressure-level columns, so the regional
+// CONUS models (NAM/NAM Nest/RAP) fall back to HRRR — the closest high-resolution
+// column — and the sounding is always labelled with the model actually used.
 
 const KT2MS = 0.514444;
 const MS2KT = 1.943844;
@@ -18,14 +24,34 @@ const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
 const pad2 = (n) => String(n).padStart(2, '0');
 
-// The HRRR pressure levels Open-Meteo serves (hPa), surface → top.
+// The pressure levels Open-Meteo serves (hPa), surface → top.
 const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
   500, 450, 400, 350, 300, 250, 200, 150, 100, 50];
 
+// Map an in-app model key to the Open-Meteo model that serves pressure-level
+// columns for it, plus a short label for the panel. Open-Meteo only publishes
+// browser-reachable soundings for HRRR and GFS, so the regional CONUS models
+// (NAM/NAM Nest/RAP) borrow HRRR — the nearest high-resolution column.
+const OM_SOUNDING = {
+  hrrr:    { id: 'gfs_hrrr',   label: 'HRRR' },
+  gfs:     { id: 'gfs_global', label: 'GFS' },
+  nam:     { id: 'gfs_hrrr',   label: 'HRRR' },
+  namnest: { id: 'gfs_hrrr',   label: 'HRRR' },
+  rap:     { id: 'gfs_hrrr',   label: 'HRRR' },
+};
+
+// The Open-Meteo model + display label for an in-app model key (defaults to HRRR
+// for anything without its own browser-reachable column).
+export function soundingModel(modelKey) {
+  return OM_SOUNDING[modelKey] || OM_SOUNDING.hrrr;
+}
+
 // ---------------------------------------------------------------------------
-// Data fetch — one Open-Meteo request pinned to the grid's valid hour (UTC).
+// Data fetch — one Open-Meteo request pinned to the grid's valid hour (UTC),
+// for whichever model is selected on the active forecast hour.
 // ---------------------------------------------------------------------------
-export async function fetchSounding(lat, lon, validTime) {
+export async function fetchSounding(lat, lon, validTime, modelKey = 'hrrr') {
+  const model = soundingModel(modelKey);
   const perLevel = ['temperature', 'dewpoint', 'geopotential_height', 'windspeed', 'winddirection'];
   const hourly = [];
   for (const p of LEVELS) for (const v of perLevel) hourly.push(`${v}_${p}hPa`);
@@ -35,7 +61,7 @@ export async function fetchSounding(lat, lon, validTime) {
   const d = validTime;
   const hour = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:00`;
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}` +
-    `&longitude=${lon.toFixed(4)}&models=gfs_hrrr&timezone=GMT&wind_speed_unit=kn` +
+    `&longitude=${lon.toFixed(4)}&models=${model.id}&timezone=GMT&wind_speed_unit=kn` +
     `&temperature_unit=celsius&start_hour=${hour}&end_hour=${hour}&hourly=${hourly.join(',')}`;
 
   const res = await fetch(url);
@@ -44,9 +70,11 @@ export async function fetchSounding(lat, lon, validTime) {
   if (data.error) throw new Error(data.reason || 'sounding request failed');
   const h = data.hourly;
   if (!h || !Array.isArray(h.time) || !h.time.length || h.temperature_500hPa[0] == null)
-    throw new Error('HRRR point data is not available for this valid time (recent / forecast hours only).');
+    throw new Error(`${model.label} point data is not available for this valid time (recent / forecast hours only).`);
 
-  return buildProfile(data, lat, lon, validTime);
+  const profile = buildProfile(data, lat, lon, validTime);
+  profile.modelLabel = model.label;
+  return profile;
 }
 
 // Turn the raw Open-Meteo response into a clean, sorted profile plus the derived
