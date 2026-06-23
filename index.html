@@ -2,7 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- maximum-scale=1 stops iPad/iOS Safari from zooming the page when a form
+         control is focused (the map provides its own zoom, so page zoom isn't
+         needed); viewport-fit=cover makes the env(safe-area-inset-*) paddings
+         used by the dock/sheet resolve on devices with safe areas. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
+    />
     <title>AETHER · Live NEXRAD Scope</title>
     <meta
       name="description"
