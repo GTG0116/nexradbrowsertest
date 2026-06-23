@@ -810,8 +810,24 @@ async function loadSource(model, run, fhour, src, idxCache, onProgress) {
   const fix = model.levelFix && model.levelFix[src.varName];
   if (fix) src = { ...src, level: fix };
   const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file);
-  if (!idxCache.has(grib)) idxCache.set(grib, (await fetch(`${model.bucket}/${idx}`)).text());
-  const range = rangeFromIdx(await idxCache.get(grib), src);
+  if (!idxCache.has(grib)) {
+    // Cache the in-flight promise so concurrent fields share one fetch, but
+    // validate the response and drop the entry on failure so a transient error
+    // doesn't poison the cache with a permanently-rejected promise.
+    idxCache.set(grib, (async () => {
+      const res = await fetch(`${model.bucket}/${idx}`);
+      if (!res.ok) throw new Error(`index fetch failed: ${res.status}`);
+      return res.text();
+    })());
+  }
+  let idxText;
+  try {
+    idxText = await idxCache.get(grib);
+  } catch (e) {
+    idxCache.delete(grib);
+    throw e;
+  }
+  const range = rangeFromIdx(idxText, src);
   const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
   const decoded = await decodeGrib2(bytes);
   if (decoded.proj === 'lambert') return resampleLambert(decoded);

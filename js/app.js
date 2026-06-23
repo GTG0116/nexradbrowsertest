@@ -656,7 +656,12 @@ function initMap() {
       updateReadout(lastLatLng);
     });
   });
-  map.on('mouseout', () => el.readout.classList.remove('show'));
+  map.on('mouseout', () => {
+    // Cancel any queued readout update so it can't re-show the readout after the
+    // cursor has already left the map (which caused a brief flicker-back).
+    if (readoutRaf) { cancelAnimationFrame(readoutRaf); readoutRaf = null; }
+    el.readout.classList.remove('show');
+  });
 
   // No zoom handling needed: the custom radar layer re-samples the polar data
   // per pixel every frame, so it stays pixel-exact at any zoom on its own.
@@ -1111,9 +1116,11 @@ async function loadVolumeList() {
   }
 }
 
+let volumeLoadSeq = 0;
 async function loadVolume(key) {
   state.volumeKey = key;
   buildVolumeList();
+  const seq = ++volumeLoadSeq;
   setStatus('downloading volume…', true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
@@ -1122,9 +1129,11 @@ async function loadVolume(key) {
     const bytes = await fetchVolume(key, (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
+    if (seq !== volumeLoadSeq) return; // a newer selection superseded this one
     setStatus('decoding…', true);
     el.decoding.classList.add('show');
     const volume = await decodeVolume(bytes);
+    if (seq !== volumeLoadSeq) return;
     state.volume = volume;
     state.sweeps = volume.sweeps;
 
@@ -1146,11 +1155,13 @@ async function loadVolume(key) {
     renderRadar();
     setStatus(`loaded · ${volume.radialCount} radials`);
   } catch (e) {
-    setStatus(`decode error: ${e.message}`);
+    if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
     console.error(e);
   } finally {
-    el.progress.classList.remove('show');
-    el.decoding.classList.remove('show');
+    if (seq === volumeLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
   }
 }
 
@@ -1219,7 +1230,7 @@ function displaySweep(sweep, site) {
     return;
   }
 
-  if (!sweep || !site) {
+  if (!sweep || !site || !product) {
     clearRadarSource(map);
     drawRings(null, 0);
     updateInspect();
@@ -1442,9 +1453,11 @@ async function loadSatScenes() {
   }
 }
 
+let satLoadSeq = 0;
 async function loadSatScene(key) {
   state.sat.sceneKey = key;
   buildSatList();
+  const seq = ++satLoadSeq;
   setStatus('downloading GOES…', true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
@@ -1452,6 +1465,7 @@ async function loadSatScene(key) {
     const scene = await loadGoesScene(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
+    if (seq !== satLoadSeq) return; // a newer selection superseded this one
     setStatus('rendering GOES…', true);
     el.decoding.classList.add('show');
     state.sat.scene = scene;
@@ -1465,11 +1479,13 @@ async function loadSatScene(key) {
     updateSatInfo();
     setStatus(`GOES ${SECTORS[state.sat.sectorKey].label} loaded`);
   } catch (e) {
-    setStatus(`GOES error: ${e.message}`);
+    if (seq === satLoadSeq) setStatus(`GOES error: ${e.message}`);
     console.error(e);
   } finally {
-    el.progress.classList.remove('show');
-    el.decoding.classList.remove('show');
+    if (seq === satLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
   }
 }
 
@@ -1521,6 +1537,7 @@ function buildSatLegend() {
   if (id.startsWith('C')) {
     const band = parseInt(id.slice(1), 10);
     const meta = SAT_CHANNELS[band - 1];
+    if (!meta) { el.legend.innerHTML = ''; return; }
     const isVis = meta.type === 'vis';
     const isWV = WV_BANDS.has(band);
     const grad = isVis
@@ -1622,9 +1639,11 @@ async function loadMrmsList() {
   }
 }
 
+let mrmsLoadSeq = 0;
 async function loadMrmsFrame(key) {
   state.mrms.frameKey = key;
   buildMrmsList();
+  const seq = ++mrmsLoadSeq;
   setStatus('downloading MRMS…', true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
@@ -1632,17 +1651,20 @@ async function loadMrmsFrame(key) {
     const grid = await loadMrms(state.mrms.productId, key, (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
+    if (seq !== mrmsLoadSeq) return; // a newer selection superseded this one
     setStatus('decoding MRMS…', true);
     el.decoding.classList.add('show');
     state.mrms.grid = grid;
     renderMrms();
     setStatus(`MRMS ${grid.product.name} loaded`);
   } catch (e) {
-    setStatus(`MRMS error: ${e.message}`);
+    if (seq === mrmsLoadSeq) setStatus(`MRMS error: ${e.message}`);
     console.error(e);
   } finally {
-    el.progress.classList.remove('show');
-    el.decoding.classList.remove('show');
+    if (seq === mrmsLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
   }
 }
 
@@ -1859,7 +1881,7 @@ function selectModelRun(key) {
     const fhrs = forecastHours(run);
     if (!fhrs.includes(state.models.fhour)) {
       const below = fhrs.filter((f) => f <= state.models.fhour);
-      state.models.fhour = below.length ? below[below.length - 1] : 0;
+      state.models.fhour = below.length ? below[below.length - 1] : fhrs[0];
     }
   }
   buildModelList();

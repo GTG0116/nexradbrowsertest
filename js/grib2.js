@@ -281,7 +281,9 @@ export async function decodeGrib2(input) {
   if (!grid) throw new Error('GRIB2: no grid definition section');
 
   const scaleE = Math.pow(2, E);
-  const scaleD = Math.pow(10, D);
+  // Guard against a pathological decimal-scale exponent underflowing to 0, which
+  // would make every unpacked value Infinity/NaN.
+  const scaleD = Math.pow(10, D) || 1;
   const values = new Float32Array(grid.ni * grid.nj);
 
   if (drt === 41) {

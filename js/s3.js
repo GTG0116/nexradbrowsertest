@@ -159,38 +159,84 @@ function timeForName(name) {
   );
 }
 
+// Abort a single download attempt if no bytes arrive for this long (ms) — a
+// genuine stall — so a hung connection surfaces an error instead of spinning the
+// progress bar forever. It is reset on every chunk, so a merely slow (but
+// progressing) download is never cut off.
+const STALL_TIMEOUT_MS = 20000;
+
+// Derive the equivalent AWS S3 object key for an IEM volume filename, so a
+// transient IEM outage on a single scan can fall back to the mirror. IEM names
+// are <SITE>_YYYYMMDD_HHMMSS.bz2; AWS keys are YYYY/MM/DD/SITE/SITEYYYYMMDD_HHMMSS_V06
+// (TDWR terminal radars — the T### sites — end _V08 instead).
+function awsKeyForIemName(name) {
+  const m = name && name.match(/^([A-Z0-9]+)_(\d{4})(\d{2})(\d{2})_(\d{6})/i);
+  if (!m) return null;
+  const [, site, y, mo, d, hms] = m;
+  const SITE = site.toUpperCase();
+  const ver = SITE[0] === 'T' ? '_V08' : '_V06';
+  return `${y}/${mo}/${d}/${SITE}/${SITE}${y}${mo}${d}_${hms}${ver}`;
+}
+
+// Download bytes from one URL with progress + a stall timeout. Throws on a
+// non-ok response, abort/timeout, or network error.
+async function downloadBytes(fullUrl, onProgress) {
+  const ctrl = new AbortController();
+  let timer = setTimeout(() => ctrl.abort(), STALL_TIMEOUT_MS);
+  const bump = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ctrl.abort(), STALL_TIMEOUT_MS);
+  };
+  try {
+    const res = await fetch(viaProxy(fullUrl), { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`download failed: ${res.status}`);
+
+    const total = Number(res.headers.get('content-length')) || 0;
+    if (!res.body || !total) {
+      const buf = await res.arrayBuffer();
+      return new Uint8Array(buf);
+    }
+
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bump(); // progress made — reset the stall timer
+      chunks.push(value);
+      received += value.length;
+      if (onProgress) onProgress(received / total);
+    }
+    const out = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Download one volume scan as raw bytes, reporting progress 0..1. The key picks
-// the source: IEM keys are prefixed (see IEM_PREFIX), AWS keys are bare.
+// the source: IEM keys are prefixed (see IEM_PREFIX), AWS keys are bare. If an
+// IEM scan fails (outage/timeout) we retry the equivalent AWS mirror object
+// once before giving up.
 export async function fetchVolume(key, onProgress) {
-  const src = key.startsWith(IEM_PREFIX)
-    ? `${IEM_BASE}/${key.slice(IEM_PREFIX.length)}`
-    : `${BUCKET}/${key}`;
-  const res = await fetch(viaProxy(src));
-  if (!res.ok) throw new Error(`download failed: ${res.status}`);
-
-  const total = Number(res.headers.get('content-length')) || 0;
-  if (!res.body || !total) {
-    const buf = await res.arrayBuffer();
-    return new Uint8Array(buf);
+  if (key.startsWith(IEM_PREFIX)) {
+    const path = key.slice(IEM_PREFIX.length); // e.g. "KTLX/KTLX_20240619_120300.bz2"
+    try {
+      return await downloadBytes(`${IEM_BASE}/${path}`, onProgress);
+    } catch (e) {
+      const awsKey = awsKeyForIemName(path.split('/').pop());
+      if (!awsKey) throw e;
+      console.warn('IEM volume fetch failed, trying AWS mirror:', e.message);
+      return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
+    }
   }
-
-  const reader = res.body.getReader();
-  const chunks = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (onProgress) onProgress(received / total);
-  }
-  const out = new Uint8Array(received);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
+  return downloadBytes(`${BUCKET}/${key}`, onProgress);
 }
 
 // A curated list of common WSR-88D sites for the picker.
