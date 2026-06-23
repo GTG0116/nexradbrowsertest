@@ -80,7 +80,10 @@ export const MODELS = {
   rap: {
     id: 'rap',
     label: 'RAP (13 km CONUS)',
-    bucket: 'https://noaa-rap-pds.s3.amazonaws.com',
+    // The AWS noaa-rap-pds bucket isn't CORS-enabled (unlike the HRRR/NAM/GFS
+    // ones), so browser fetches are blocked; use Azure's mirror, which sends
+    // Access-Control-Allow-Origin. Same key layout, same JPEG2000-packed data.
+    bucket: 'https://noaarap.blob.core.windows.net/rap',
     cycleStep: 1,
     latencyMin: 75,
     levelFix: { LTNG: 'surface' },
@@ -815,22 +818,43 @@ async function loadSource(model, run, fhour, src, idxCache, onProgress) {
   return recenterGlobal(decoded);
 }
 
-// Global lat/lon grids (GFS) start at 0° longitude and run to ~360°, so the
-// western hemisphere lands off the right edge. Roll the columns by half so the
-// grid spans −180…180 and lines up with the CONUS-centered map.
+// Prepare a lat/lon grid (GFS) for the web-mercator GPU layer:
+//  • Global grids start at 0° longitude and run to ~360°, so the western
+//    hemisphere lands off the right edge — roll the columns by half so the grid
+//    spans −180…180 and lines up with the CONUS-centered map.
+//  • The grid layer projects to web-mercator, where ±90° maps to infinity, so a
+//    global grid that reaches the poles yields a degenerate (invisible) quad —
+//    crop the rows outside the mercator latitude limit (~±85°).
 function recenterGlobal(grid) {
   if (grid.proj !== 'latlon') return grid;
-  const span = grid.ni * grid.di;
-  if (Math.abs(span - 360) > grid.di || grid.lon1 > 1) return grid; // not a full globe at 0°
-  const { ni, nj, values } = grid;
-  const half = Math.round(180 / grid.di) % ni;
-  if (!half) return grid;
-  const rolled = new Float32Array(ni * nj);
-  for (let j = 0; j < nj; j++) {
-    const row = j * ni;
-    for (let i = 0; i < ni; i++) rolled[row + i] = values[row + ((i + half) % ni)];
+  let { lon1, values } = grid;
+  const { ni, nj, di, dj, lat1 } = grid;
+
+  const span = ni * di;
+  if (Math.abs(span - 360) <= di && lon1 <= 1) { // full globe starting near 0°
+    const half = Math.round(180 / di) % ni;
+    if (half) {
+      const rolled = new Float32Array(ni * nj);
+      for (let j = 0; j < nj; j++) {
+        const row = j * ni;
+        for (let i = 0; i < ni; i++) rolled[row + i] = values[row + ((i + half) % ni)];
+      }
+      values = rolled;
+      lon1 -= 180;
+    }
   }
-  return { ...grid, lon1: grid.lon1 - 180, values: rolled };
+
+  // Rows run north→south (lat = lat1 − j·dj); keep those within ±MERC_LAT.
+  const MERC_LAT = 85.06;
+  const jStart = Math.max(0, Math.ceil((lat1 - MERC_LAT) / dj));
+  const jEnd = Math.min(nj - 1, Math.floor((lat1 + MERC_LAT) / dj));
+  if (jStart > 0 || jEnd < nj - 1) {
+    const h = jEnd - jStart + 1;
+    const cropped = new Float32Array(ni * h);
+    cropped.set(values.subarray(jStart * ni, (jEnd + 1) * ni));
+    return { ...grid, lon1, lat1: lat1 - jStart * dj, nj: h, values: cropped };
+  }
+  return { ...grid, lon1, values };
 }
 
 // Wind + geopotential-height fields for an upper-air overlay, at the product's
