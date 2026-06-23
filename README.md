@@ -42,6 +42,12 @@ the radar imagery — entirely client-side.
   **imperial units** (mph, miles, inches, °F).
 - **Velocity dealiasing** (optional): a continuity unfold that removes the false
   green-beside-red folds where Doppler velocity exceeds the Nyquist limit.
+- **Data smoothing** (optional, off by default): a **Smooth data** toggle that
+  switches the per-pixel lookup in the radar, satellite and model/MRMS shaders
+  from nearest-neighbour to **bilinear interpolation**, blending neighbouring
+  gates/cells for the soft, high-res look — without ever rasterising, so it stays
+  resolution-independent at any zoom. Left off, every source keeps its crisp,
+  native-resolution pixels (no auto smoothing); the choice is remembered.
 - **Split-cut aware product selection**: modern VCPs split the Doppler moments
   (VEL/SW) and dual-pol moments (ρHV/ZDR/φDP) into separate sweeps at nearly the
   same elevation. For the chosen product the viewer renders whichever sweep
