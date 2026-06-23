@@ -583,18 +583,46 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   gap: 6px;
 }
-.product-stack .product-grid + .product-cat {
+.product-cat-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.product-stack .product-cat-section + .product-cat-section {
   margin-top: 6px;
 }
 .product-cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--accent-2);
   opacity: 0.85;
-  padding: 2px 2px 1px;
+  padding: 4px 2px 3px;
+  border: none;
   border-bottom: 1px solid var(--panel-edge);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.product-cat:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+.product-cat .cat-caret {
+  display: inline-block;
+  font-size: 9px;
+  transition: transform 0.16s ease;
+}
+.product-cat-section.collapsed .cat-caret {
+  transform: rotate(-90deg);
+}
+.product-cat-section.collapsed .product-grid {
+  display: none;
 }
 .product-btn {
   display: flex;
@@ -1639,16 +1667,67 @@ input[type='range']::-moz-range-thumb {
   cursor: pointer;
 }
 .sheet-body {
-  /* Become the bounded scroll area inside the height-capped sheet: without
-     flex:1 + min-height:0 the body grows to its content height and its lower
-     sections (e.g. the satellite / MRMS selectors at the bottom of the Source
-     panel) spill below the screen edge, unreachable behind the dock. */
+  /* Becomes the bounded area inside the height-capped sheet. The horizontal
+     swipe carousel (.sheet-pager) takes the remaining height and scrolls its
+     pages vertically on their own; the body itself no longer scrolls. */
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- Swipe carousel (mobile settings) ---- */
+.sheet-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 2px 2px 8px;
+  justify-content: center;
+}
+.sheet-tab {
+  flex: 1 1 0;
+  max-width: 150px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-edge);
+  background: rgba(10, 20, 40, 0.5);
+  color: var(--ink-dim);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: 0.14s;
+}
+.sheet-tab.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(54, 224, 200, 0.14);
+  box-shadow: var(--glow);
+}
+.sheet-pager {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+.sheet-pager::-webkit-scrollbar {
+  display: none;
+}
+.sheet-page {
+  flex: 0 0 100%;
+  width: 100%;
+  scroll-snap-align: start;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding: 2px 2px 8px;
 }
 /* Rails relocated into the sheet stack as full-width sections. The sheet body
    is a scrolling flex column, so the rails must keep their natural (content)
@@ -1712,7 +1791,8 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--glow);
 }
 .sounding-btn[hidden],
-.dock-tool[hidden] {
+.dock-tool[hidden],
+.map-tool[hidden] {
   display: none !important;
 }
 

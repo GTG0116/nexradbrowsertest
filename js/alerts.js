@@ -405,6 +405,13 @@ export class AlertsController {
     // every feature under the cursor so the briefing can offer arrows to cycle
     // through all the alerts active at that one location.
     const openFromEvent = (e) => {
+      // If a radar-site dot sits on top of this alert polygon, the dot owns the
+      // tap — selecting that radar — so don't also pop an alert briefing. (The
+      // 'sites' layer only exists in radar mode; guard the query accordingly.)
+      if (map.getLayer && map.getLayer('sites')) {
+        const onSite = map.queryRenderedFeatures(e.point, { layers: ['sites'] });
+        if (onSite && onSite.length) return;
+      }
       const feats = e.features || [];
       if (!feats.length) return;
       const ids = feats.map((f) => f.properties.id);

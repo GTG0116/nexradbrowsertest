@@ -145,9 +145,10 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
   hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
   the right rail like radar elevation tilts.
-- **Point soundings** (`js/sounding.js`): in HRRR mode, **⊙ Sounding** (right
-  rail, or the ⊙ tool on the mobile dock) opens a full-screen, mobile-first
-  briefing for the column under the map center:
+- **Point soundings** (`js/sounding.js`): in HRRR/models mode, the **⊙ Sounding**
+  map tool (in the top-right toolbar, and selectable in the mobile dock's tool
+  slot — both shown only when models is the active source) opens a full-screen,
+  mobile-first briefing for the column under the map center:
   - a proper **Skew-T / log-P** with dry & moist adiabats, mixing-ratio lines,
     skewed isotherms, temperature/dewpoint traces, a lifted surface-parcel path
     with **CAPE/CIN shading**, and wind barbs up the right margin;
@@ -216,6 +217,28 @@ that draw straight onto the scope:
 The first time an alert is clicked it now opens a compact **preview card that
 floats over the map** rather than taking over the screen, so the map stays fully
 interactive; its "view full briefing" button still opens the full NWS-style panel.
+Clicking a **radar dot that sits inside an alert polygon** selects that radar
+without also popping the alert briefing — the dot wins the tap.
+
+## Mobile control surface
+
+On phones the controls collapse into a bottom dock that expands into a
+**swipeable settings sheet**. The sheet is a horizontal carousel you swipe left
+and right between (or jump with the tabs at the top):
+
+1. **Controls** — the current product's picker and display controls (always the
+   first page shown).
+2. **Settings** — the source selection bar (single-site radar / SAT / MRMS /
+   models) plus that source's selectors, scan list and active alerts.
+3. **Map** — basemap style, range rings, and the *Remember view & settings*
+   toggle.
+
+**Everything is remembered between visits** (`localStorage`): the last source and
+product, the map position (center + zoom), the basemap, and every display toggle
+— so a reload reopens exactly where you left off and reloads the last product's
+live data. If the requested **UTC day has no scans yet** (e.g. just after 00z),
+the viewer falls back a day at a time until it finds data, and LIVE snaps forward
+to the current day as soon as its first scan lands.
 
 ## Architecture
 

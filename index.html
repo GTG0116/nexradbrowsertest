@@ -39,7 +39,7 @@
       <main class="layout">
         <!-- Left rail: source -->
         <aside class="rail rail-left">
-          <section class="panel">
+          <section class="panel" id="sourcePanel">
             <h2 class="panel-title">Source</h2>
             <div class="mode-switch" id="modeSwitch">
               <button class="mode-btn active" data-mode="radar">RADAR</button>
@@ -85,12 +85,12 @@
             </div>
           </section>
 
-          <section class="panel grow">
+          <section class="panel grow" id="volumePanel">
             <h2 class="panel-title" id="volumeTitle">Volume scans</h2>
             <div id="volumeList" class="vol-list scroll"></div>
           </section>
 
-          <section class="panel grow">
+          <section class="panel grow" id="alertsPanel">
             <h2 class="panel-title alerts-title">
               Active alerts
               <button id="alertsToggle" class="alerts-toggle active" title="Toggle NWS alerts">ON</button>
@@ -111,6 +111,7 @@
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area">📏</button>
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
+              <button id="toolSounding" class="map-tool" title="HRRR sounding at map center" hidden>⊙</button>
               <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
               <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
               <button id="toolClear" class="map-tool" title="Clear drawings">✕</button>
@@ -133,18 +134,13 @@
 
         <!-- Right rail: products & metadata -->
         <aside class="rail rail-right">
-          <section class="panel">
+          <section class="panel" id="productPanel">
             <h2 class="panel-title">Product</h2>
             <div id="productButtons" class="product-grid"></div>
-            <button id="soundingBtn" class="sounding-btn" hidden>⊙ Sounding at map center</button>
             <label class="field opacity-field">
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
             </label>
-            <div class="toggle-field">
-              <span>Range rings</span>
-              <button id="ringsToggle" class="alerts-toggle active" title="Toggle range rings">ON</button>
-            </div>
             <div class="toggle-field" id="dealiasField">
               <span>Dealias velocity</span>
               <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
@@ -169,9 +165,9 @@
             <div id="palName" class="pal-name"></div>
           </section>
 
-          <section class="panel">
-            <h2 class="panel-title">Basemap</h2>
-            <label class="field" style="margin-bottom: 0">
+          <section class="panel" id="basemapPanel">
+            <h2 class="panel-title">Map settings</h2>
+            <label class="field">
               <span>Map style</span>
               <select id="basemapSelect">
                 <option value="dark">Dark</option>
@@ -181,6 +177,14 @@
                 <option value="outdoors">Outdoors</option>
               </select>
             </label>
+            <div class="toggle-field">
+              <span>Range rings</span>
+              <button id="ringsToggle" class="alerts-toggle active" title="Toggle range rings">ON</button>
+            </div>
+            <div class="toggle-field">
+              <span>Remember view &amp; settings</span>
+              <button id="persistToggle" class="alerts-toggle active" title="Save map position, last product and settings between visits">ON</button>
+            </div>
           </section>
 
           <section class="panel" id="tiltPanel">
@@ -202,7 +206,7 @@
             <div id="satInfo" class="meta" style="margin-top:8px"></div>
           </section>
 
-          <section class="panel grow">
+          <section class="panel grow" id="metaPanel">
             <h2 class="panel-title">Volume metadata</h2>
             <div id="meta" class="meta"></div>
           </section>
@@ -239,7 +243,6 @@
           <button id="dockToolMore" class="dock-tool-more" title="Choose tool">▴</button>
           <button id="dockToolBtn" class="dock-tool" title="Storm track">➤</button>
         </div>
-        <button id="dockSoundingBtn" class="dock-tool" title="HRRR sounding at map center" hidden>⊙</button>
       </div>
       <div id="dockToolMenu" class="dock-tool-menu" hidden></div>
 
@@ -248,7 +251,21 @@
         <div class="sheet-header" id="sheetHeader">
           <button class="sheet-grip" id="sheetGrip" aria-label="Close settings"></button>
         </div>
-        <div class="sheet-body scroll" id="sheetBody">
+        <!-- Swipe tabs: jump straight to a page (also reflects the swipe position). -->
+        <div class="sheet-tabs" id="sheetTabs">
+          <button class="sheet-tab active" data-page="0" type="button">Controls</button>
+          <button class="sheet-tab" data-page="1" type="button">Settings</button>
+          <button class="sheet-tab" data-page="2" type="button">Map</button>
+        </div>
+        <div class="sheet-body" id="sheetBody">
+          <!-- Horizontal swipe carousel: page 0 is the current product's controls,
+               page 1 the source settings (with the source selection bar), page 2 the
+               map settings. Panels are relocated into these pages on mobile. -->
+          <div class="sheet-pager" id="sheetPager">
+            <div class="sheet-page scroll" id="pageControls" data-page="0"></div>
+            <div class="sheet-page scroll" id="pageSettings" data-page="1"></div>
+            <div class="sheet-page scroll" id="pageMap" data-page="2"></div>
+          </div>
           <div class="sheet-section" id="sheetPlayback" hidden>
             <h2 class="panel-title">Playback speed</h2>
             <label class="field opacity-field">
