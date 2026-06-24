@@ -2,8 +2,7 @@
 //
 // Pulls the active alert feed from the public api.weather.gov endpoint, draws
 // alert polygons over the map, and (because the request asked
-// for "only the alerts in the screenshot") shows only those alerts, plus tsunami
-// alerts, when their polygon
+// for "only the alerts in the screenshot") shows only the alerts whose polygon
 // actually intersects the current map view in both the side list and on the
 // map. When the alert feed omits inline geometry (common for county/zone-based
 // and tsunami products), we resolve the affected NWS zones and merge their
@@ -608,6 +607,14 @@ export class AlertsController {
       const features = await fetchActiveAlerts();
       this.alerts = features
         .filter((f) => f.geometry) // inline polygons plus resolved county/zone geometries
+        // Hide areal/river Flood Warnings and the low-end Flood Advisory tier —
+        // they clutter the map — while keeping Flash Flood Warnings, the
+        // storm-scale alerts that matter next to the radar. ("Flash Flood
+        // Warning" is a distinct event name, so it stays.)
+        .filter((f) => {
+          const ev = (f.properties && f.properties.event) || '';
+          return ev !== 'Flood Warning' && ev !== 'Flood Advisory';
+        })
         .map((f) => ({
           id: f.properties.id || f.id,
           feature: f,
@@ -1047,13 +1054,7 @@ async function fetchActiveAlerts() {
     url = json.pagination && json.pagination.next;
     if (features.length > 4000) break;
   }
-  const mapAlerts = features.filter(isMapAlertEvent);
-  return Promise.all(mapAlerts.map(resolveAlertGeometry));
-}
-
-function isMapAlertEvent(feature) {
-  const event = feature && feature.properties && feature.properties.event;
-  return MAP_ALERT_EVENTS.has(event);
+  return Promise.all(features.map(resolveAlertGeometry));
 }
 
 async function resolveAlertGeometry(feature) {
