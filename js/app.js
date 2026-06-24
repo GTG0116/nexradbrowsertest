@@ -452,6 +452,7 @@ const state = {
   mapTools: null,
   splitView: null,
   exportTool: null,
+  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -595,6 +596,12 @@ function cacheEls() {
   el.toolMeasure = $('#toolMeasure');
   el.toolStorm = $('#toolStorm');
   el.toolMetars = $('#toolMetars');
+  el.toolWeather = $('#toolWeather');
+  el.weatherPicker = $('#weatherPicker');
+  el.weatherPickerClose = $('#weatherPickerClose');
+  el.weatherUseLocation = $('#weatherUseLocation');
+  el.weatherUseCenter = $('#weatherUseCenter');
+  el.weatherPickerStatus = $('#weatherPickerStatus');
   el.toolSplit = $('#toolSplit');
   // (toolSounding cached above with the sounding block)
   el.toolExport = $('#toolExport');
@@ -938,6 +945,7 @@ function buildVolumeList() {
 }
 
 function buildLegend() {
+  if (state.weather && state.weather.active) return renderWeatherLegend();
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   if (state.mode === 'models') return buildModelLegend();
@@ -2820,6 +2828,8 @@ function setupMapTools() {
     syncToolButtons();
   });
 
+  setupWeatherTool();
+
   // Split screen — a second synced pane showing a different product.
   state.splitView = new SplitView({
     state,
@@ -2849,6 +2859,152 @@ function setupMapTools() {
 }
 
 // ---------------------------------------------------------------------------
+// Public weather tool — simple current conditions from the National Weather
+// Service. The tool deliberately reuses the bottom legend area so non-technical
+// users see plain-language weather instead of product color ramps.
+// ---------------------------------------------------------------------------
+function setupWeatherTool() {
+  if (!el.toolWeather || !el.weatherPicker) return;
+  el.toolWeather.addEventListener('click', () => openWeatherPicker());
+  el.weatherPickerClose.addEventListener('click', () => closeWeatherPicker());
+  el.weatherUseCenter.addEventListener('click', () => {
+    const c = state.map.getCenter();
+    loadWeatherAt(c.lat, c.lng, 'map center');
+  });
+  el.weatherUseLocation.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      setWeatherPickerStatus('This browser does not expose live location.', true);
+      return;
+    }
+    setWeatherPickerStatus('Waiting for location permission…');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => loadWeatherAt(pos.coords.latitude, pos.coords.longitude, 'live location'),
+      (err) => setWeatherPickerStatus(err.message || 'Could not get your location.', true),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 300000 }
+    );
+  });
+}
+
+function openWeatherPicker() {
+  state.weather.pickerOpen = true;
+  el.weatherPicker.hidden = false;
+  el.toolWeather.classList.add('active');
+  setWeatherPickerStatus('Choose live location, or pan the map and use the center point.');
+}
+
+function closeWeatherPicker() {
+  state.weather.pickerOpen = false;
+  el.weatherPicker.hidden = true;
+  el.toolWeather.classList.toggle('active', state.weather.active);
+}
+
+function setWeatherPickerStatus(msg, error = false) {
+  el.weatherPickerStatus.textContent = msg;
+  el.weatherPickerStatus.classList.toggle('error', !!error);
+}
+
+async function loadWeatherAt(lat, lon, label) {
+  state.weather.active = true;
+  state.weather.coords = { lat, lon, label };
+  renderWeatherLegend({ loading: true, label });
+  closeWeatherPicker();
+  setStatus(`loading current weather for ${label}`, true);
+  if (state.weather.abort) state.weather.abort.abort();
+  state.weather.abort = new AbortController();
+  try {
+    const pointUrl = `https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const point = await nwsJson(pointUrl, state.weather.abort.signal);
+    const stationsUrl = point.properties && point.properties.observationStations;
+    if (!stationsUrl) throw new Error('NWS point lookup did not return stations.');
+    const stations = await nwsJson(stationsUrl, state.weather.abort.signal);
+    const first = stations.features && stations.features[0];
+    if (!first || !first.id) throw new Error('No nearby NWS observation station was found.');
+    const obs = await nwsJson(`${first.id}/observations/latest?require_qc=false`, state.weather.abort.signal);
+    state.weather.data = { point, station: first, obs, label };
+    renderWeatherLegend();
+    setStatus(`current weather: ${label}`);
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error('weather load failed:', e);
+    renderWeatherLegend({ error: e.message || 'Unable to load current weather.' });
+    setStatus('current weather unavailable');
+  }
+}
+
+async function nwsJson(url, signal) {
+  const res = await fetch(url, { signal, headers: { Accept: 'application/geo+json, application/json' } });
+  if (!res.ok) throw new Error(`NWS request failed (${res.status})`);
+  return res.json();
+}
+
+function renderWeatherLegend(stateOverride = null) {
+  if (!state.weather.active && !stateOverride) return;
+  if (stateOverride && stateOverride.loading) {
+    el.legend.className = 'legend weather-card loading';
+    el.legend.innerHTML = `Loading current conditions near ${escapeHTML(stateOverride.label)}…`;
+    return;
+  }
+  if (stateOverride && stateOverride.error) {
+    el.legend.className = 'legend weather-card error';
+    el.legend.innerHTML = `Current conditions unavailable — ${escapeHTML(stateOverride.error)}`;
+    return;
+  }
+  const wx = state.weather.data;
+  if (!wx) return;
+  const p = wx.obs.properties || {};
+  const station = (wx.station.properties && wx.station.properties.name) || 'nearest station';
+  const place = (wx.point.properties && wx.point.properties.relativeLocation &&
+    wx.point.properties.relativeLocation.properties &&
+    wx.point.properties.relativeLocation.properties.city) || wx.label || 'selected location';
+  el.legend.className = 'legend weather-card';
+  el.legend.innerHTML = `
+    <div class="wx-main">
+      <div class="wx-kicker">Current conditions</div>
+      <div class="wx-temp">${fmtTemp(p.temperature)}</div>
+      <div class="wx-condition">${escapeHTML(p.textDescription || 'Observed weather')}</div>
+      <div class="wx-place">${escapeHTML(place)} · ${escapeHTML(station)}</div>
+    </div>
+    <div class="wx-grid">
+      ${weatherMetric('Wind', fmtWind(p.windSpeed, p.windDirection))}
+      ${weatherMetric('Humidity', fmtPct(p.relativeHumidity))}
+      ${weatherMetric('Dew point', fmtTemp(p.dewpoint))}
+      ${weatherMetric('Pressure', fmtPressure(p.barometricPressure))}
+      ${weatherMetric('Visibility', fmtDistance(p.visibility))}
+      ${weatherMetric('Heat index', fmtTemp(p.heatIndex))}
+      ${weatherMetric('Wind chill', fmtTemp(p.windChill))}
+      ${weatherMetric('Station', escapeHTML((wx.station.properties && wx.station.properties.stationIdentifier) || '—'))}
+      <div class="wx-updated">Updated ${escapeHTML(formatObsTime(p.timestamp))}</div>
+    </div>`;
+}
+
+function weatherMetric(label, value) {
+  return `<div class="wx-metric"><div class="wx-label">${label}</div><div class="wx-value">${value || '—'}</div></div>`;
+}
+function cToF(v) { return (v * 9) / 5 + 32; }
+function val(o) { return o && typeof o.value === 'number' ? o.value : null; }
+function fmtTemp(o) { const v = val(o); return v == null ? '—' : `${Math.round(cToF(v))}°F`; }
+function fmtPct(o) { const v = val(o); return v == null ? '—' : `${Math.round(v)}%`; }
+function fmtPressure(o) { const v = val(o); return v == null ? '—' : `${(v / 100).toFixed(1)} mb`; }
+function fmtDistance(o) { const v = val(o); return v == null ? '—' : `${(v / 1609.344).toFixed(1)} mi`; }
+function fmtWind(speed, direction) {
+  const s = val(speed);
+  if (s == null) return 'Calm';
+  const mph = Math.round(s * 2.23694);
+  const d = val(direction);
+  return d == null ? `${mph} mph` : `${degToCompass(d)} ${mph} mph`;
+}
+function degToCompass(deg) {
+  return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(deg / 22.5) % 16];
+}
+function formatObsTime(t) {
+  if (!t) return 'time unavailable';
+  return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+}
+function escapeHTML(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+// ---------------------------------------------------------------------------
 // Mobile dock tool slot — a single dock button that can be any of the map tools.
 // Tapping ▴ opens a menu to choose which tool occupies the slot; tapping the
 // slot itself runs that tool. The tools themselves live on the (now mobile-
@@ -2860,6 +3016,7 @@ const DOCK_TOOLS = [
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
   // The sounding follows the selected model, so it only appears when models is active.
   { id: 'sounding', icon: '⊙', label: 'Model sounding', btn: () => el.toolSounding, modelsOnly: true },
   { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
