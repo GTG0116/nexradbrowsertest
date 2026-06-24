@@ -607,13 +607,12 @@ export class AlertsController {
       const features = await fetchActiveAlerts();
       this.alerts = features
         .filter((f) => f.geometry) // inline polygons plus resolved county/zone geometries
-        // Hide areal/river Flood Warnings and the low-end Flood Advisory tier —
-        // they clutter the map — while keeping Flash Flood Warnings, the
-        // storm-scale alerts that matter next to the radar. ("Flash Flood
-        // Warning" is a distinct event name, so it stays.)
+        // Keep the map limited to the alert types shown in the provided legend
+        // screenshot, with tsunami products added explicitly so coastal hazards
+        // are still visible even though they are not in the screenshot.
         .filter((f) => {
           const ev = (f.properties && f.properties.event) || '';
-          return ev !== 'Flood Warning' && ev !== 'Flood Advisory';
+          return MAP_ALERT_EVENTS.has(ev);
         })
         .map((f) => ({
           id: f.properties.id || f.id,
