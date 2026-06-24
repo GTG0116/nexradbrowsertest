@@ -452,7 +452,7 @@ const state = {
   mapTools: null,
   splitView: null,
   exportTool: null,
-  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0 },
+  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', touchStart: null },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -946,6 +946,8 @@ function buildVolumeList() {
 
 function buildLegend() {
   if (state.weather && state.weather.active) return renderWeatherLegend();
+  el.legend.className = 'legend';
+  clearWeatherSwipe();
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   if (state.mode === 'models') return buildModelLegend();
@@ -2882,6 +2884,7 @@ function setupWeatherTool() {
 function startWeatherTool() {
   state.weather.active = true;
   state.weather.pickerOpen = false;
+  state.weather.view = 'current';
   if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
   el.toolWeather.classList.add('active');
@@ -2892,6 +2895,7 @@ function stopWeatherTool() {
   state.weather.active = false;
   state.weather.pickerOpen = false;
   state.weather.data = null;
+  state.weather.view = 'current';
   if (state.weather.timer) clearTimeout(state.weather.timer);
   state.weather.timer = null;
   if (state.weather.abort) state.weather.abort.abort();
@@ -2938,7 +2942,7 @@ function setWeatherPickerStatus(msg, error = false) {
 async function loadWeatherAt(lat, lon, label) {
   state.weather.active = true;
   state.weather.coords = { lat, lon, label };
-  renderWeatherLegend({ loading: true, label, lat, lon });
+  if (!state.weather.data) renderWeatherLegend({ loading: true, label, lat, lon });
   setStatus(`loading Open-Meteo weather for ${label}`, true);
   if (state.weather.abort) state.weather.abort.abort();
   const seq = ++state.weather.seq;
@@ -2962,6 +2966,9 @@ async function openMeteoJson(lat, lon, signal) {
     latitude: lat.toFixed(4),
     longitude: lon.toFixed(4),
     current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m',
+    hourly: 'temperature_2m,precipitation_probability,weather_code',
+    daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+    forecast_days: '7',
     temperature_unit: 'fahrenheit',
     wind_speed_unit: 'mph',
     precipitation_unit: 'inch',
@@ -2993,11 +3000,13 @@ function renderWeatherLegend(stateOverride = null) {
   if (stateOverride && stateOverride.loading) {
     el.legend.className = 'legend weather-card loading';
     el.legend.innerHTML = `Loading current conditions near ${escapeHTML(stateOverride.label)}…`;
+    bindWeatherSwipe();
     return;
   }
   if (stateOverride && stateOverride.error) {
     el.legend.className = 'legend weather-card error';
     el.legend.innerHTML = `Current conditions unavailable — ${escapeHTML(stateOverride.error)}`;
+    bindWeatherSwipe();
     return;
   }
   const wx = state.weather.data;
@@ -3006,10 +3015,15 @@ function renderWeatherLegend(stateOverride = null) {
   const units = wx.forecast.current_units || {};
   const [emoji, text] = describeWeatherCode(current.weather_code);
   const place = `${wx.lat.toFixed(2)}°, ${wx.lon.toFixed(2)}°`;
-  el.legend.className = 'legend weather-card';
+  el.legend.className = `legend weather-card ${state.weather.view === 'forecast' ? 'forecast' : ''}`.trim();
+  if (state.weather.view === 'forecast') {
+    el.legend.innerHTML = weatherForecastHTML(wx.forecast);
+    bindWeatherSwipe();
+    return;
+  }
   el.legend.innerHTML = `
     <div class="wx-main">
-      <div class="wx-kicker">Open-Meteo · map center</div>
+      <div class="wx-kicker">Open-Meteo · map center · swipe down for forecast</div>
       <div class="wx-temp"><span class="wx-emoji" aria-hidden="true">${emoji}</span>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</div>
       <div class="wx-condition">${emoji} ${escapeHTML(text)}</div>
       <div class="wx-place">${escapeHTML(place)}</div>
@@ -3021,6 +3035,61 @@ function renderWeatherLegend(stateOverride = null) {
         <div class="wx-updated">Updated ${escapeHTML(current.time || 'now')}</div>
       </div>
     </div>`;
+  bindWeatherSwipe();
+}
+
+function weatherForecastHTML(forecast) {
+  const hourly = forecast.hourly || {};
+  const daily = forecast.daily || {};
+  const hTimes = (hourly.time || []).slice(0, 24);
+  const dTimes = (daily.time || []).slice(0, 7);
+  const hourRows = hTimes.map((time, i) => forecastPillHTML({
+    label: formatForecastTime(time, 'hour'),
+    temp: hourly.temperature_2m && hourly.temperature_2m[i],
+    precip: hourly.precipitation_probability && hourly.precipitation_probability[i],
+    code: hourly.weather_code && hourly.weather_code[i],
+  })).join('');
+  const dayRows = dTimes.map((time, i) => forecastPillHTML({
+    label: formatForecastTime(time, 'day'),
+    temp: daily.temperature_2m_max && daily.temperature_2m_min ? `${fmtNumber(daily.temperature_2m_max[i])}°/${fmtNumber(daily.temperature_2m_min[i])}°` : '—',
+    precip: daily.precipitation_probability_max && daily.precipitation_probability_max[i],
+    code: daily.weather_code && daily.weather_code[i],
+  })).join('');
+  return `
+    <div class="wx-kicker">Open-Meteo forecast · swipe up for current</div>
+    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 24 hours</div><div class="wx-forecast-row">${hourRows}</div></div>
+    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 7 days</div><div class="wx-forecast-row">${dayRows}</div></div>`;
+}
+
+function forecastPillHTML(item) {
+  const [emoji, text] = describeWeatherCode(item.code);
+  const temp = typeof item.temp === 'string' ? item.temp : `${fmtNumber(item.temp)}°`;
+  const precip = item.precip == null ? '—' : `${Math.round(item.precip)}%`;
+  return `<div class="wx-forecast-pill" title="${escapeHTML(text)}"><div class="wx-forecast-time">${escapeHTML(item.label)}</div><div class="wx-forecast-emoji">${emoji}</div><div class="wx-forecast-temp">${escapeHTML(temp)}</div><div class="wx-forecast-pop">💧 ${escapeHTML(precip)}</div></div>`;
+}
+
+function formatForecastTime(value, mode) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value || '';
+  if (mode === 'day') return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleTimeString([], { hour: 'numeric' });
+}
+
+function clearWeatherSwipe() {
+  el.legend.ontouchstart = null;
+  el.legend.ontouchend = null;
+}
+
+function bindWeatherSwipe() {
+  el.legend.ontouchstart = (ev) => { state.weather.touchStart = ev.changedTouches[0].clientY; };
+  el.legend.ontouchend = (ev) => {
+    const start = state.weather.touchStart;
+    state.weather.touchStart = null;
+    if (start == null) return;
+    const delta = ev.changedTouches[0].clientY - start;
+    if (delta > 45 && state.weather.view !== 'forecast') { state.weather.view = 'forecast'; renderWeatherLegend(); }
+    if (delta < -45 && state.weather.view !== 'current') { state.weather.view = 'current'; renderWeatherLegend(); }
+  };
 }
 
 function fmtNumber(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : '—'; }
