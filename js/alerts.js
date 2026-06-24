@@ -81,6 +81,34 @@ const EVENT_COLORS = {
 };
 const DEFAULT_COLOR = '#6f8aa8';
 
+// Keep the map/list focused to the alert types shown in the app legend
+// screenshot, plus tsunami products. Other NWS products remain intentionally
+// hidden to avoid cluttering the radar map.
+const MAP_ALERT_EVENTS = new Set([
+  'Tornado Warning',
+  'Tornado Watch',
+  'Severe Thunderstorm Warning',
+  'Severe Thunderstorm Watch',
+  'Flash Flood Warning',
+  'Winter Storm Watch',
+  'Winter Storm Warning',
+  'Blizzard Warning',
+  'Snow Squall Warning',
+  'Storm Surge Warning',
+  'Storm Surge Watch',
+  'Tropical Storm Warning',
+  'Tropical Storm Watch',
+  'Hurricane Warning',
+  'Hurricane Watch',
+  'Typhoon Warning',
+  'Typhoon Watch',
+  'Extreme Wind Warning',
+  'Special Weather Statement',
+  'Tsunami Advisory',
+  'Tsunami Warning',
+  'Tsunami Watch',
+]);
+
 // Rough display priority so the most significant alerts sort to the top.
 const PRIORITY = [
   'Tornado Emergency',
