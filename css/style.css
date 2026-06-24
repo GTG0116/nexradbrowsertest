@@ -3028,6 +3028,10 @@ input[type='range']::-moz-range-thumb {
 .wx-detail-metric { border: 1px solid var(--panel-edge); border-radius: 12px; background: rgba(255,255,255,0.05); padding: 9px; }
 .wx-detail-metric div { color: var(--ink-dim); font: 10px 'JetBrains Mono', monospace; letter-spacing: .6px; text-transform: uppercase; }
 .wx-detail-metric strong { display: block; margin-top: 5px; color: #fff; font: 700 14px 'JetBrains Mono', monospace; }
+.wx-detail-metric.wide { grid-column: 1 / -1; }
+.wx-detail-combined strong { display: flex; gap: 16px; flex-wrap: wrap; }
+.wx-detail-combined span { display: inline-flex; gap: 6px; align-items: baseline; }
+.wx-detail-combined em { color: var(--ink-dim); font-style: normal; font-weight: 500; }
 @media (max-width: 560px) {
   .weather-card .wx-current-strip { grid-template-columns: 1fr; }
   .weather-card .wx-current-facts { justify-content: flex-start; }
