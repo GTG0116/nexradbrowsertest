@@ -452,7 +452,7 @@ const state = {
   mapTools: null,
   splitView: null,
   exportTool: null,
-  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null },
+  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0 },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -2859,36 +2859,78 @@ function setupMapTools() {
 }
 
 // ---------------------------------------------------------------------------
-// Public weather tool — simple current conditions from the National Weather
-// Service. The tool deliberately reuses the bottom legend area so non-technical
+// Public weather tool — simple current conditions from Open-Meteo. The tool
+// follows the map center and reuses the bottom legend area so non-technical
 // users see plain-language weather instead of product color ramps.
 // ---------------------------------------------------------------------------
 function setupWeatherTool() {
-  if (!el.toolWeather || !el.weatherPicker) return;
-  el.toolWeather.addEventListener('click', () => openWeatherPicker());
-  el.weatherPickerClose.addEventListener('click', () => closeWeatherPicker());
-  el.weatherUseCenter.addEventListener('click', () => {
-    const c = state.map.getCenter();
-    loadWeatherAt(c.lat, c.lng, 'map center');
+  if (!el.toolWeather) return;
+  el.toolWeather.addEventListener('click', () => {
+    if (state.weather.active) stopWeatherTool();
+    else startWeatherTool();
+  });
+  if (el.weatherPickerClose) el.weatherPickerClose.addEventListener('click', () => closeWeatherPicker());
+  if (el.weatherUseCenter) el.weatherUseCenter.addEventListener('click', () => updateWeatherFromCenter(true));
+  state.map.on('move', () => {
+    if (state.weather.active) scheduleWeatherCenterUpdate();
+  });
+  state.map.on('moveend', () => {
+    if (state.weather.active) updateWeatherFromCenter();
   });
 }
 
-function openWeatherPicker() {
-  state.weather.pickerOpen = true;
-  el.weatherPicker.hidden = false;
-  el.toolWeather.classList.add('active');
+function startWeatherTool() {
+  state.weather.active = true;
+  state.weather.pickerOpen = false;
+  if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
-  setWeatherPickerStatus('Pan the map until your location is under the center picker.');
+  el.toolWeather.classList.add('active');
+  updateWeatherFromCenter(true);
+}
+
+function stopWeatherTool() {
+  state.weather.active = false;
+  state.weather.pickerOpen = false;
+  state.weather.data = null;
+  if (state.weather.timer) clearTimeout(state.weather.timer);
+  state.weather.timer = null;
+  if (state.weather.abort) state.weather.abort.abort();
+  state.weather.abort = null;
+  if (el.weatherPicker) el.weatherPicker.hidden = true;
+  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
+  el.toolWeather.classList.remove('active');
+  buildLegend();
+  setStatus('local weather off');
+}
+
+function scheduleWeatherCenterUpdate() {
+  if (state.weather.timer) clearTimeout(state.weather.timer);
+  state.weather.timer = setTimeout(() => updateWeatherFromCenter(), 650);
+}
+
+function updateWeatherFromCenter(force = false) {
+  if (!state.weather.active || !state.map) return;
+  if (state.weather.timer) clearTimeout(state.weather.timer);
+  state.weather.timer = null;
+  const c = state.map.getCenter();
+  const label = 'map center';
+  const prev = state.weather.coords;
+  const moved = !prev || Math.abs(prev.lat - c.lat) > 0.01 || Math.abs(prev.lon - c.lng) > 0.01;
+  if (!force && !moved) return;
+  loadWeatherAt(c.lat, c.lng, label);
+}
+
+function openWeatherPicker() {
+  startWeatherTool();
 }
 
 function closeWeatherPicker() {
   state.weather.pickerOpen = false;
-  el.weatherPicker.hidden = true;
-  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
-  el.toolWeather.classList.toggle('active', state.weather.active);
+  if (el.weatherPicker) el.weatherPicker.hidden = true;
 }
 
 function setWeatherPickerStatus(msg, error = false) {
+  if (!el.weatherPickerStatus) return;
   el.weatherPickerStatus.textContent = msg;
   el.weatherPickerStatus.classList.toggle('error', !!error);
 }
@@ -2896,23 +2938,17 @@ function setWeatherPickerStatus(msg, error = false) {
 async function loadWeatherAt(lat, lon, label) {
   state.weather.active = true;
   state.weather.coords = { lat, lon, label };
-  renderWeatherLegend({ loading: true, label });
-  closeWeatherPicker();
-  setStatus(`loading current weather for ${label}`, true);
+  renderWeatherLegend({ loading: true, label, lat, lon });
+  setStatus(`loading Open-Meteo weather for ${label}`, true);
   if (state.weather.abort) state.weather.abort.abort();
+  const seq = ++state.weather.seq;
   state.weather.abort = new AbortController();
   try {
-    const pointUrl = `https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`;
-    const point = await nwsJson(pointUrl, state.weather.abort.signal);
-    const stationsUrl = point.properties && point.properties.observationStations;
-    if (!stationsUrl) throw new Error('NWS point lookup did not return stations.');
-    const stations = await nwsJson(stationsUrl, state.weather.abort.signal);
-    const first = stations.features && stations.features[0];
-    if (!first || !first.id) throw new Error('No nearby NWS observation station was found.');
-    const obs = await nwsJson(`${first.id}/observations/latest?require_qc=false`, state.weather.abort.signal);
-    state.weather.data = { point, station: first, obs, label };
+    const wx = await openMeteoJson(lat, lon, state.weather.abort.signal);
+    if (seq !== state.weather.seq) return;
+    state.weather.data = { forecast: wx, label, lat, lon };
     renderWeatherLegend();
-    setStatus(`current weather: ${label}`);
+    setStatus(`Open-Meteo weather: ${label}`);
   } catch (e) {
     if (e.name === 'AbortError') return;
     console.error('weather load failed:', e);
@@ -2921,10 +2957,35 @@ async function loadWeatherAt(lat, lon, label) {
   }
 }
 
-async function nwsJson(url, signal) {
-  const res = await fetch(url, { signal, headers: { Accept: 'application/geo+json, application/json' } });
-  if (!res.ok) throw new Error(`NWS request failed (${res.status})`);
+async function openMeteoJson(lat, lon, signal) {
+  const params = new URLSearchParams({
+    latitude: lat.toFixed(4),
+    longitude: lon.toFixed(4),
+    current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m',
+    temperature_unit: 'fahrenheit',
+    wind_speed_unit: 'mph',
+    precipitation_unit: 'inch',
+    timezone: 'auto',
+  });
+  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, { signal });
+  if (!res.ok) throw new Error(`Open-Meteo request failed (${res.status})`);
   return res.json();
+}
+
+function describeWeatherCode(code) {
+  const table = {
+    0: ['☀️', 'Sunny'], 1: ['🌤️', 'Mostly sunny'], 2: ['⛅', 'Partly cloudy'], 3: ['☁️', 'Cloudy'],
+    45: ['🌫️', 'Foggy'], 48: ['🌫️', 'Rime fog'],
+    51: ['🌦️', 'Light drizzle'], 53: ['🌦️', 'Drizzle'], 55: ['🌧️', 'Heavy drizzle'],
+    56: ['🌧️', 'Freezing drizzle'], 57: ['🌧️', 'Freezing drizzle'],
+    61: ['🌧️', 'Light rain'], 63: ['🌧️', 'Rainy'], 65: ['🌧️', 'Heavy rain'],
+    66: ['🌧️', 'Freezing rain'], 67: ['🌧️', 'Freezing rain'],
+    71: ['🌨️', 'Light snow'], 73: ['🌨️', 'Snowy'], 75: ['❄️', 'Heavy snow'], 77: ['🌨️', 'Snow grains'],
+    80: ['🌦️', 'Rain showers'], 81: ['🌦️', 'Rain showers'], 82: ['⛈️', 'Heavy showers'],
+    85: ['🌨️', 'Snow showers'], 86: ['❄️', 'Heavy snow showers'],
+    95: ['⛈️', 'Thunderstorm'], 96: ['⛈️', 'Thunderstorm with hail'], 99: ['⛈️', 'Thunderstorm with hail'],
+  };
+  return table[code] || ['🌡️', 'Current weather'];
 }
 
 function renderWeatherLegend(stateOverride = null) {
@@ -2940,24 +3001,29 @@ function renderWeatherLegend(stateOverride = null) {
     return;
   }
   const wx = state.weather.data;
-  if (!wx) return;
-  const p = wx.obs.properties || {};
-  const place = (wx.point.properties && wx.point.properties.relativeLocation &&
-    wx.point.properties.relativeLocation.properties &&
-    wx.point.properties.relativeLocation.properties.city) || wx.label || 'selected location';
+  if (!wx || !wx.forecast) return;
+  const current = wx.forecast.current || {};
+  const units = wx.forecast.current_units || {};
+  const [emoji, text] = describeWeatherCode(current.weather_code);
+  const place = `${wx.lat.toFixed(2)}°, ${wx.lon.toFixed(2)}°`;
   el.legend.className = 'legend weather-card';
   el.legend.innerHTML = `
     <div class="wx-main">
-      <div class="wx-kicker">Current conditions</div>
-      <div class="wx-temp">${fmtTemp(p.temperature)}</div>
-      <div class="wx-condition">${escapeHTML(p.textDescription || 'Observed weather')}</div>
+      <div class="wx-kicker">Open-Meteo · map center</div>
+      <div class="wx-temp"><span class="wx-emoji" aria-hidden="true">${emoji}</span>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</div>
+      <div class="wx-condition">${emoji} ${escapeHTML(text)}</div>
       <div class="wx-place">${escapeHTML(place)}</div>
+      <div class="wx-grid">
+        <div class="wx-metric"><div class="wx-label">Feels</div><div class="wx-value">${fmtNumber(current.apparent_temperature)}${escapeHTML(units.apparent_temperature || '°F')}</div></div>
+        <div class="wx-metric"><div class="wx-label">Humidity</div><div class="wx-value">${fmtNumber(current.relative_humidity_2m)}${escapeHTML(units.relative_humidity_2m || '%')}</div></div>
+        <div class="wx-metric"><div class="wx-label">Wind</div><div class="wx-value">${fmtNumber(current.wind_speed_10m)} ${escapeHTML(units.wind_speed_10m || 'mph')}</div></div>
+        <div class="wx-metric"><div class="wx-label">Dir</div><div class="wx-value">${fmtNumber(current.wind_direction_10m)}${escapeHTML(units.wind_direction_10m || '°')}</div></div>
+        <div class="wx-updated">Updated ${escapeHTML(current.time || 'now')}</div>
+      </div>
     </div>`;
 }
 
-function cToF(v) { return (v * 9) / 5 + 32; }
-function val(o) { return o && typeof o.value === 'number' ? o.value : null; }
-function fmtTemp(o) { const v = val(o); return v == null ? '—' : `${Math.round(cToF(v))}°F`; }
+function fmtNumber(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : '—'; }
 
 function escapeHTML(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
