@@ -1,11 +1,14 @@
 // alerts.js — live NWS watches/warnings layer.
 //
 // Pulls the active alert feed from the public api.weather.gov endpoint, draws
-// the storm-based polygons over the map, and (because the request asked
+// alert polygons over the map, and (because the request asked
 // for "only the alerts in the screenshot") shows only the alerts whose polygon
 // actually intersects the current map view in both the side list and on the
-// map. Clicking an alert opens a compact preview card summarising it, with a
-// button to open the full-screen briefing panel.
+// map. When the alert feed omits inline geometry (common for county/zone-based
+// and tsunami products), we resolve the affected NWS zones and merge their
+// geometries so those alerts still appear on the map. Clicking an alert opens a
+// compact preview card summarising it, with a button to open the full-screen
+// briefing panel.
 //
 // Two flavours of "upgrade" are applied on top of the raw NWS event name:
 //   • Impact-Based Warning damage tags — a Tornado Warning tagged CONSIDERABLE
@@ -22,6 +25,7 @@
 const ACTIVE_URL =
   'https://api.weather.gov/alerts/active?status=actual&message_type=alert,update';
 const REFRESH_MS = 120000;
+const zoneGeometryCache = new Map();
 
 // Colors keyed to the alert types in the legend screenshot. Special "upgrade"
 // states (PDS / Emergency) override these.
@@ -574,7 +578,7 @@ export class AlertsController {
     try {
       const features = await fetchActiveAlerts();
       this.alerts = features
-        .filter((f) => f.geometry) // storm-based polygons only
+        .filter((f) => f.geometry) // inline polygons plus resolved county/zone geometries
         // Hide areal/river Flood Warnings and the low-end Flood Advisory tier —
         // they clutter the map — while keeping Flash Flood Warnings, the
         // storm-scale alerts that matter next to the radar. ("Flash Flood
@@ -1022,5 +1026,41 @@ async function fetchActiveAlerts() {
     url = json.pagination && json.pagination.next;
     if (features.length > 4000) break;
   }
-  return features;
+  return Promise.all(features.map(resolveAlertGeometry));
+}
+
+async function resolveAlertGeometry(feature) {
+  if (feature.geometry) return feature;
+  const zones = ((feature.properties && feature.properties.affectedZones) || []).filter(Boolean);
+  if (!zones.length) return feature;
+
+  const geoms = (await Promise.all(zones.map(fetchZoneGeometry))).filter(Boolean);
+  const geometry = combinePolygonGeometries(geoms);
+  if (!geometry) return feature;
+  return { ...feature, geometry };
+}
+
+async function fetchZoneGeometry(url) {
+  if (zoneGeometryCache.has(url)) return zoneGeometryCache.get(url);
+  const promise = fetch(url, { headers: { Accept: 'application/geo+json' } })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((json) => (json && json.geometry ? json.geometry : null))
+    .catch(() => null);
+  zoneGeometryCache.set(url, promise);
+  return promise;
+}
+
+function combinePolygonGeometries(geoms) {
+  const polygons = [];
+  const add = (geom) => {
+    if (!geom) return;
+    if (geom.type === 'Polygon') polygons.push(geom.coordinates);
+    else if (geom.type === 'MultiPolygon') polygons.push(...geom.coordinates);
+    else if (geom.type === 'GeometryCollection') (geom.geometries || []).forEach(add);
+  };
+  geoms.forEach(add);
+  if (!polygons.length) return null;
+  return polygons.length === 1
+    ? { type: 'Polygon', coordinates: polygons[0] }
+    : { type: 'MultiPolygon', coordinates: polygons };
 }
