@@ -118,6 +118,7 @@
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area">📏</button>
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
+              <button id="toolWeather" class="map-tool" title="Local current conditions">☼</button>
               <button id="toolSounding" class="map-tool" title="Model sounding at map center" hidden>⊙</button>
               <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
               <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
@@ -125,6 +126,19 @@
             </div>
 
             <div id="mapReadout" class="map-readout"></div>
+            <div id="weatherPicker" class="weather-picker" hidden>
+              <div class="weather-picker-card">
+                <button id="weatherPickerClose" class="weather-picker-close" title="Close local weather picker">✕</button>
+                <div class="weather-picker-kicker">Local weather</div>
+                <h3>Current conditions</h3>
+                <p>Use your live location, or keep the map centered on any place and load the latest nearby NWS observation.</p>
+                <div class="weather-picker-actions">
+                  <button id="weatherUseLocation" class="ghost-btn weather-action">⌖ Use live location</button>
+                  <button id="weatherUseCenter" class="ghost-btn weather-action">＋ Use map center</button>
+                </div>
+                <div id="weatherPickerStatus" class="weather-picker-status">Map-center mode follows the crosshair in the middle of the screen.</div>
+              </div>
+            </div>
             <!-- Inspect crosshair: a fixed picker at screen centre that reads the
                  gate value beneath it as you pan the map. -->
             <div id="crosshair" class="crosshair" hidden>
