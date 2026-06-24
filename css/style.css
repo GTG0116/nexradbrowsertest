@@ -2868,6 +2868,22 @@ input[type='range']::-moz-range-thumb {
   font: 10px 'JetBrains Mono', monospace;
   text-align: right;
 }
+.weather-card .wx-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(47, 141, 157, 0.35);
+  color: var(--ink-dim);
+  font: 700 10px 'JetBrains Mono', monospace;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.weather-card .wx-footer div:last-child {
+  color: var(--accent);
+  text-align: right;
+}
 .weather-card.loading,
 .weather-card.error {
   display: block;

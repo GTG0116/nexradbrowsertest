@@ -3025,7 +3025,7 @@ function renderWeatherLegend(stateOverride = null) {
   }
   el.legend.innerHTML = `
     <div class="wx-main">
-      <div class="wx-kicker">Open-Meteo · map center · swipe down for forecast</div>
+      <div class="wx-kicker">Current Conditions</div>
       <div class="wx-temp"><span class="wx-emoji" aria-hidden="true">${emoji}</span>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</div>
       <div class="wx-condition">${emoji} ${escapeHTML(text)}</div>
       <div class="wx-place">${escapeHTML(place)}</div>
@@ -3035,6 +3035,10 @@ function renderWeatherLegend(stateOverride = null) {
         <div class="wx-metric"><div class="wx-label">Wind</div><div class="wx-value">${fmtNumber(current.wind_speed_10m)} ${escapeHTML(units.wind_speed_10m || 'mph')}</div></div>
         <div class="wx-metric"><div class="wx-label">Dir</div><div class="wx-value">${fmtNumber(current.wind_direction_10m)}${escapeHTML(units.wind_direction_10m || '°')}</div></div>
         <div class="wx-updated">Updated ${escapeHTML(current.time || 'now')}</div>
+      </div>
+      <div class="wx-footer">
+        <div>Swipe down for forecast</div>
+        <div>Open-Meteo · map center</div>
       </div>
     </div>`;
   clearWeatherAnimation();
@@ -3063,10 +3067,14 @@ function weatherForecastHTML(forecast, wx) {
     code: daily.weather_code && daily.weather_code[i],
   })).join('');
   return `
-    <div class="wx-kicker">Open-Meteo forecast · swipe up for current · tap a pill for details</div>
+    <div class="wx-kicker">Forecast</div>
     ${weatherCurrentMiniHTML(wx)}
     <div class="wx-forecast-section"><div class="wx-forecast-title">Next 24 hours</div><div class="wx-forecast-row">${hourRows}</div></div>
-    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 7 days</div><div class="wx-forecast-row">${dayRows}</div></div>`;
+    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 7 days</div><div class="wx-forecast-row">${dayRows}</div></div>
+    <div class="wx-footer">
+      <div>Swipe up for current · tap a pill for details</div>
+      <div>Open-Meteo forecast</div>
+    </div>`;
 }
 
 function forecastPillHTML(item) {
