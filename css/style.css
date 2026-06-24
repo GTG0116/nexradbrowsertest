@@ -5,8 +5,8 @@
 :root {
   --bg: #050912;
   --bg-2: #070d1c;
-  --panel: rgba(18, 30, 54, 0.55);
-  --panel-edge: rgba(90, 150, 230, 0.18);
+  --panel: #121e36;
+  --panel-edge: #27456f;
   --ink: #d6e6ff;
   --ink-dim: #7c93b8;
   --accent: #36e0c8;
@@ -67,8 +67,8 @@ body {
   padding: 10px 18px;
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, rgba(20, 34, 60, 0.6), rgba(10, 18, 34, 0.6));
-  backdrop-filter: blur(12px);
+  background: linear-gradient(180deg, #172947 0%, #0b1428 100%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 .brand {
@@ -155,7 +155,6 @@ body {
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
   background: var(--panel);
-  backdrop-filter: blur(12px);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -569,7 +568,6 @@ input[type='range']::-moz-range-thumb {
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
   background: var(--panel);
-  backdrop-filter: blur(12px);
   padding: 12px 16px;
 }
 .legend-title {
@@ -2690,16 +2688,15 @@ input[type='range']::-moz-range-thumb {
   place-items: end center;
   padding: 18px;
   pointer-events: none;
-  background: radial-gradient(circle at 50% 50%, rgba(5, 12, 24, 0.04), rgba(5, 9, 18, 0.24));
+  background: linear-gradient(180deg, rgba(5, 9, 18, 0.12), rgba(5, 9, 18, 0.5));
 }
 .weather-picker-card {
   position: relative;
   width: min(430px, 100%);
-  border: 1px solid rgba(54, 224, 200, 0.32);
+  border: 1px solid #2f8d9d;
   border-radius: calc(var(--radius) + 4px);
-  background: linear-gradient(180deg, rgba(16, 30, 54, 0.94), rgba(7, 14, 28, 0.94));
-  backdrop-filter: blur(16px);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45), var(--glow);
+  background: linear-gradient(160deg, #142947 0%, #0b1830 48%, #07101f 100%);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(54, 224, 200, 0.08);
   padding: 20px;
   pointer-events: auto;
 }
@@ -2711,7 +2708,7 @@ input[type='range']::-moz-range-thumb {
   height: 30px;
   border-radius: 50%;
   border: 1px solid var(--panel-edge);
-  background: rgba(8, 16, 32, 0.72);
+  background: #0b1830;
   color: var(--ink-dim);
   cursor: pointer;
 }
@@ -2796,9 +2793,9 @@ input[type='range']::-moz-range-thumb {
   left: 50%;
   top: calc(100% + 8px);
   transform: translateX(-50%);
-  border: 1px solid rgba(54, 224, 200, 0.35);
+  border: 1px solid #2f8d9d;
   border-radius: 999px;
-  background: rgba(7, 14, 28, 0.84);
+  background: linear-gradient(180deg, #10233f, #07101f);
   padding: 4px 8px;
   color: var(--ink);
   font: 700 10px 'JetBrains Mono', monospace;
@@ -2811,8 +2808,9 @@ input[type='range']::-moz-range-thumb {
   display: block;
   width: max-content;
   max-width: min(340px, calc(100vw - 32px));
-  border-color: rgba(54, 224, 200, 0.34);
-  box-shadow: var(--glow);
+  border-color: #2f8d9d;
+  background: linear-gradient(160deg, #142947 0%, #0b1830 52%, #07101f 100%);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.38);
 }
 .weather-card .wx-temp {
   display: flex;
@@ -2844,9 +2842,9 @@ input[type='range']::-moz-range-thumb {
   gap: 8px;
 }
 .weather-card .wx-metric {
-  border: 1px solid var(--panel-edge);
+  border: 1px solid #27456f;
   border-radius: 10px;
-  background: rgba(8, 16, 32, 0.58);
+  background: linear-gradient(180deg, #10213c, #0a1428);
   padding: 8px 9px;
   min-width: 0;
 }
@@ -2901,9 +2899,9 @@ input[type='range']::-moz-range-thumb {
 }
 .weather-card .wx-forecast-pill {
   flex: 0 0 74px;
-  border: 1px solid var(--panel-edge);
+  border: 1px solid #27456f;
   border-radius: 12px;
-  background: rgba(8, 16, 32, 0.58);
+  background: linear-gradient(180deg, #10213c, #0a1428);
   padding: 8px 7px;
   text-align: center;
 }
@@ -2947,9 +2945,9 @@ input[type='range']::-moz-range-thumb {
   gap: 10px;
   align-items: center;
   margin-top: 10px;
-  border: 1px solid rgba(54, 224, 200, 0.25);
+  border: 1px solid #2f8d9d;
   border-radius: 14px;
-  background: linear-gradient(135deg, rgba(54, 224, 200, 0.14), rgba(8, 16, 32, 0.64));
+  background: linear-gradient(135deg, #123b50 0%, #0a1428 100%);
   padding: 10px;
 }
 .weather-card .wx-current-now {
@@ -2975,10 +2973,10 @@ input[type='range']::-moz-range-thumb {
   justify-content: flex-end;
 }
 .weather-card .wx-current-facts span {
-  border: 1px solid var(--panel-edge);
+  border: 1px solid #27456f;
   border-radius: 999px;
   color: var(--ink);
-  background: rgba(8, 16, 32, 0.58);
+  background: #0a1428;
   padding: 4px 7px;
   font: 10px 'JetBrains Mono', monospace;
 }
