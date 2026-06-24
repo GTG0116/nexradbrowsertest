@@ -599,7 +599,7 @@ function cacheEls() {
   el.toolWeather = $('#toolWeather');
   el.weatherPicker = $('#weatherPicker');
   el.weatherPickerClose = $('#weatherPickerClose');
-  el.weatherUseLocation = $('#weatherUseLocation');
+  el.weatherCenterPicker = $('#weatherCenterPicker');
   el.weatherUseCenter = $('#weatherUseCenter');
   el.weatherPickerStatus = $('#weatherPickerStatus');
   el.toolSplit = $('#toolSplit');
@@ -2871,30 +2871,20 @@ function setupWeatherTool() {
     const c = state.map.getCenter();
     loadWeatherAt(c.lat, c.lng, 'map center');
   });
-  el.weatherUseLocation.addEventListener('click', () => {
-    if (!navigator.geolocation) {
-      setWeatherPickerStatus('This browser does not expose live location.', true);
-      return;
-    }
-    setWeatherPickerStatus('Waiting for location permission…');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => loadWeatherAt(pos.coords.latitude, pos.coords.longitude, 'live location'),
-      (err) => setWeatherPickerStatus(err.message || 'Could not get your location.', true),
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 300000 }
-    );
-  });
 }
 
 function openWeatherPicker() {
   state.weather.pickerOpen = true;
   el.weatherPicker.hidden = false;
   el.toolWeather.classList.add('active');
-  setWeatherPickerStatus('Choose live location, or pan the map and use the center point.');
+  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
+  setWeatherPickerStatus('Pan the map until your location is under the center picker.');
 }
 
 function closeWeatherPicker() {
   state.weather.pickerOpen = false;
   el.weatherPicker.hidden = true;
+  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
   el.toolWeather.classList.toggle('active', state.weather.active);
 }
 
@@ -2952,7 +2942,6 @@ function renderWeatherLegend(stateOverride = null) {
   const wx = state.weather.data;
   if (!wx) return;
   const p = wx.obs.properties || {};
-  const station = (wx.station.properties && wx.station.properties.name) || 'nearest station';
   const place = (wx.point.properties && wx.point.properties.relativeLocation &&
     wx.point.properties.relativeLocation.properties &&
     wx.point.properties.relativeLocation.properties.city) || wx.label || 'selected location';
@@ -2962,44 +2951,14 @@ function renderWeatherLegend(stateOverride = null) {
       <div class="wx-kicker">Current conditions</div>
       <div class="wx-temp">${fmtTemp(p.temperature)}</div>
       <div class="wx-condition">${escapeHTML(p.textDescription || 'Observed weather')}</div>
-      <div class="wx-place">${escapeHTML(place)} · ${escapeHTML(station)}</div>
-    </div>
-    <div class="wx-grid">
-      ${weatherMetric('Wind', fmtWind(p.windSpeed, p.windDirection))}
-      ${weatherMetric('Humidity', fmtPct(p.relativeHumidity))}
-      ${weatherMetric('Dew point', fmtTemp(p.dewpoint))}
-      ${weatherMetric('Pressure', fmtPressure(p.barometricPressure))}
-      ${weatherMetric('Visibility', fmtDistance(p.visibility))}
-      ${weatherMetric('Heat index', fmtTemp(p.heatIndex))}
-      ${weatherMetric('Wind chill', fmtTemp(p.windChill))}
-      ${weatherMetric('Station', escapeHTML((wx.station.properties && wx.station.properties.stationIdentifier) || '—'))}
-      <div class="wx-updated">Updated ${escapeHTML(formatObsTime(p.timestamp))}</div>
+      <div class="wx-place">${escapeHTML(place)}</div>
     </div>`;
 }
 
-function weatherMetric(label, value) {
-  return `<div class="wx-metric"><div class="wx-label">${label}</div><div class="wx-value">${value || '—'}</div></div>`;
-}
 function cToF(v) { return (v * 9) / 5 + 32; }
 function val(o) { return o && typeof o.value === 'number' ? o.value : null; }
 function fmtTemp(o) { const v = val(o); return v == null ? '—' : `${Math.round(cToF(v))}°F`; }
-function fmtPct(o) { const v = val(o); return v == null ? '—' : `${Math.round(v)}%`; }
-function fmtPressure(o) { const v = val(o); return v == null ? '—' : `${(v / 100).toFixed(1)} mb`; }
-function fmtDistance(o) { const v = val(o); return v == null ? '—' : `${(v / 1609.344).toFixed(1)} mi`; }
-function fmtWind(speed, direction) {
-  const s = val(speed);
-  if (s == null) return 'Calm';
-  const mph = Math.round(s * 2.23694);
-  const d = val(direction);
-  return d == null ? `${mph} mph` : `${degToCompass(d)} ${mph} mph`;
-}
-function degToCompass(deg) {
-  return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(deg / 22.5) % 16];
-}
-function formatObsTime(t) {
-  if (!t) return 'time unavailable';
-  return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
-}
+
 function escapeHTML(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }

@@ -131,13 +131,18 @@
                 <button id="weatherPickerClose" class="weather-picker-close" title="Close local weather picker">✕</button>
                 <div class="weather-picker-kicker">Local weather</div>
                 <h3>Current conditions</h3>
-                <p>Use your live location, or keep the map centered on any place and load the latest nearby NWS observation.</p>
+                <p>Pan or zoom the map so the place you want is under the center picker, then load the latest nearby NWS observation.</p>
                 <div class="weather-picker-actions">
-                  <button id="weatherUseLocation" class="ghost-btn weather-action">⌖ Use live location</button>
                   <button id="weatherUseCenter" class="ghost-btn weather-action">＋ Use map center</button>
                 </div>
-                <div id="weatherPickerStatus" class="weather-picker-status">Map-center mode follows the crosshair in the middle of the screen.</div>
+                <div id="weatherPickerStatus" class="weather-picker-status">The picker marks the exact map center used for local weather.</div>
               </div>
+            </div>
+            <div id="weatherCenterPicker" class="weather-center-picker" hidden>
+              <div class="wxp-line wxp-v"></div>
+              <div class="wxp-line wxp-h"></div>
+              <div class="wxp-ring"></div>
+              <div class="wxp-label">Weather center</div>
             </div>
             <!-- Inspect crosshair: a fixed picker at screen centre that reads the
                  gate value beneath it as you pan the map. -->
