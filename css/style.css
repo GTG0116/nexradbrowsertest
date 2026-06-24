@@ -2877,6 +2877,55 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
 }
 .weather-card.error { color: #ffb08a; }
+.weather-card.forecast {
+  width: min(620px, calc(100vw - 32px));
+  max-width: min(620px, calc(100vw - 32px));
+}
+.weather-card .wx-forecast-section {
+  margin-top: 12px;
+}
+.weather-card .wx-forecast-title {
+  color: var(--ink);
+  font: 700 12px 'JetBrains Mono', monospace;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.weather-card .wx-forecast-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+.weather-card .wx-forecast-pill {
+  flex: 0 0 74px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  background: rgba(8, 16, 32, 0.58);
+  padding: 8px 7px;
+  text-align: center;
+}
+.weather-card .wx-forecast-time,
+.weather-card .wx-forecast-pop {
+  color: var(--ink-dim);
+  font: 10px 'JetBrains Mono', monospace;
+}
+.weather-card .wx-forecast-emoji {
+  margin-top: 5px;
+  font-size: 23px;
+  line-height: 1;
+}
+.weather-card .wx-forecast-temp {
+  margin-top: 6px;
+  color: #fff;
+  font: 700 13px 'JetBrains Mono', monospace;
+}
+.weather-card .wx-forecast-pop {
+  margin-top: 4px;
+}
+
 
 @media (max-width: 760px) {
   .legend.weather-card { max-width: calc(100vw - 24px); }
