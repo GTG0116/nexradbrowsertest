@@ -56,6 +56,9 @@ const EVENT_COLORS = {
   'Hurricane Watch': '#e040b0',
   'Typhoon Warning': '#d9344a',
   'Typhoon Watch': '#ff20c0',
+  'Tsunami Advisory': '#d88a73',
+  'Tsunami Warning': '#ff4500',
+  'Tsunami Watch': '#ff8c00',
   'Extreme Wind Warning': '#f08000',
   'Special Weather Statement': '#2bbfb0',
   'Special Marine Warning': '#ffa500',
@@ -85,8 +88,11 @@ const PRIORITY = [
   'Flash Flood Warning',
   'Snow Squall Warning',
   'Extreme Wind Warning',
+  'Tsunami Warning',
   'Tornado Watch',
   'Severe Thunderstorm Watch',
+  'Tsunami Watch',
+  'Tsunami Advisory',
 ];
 
 function firstParam(params, key) {
@@ -392,6 +398,30 @@ const GUIDANCE = {
     lead: 'Extreme sustained winds (115+ mph), typically from a major hurricane’s eyewall, are imminent.',
     points: [
       'Treat this like a tornado warning: move to an interior room on the lowest floor, away from windows, now.',
+    ],
+  },
+  'Tsunami Warning': {
+    lead: 'A tsunami with dangerous coastal flooding and powerful currents is expected or occurring. Move inland and to higher ground immediately.',
+    points: [
+      'Leave beaches, harbors, marinas, and low-lying coastal areas now.',
+      'Follow evacuation routes and instructions from local officials.',
+      'Do not return to the coast until officials say it is safe; dangerous surges can continue for hours.',
+    ],
+  },
+  'Tsunami Watch': {
+    lead: 'A distant or possible tsunami may affect the coast. Be ready to evacuate if a warning or local officials tell you to move.',
+    points: [
+      'Review your route to higher ground or inland shelter.',
+      'Stay away from beaches and harbors while monitoring official updates.',
+      'Keep your phone charged and be prepared to leave quickly.',
+    ],
+  },
+  'Tsunami Advisory': {
+    lead: 'Strong currents or waves dangerous to people in or near the water are expected or occurring.',
+    points: [
+      'Stay out of the ocean, bays, harbors, and marinas.',
+      'Move away from beaches, jetties, and low-lying shorelines.',
+      'Follow local official instructions and wait for the advisory to be cancelled.',
     ],
   },
   'High Wind Warning': {
