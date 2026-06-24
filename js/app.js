@@ -2966,7 +2966,7 @@ async function openMeteoJson(lat, lon, signal) {
     latitude: lat.toFixed(4),
     longitude: lon.toFixed(4),
     current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,dew_point_2m,surface_pressure,cloud_cover',
-    hourly: 'temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover,visibility',
+    hourly: 'temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m',
     daily: 'weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,uv_index_max',
     forecast_days: '7',
     temperature_unit: 'fahrenheit',
@@ -3127,21 +3127,43 @@ function showWeatherDetail(type, i) {
 }
 
 function weatherDetailRows(type, src, units, i) {
-  const specs = type === 'day' ? [
-    ['High', 'temperature_2m_max'], ['Low', 'temperature_2m_min'], ['Feels high', 'apparent_temperature_max'], ['Feels low', 'apparent_temperature_min'],
-    ['Precip chance', 'precipitation_probability_max'], ['Precip total', 'precipitation_sum'], ['Wind max', 'wind_speed_10m_max'], ['Gusts', 'wind_gusts_10m_max'],
-    ['Wind dir', 'wind_direction_10m_dominant'], ['UV index', 'uv_index_max'], ['Sunrise', 'sunrise', 'time'], ['Sunset', 'sunset', 'time'],
-  ] : [
-    ['Temperature', 'temperature_2m'], ['Feels like', 'apparent_temperature'], ['Humidity', 'relative_humidity_2m'], ['Dew point', 'dew_point_2m'],
-    ['Precip chance', 'precipitation_probability'], ['Precip', 'precipitation'], ['Wind', 'wind_speed_10m'], ['Gusts', 'wind_gusts_10m'],
-    ['Wind dir', 'wind_direction_10m'], ['Pressure', 'surface_pressure'], ['Cloud cover', 'cloud_cover'], ['Visibility', 'visibility'],
+  if (type === 'day') {
+    const specs = [
+      ['Temperatures', [
+        ['High', src.temperature_2m_max && src.temperature_2m_max[i], units.temperature_2m_max],
+        ['Low', src.temperature_2m_min && src.temperature_2m_min[i], units.temperature_2m_min],
+      ], 'wide'],
+      ['Feels like', [
+        ['High', src.apparent_temperature_max && src.apparent_temperature_max[i], units.apparent_temperature_max],
+        ['Low', src.apparent_temperature_min && src.apparent_temperature_min[i], units.apparent_temperature_min],
+      ], 'wide'],
+      ['Precip chance', 'precipitation_probability_max'], ['Precip total', 'precipitation_sum'], ['Wind max', 'wind_speed_10m_max'], ['Gusts', 'wind_gusts_10m_max'],
+      ['Wind dir', 'wind_direction_10m_dominant'], ['UV index', 'uv_index_max'], ['Sunrise', 'sunrise', 'time'], ['Sunset', 'sunset', 'time'],
+    ];
+    return specs.map(([label, key, kind]) => Array.isArray(key)
+      ? detailCombinedRow(label, key, kind === 'wide')
+      : detailRow(label, src[key] && src[key][i], units[key], kind)).join('');
+  }
+
+  const specs = [
+    ['Temperature', 'temperature_2m'], ['Feels like', 'apparent_temperature'], ['Humidity', 'relative_humidity_2m'],
+    ['Precip chance', 'precipitation_probability'], ['Precip', 'precipitation'], ['Wind', 'wind_speed_10m'],
   ];
   return specs.map(([label, key, kind]) => detailRow(label, src[key] && src[key][i], units[key], kind)).join('');
 }
 
+function detailCombinedRow(label, values, wide = false) {
+  const parts = values.map(([name, value, unit]) => `<span><em>${escapeHTML(name)}</em>${formatDetailValue(value, unit)}</span>`).join('');
+  return `<div class="wx-detail-metric wx-detail-combined${wide ? ' wide' : ''}"><div>${escapeHTML(label)}</div><strong>${parts}</strong></div>`;
+}
+
 function detailRow(label, value, unit, kind) {
-  const text = kind === 'time' ? formatDetailTime(value) : `${fmtNumber(value)}${unit ? ` ${escapeHTML(unit)}` : ''}`;
+  const text = kind === 'time' ? formatDetailTime(value) : formatDetailValue(value, unit);
   return `<div class="wx-detail-metric"><div>${escapeHTML(label)}</div><strong>${text}</strong></div>`;
+}
+
+function formatDetailValue(value, unit) {
+  return `${fmtNumber(value)}${unit ? ` ${escapeHTML(unit)}` : ''}`;
 }
 
 function formatDetailDateTime(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? (value || 'Forecast') : d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' }); }
