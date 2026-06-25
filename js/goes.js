@@ -30,12 +30,30 @@ export const SATELLITES = {
 // Sectors. `product` is the S3 product prefix; `match` filters the sector token
 // in the filename (mesoscale M1/M2 share the MCMIPM prefix). `fast` flags the
 // rapid-refresh sectors (≈1 min meso, 5 min CONUS, 10 min full disk).
+//
+// Himawari sectors also carry the HSD layout: `segments` (vertical strips per
+// band), `frames` (rapid-scan observations per 10-minute folder), `region(f)`
+// (the filename area token for frame f), and either a fixed `grid` (full disk)
+// or `commonCFAC` (the resample resolution for region sectors, whose grids are
+// read from the file headers — the Target sector is steerable and moves).
 export const SECTORS = {
   conus: { label: 'CONUS', product: 'ABI-L2-MCMIPC', match: 'MCMIPC', refresh: 'every ~5 min' },
   full: { label: 'Full Disk', product: 'ABI-L2-MCMIPF', match: 'MCMIPF', refresh: 'every ~10 min' },
   meso1: { label: 'Mesoscale 1', product: 'ABI-L2-MCMIPM', match: 'MCMIPM1', refresh: 'every ~1 min' },
   meso2: { label: 'Mesoscale 2', product: 'ABI-L2-MCMIPM', match: 'MCMIPM2', refresh: 'every ~1 min' },
-  hfd: { label: 'Full Disk', product: 'AHI-L1b-FLDK', match: 'FLDK', refresh: 'every ~10 min', family: 'himawari' },
+  hfd: {
+    label: 'Full Disk', product: 'AHI-L1b-FLDK', refresh: 'every ~10 min', family: 'himawari',
+    segments: 10, frames: 1, region: () => 'FLDK',
+    grid: { W: 5500, H: 5500, CFAC: 20466275, LFAC: 20466275, COFF: 2750.5, LOFF: 2750.5 },
+  },
+  japan: {
+    label: 'Japan (higher res)', product: 'AHI-L1b-Japan', refresh: 'every ~2.5 min', family: 'himawari',
+    segments: 1, frames: 4, region: (f) => `JP0${f}`, commonCFAC: 40932549,
+  },
+  target: {
+    label: 'Target Sector', product: 'AHI-L1b-Target', refresh: 'every ~2.5 min', family: 'himawari',
+    segments: 1, frames: 4, region: (f) => `R30${f}`, commonCFAC: 40932549,
+  },
 };
 
 export function sectorsForSatellite(satKey) {
@@ -84,21 +102,19 @@ function labelForKey(key) {
 }
 
 
-// --- Himawari-9 AHI (Himawari Standard Data, L1b Full Disk) -----------------
+// --- Himawari-9 AHI (Himawari Standard Data, L1b) ---------------------------
 //
 // Unlike GOES (one self-describing NetCDF per scan), Himawari publishes the raw
-// "Himawari Standard Data" (HSD): a custom binary format, bzip2-compressed, with
-// each band split into 10 vertical segments (S0110…S1010). Files live under
-//   AHI-L1b-FLDK/YYYY/MM/DD/HHMM/HS_H09_<date>_<time>_B##_FLDK_R##_S##10.DAT.bz2
-//
-// We decode the HSD ourselves (no NetCDF here) and resample every band onto the
-// common 2 km full-disk fixed grid (5500×5500) so multi-band RGB recipes line up
-// and memory stays bounded — visible bands are higher native resolution.
+// "Himawari Standard Data" (HSD): a custom binary format, bzip2-compressed.
+//   <product>/YYYY/MM/DD/HHMM/HS_H09_<date>_<time>_B##_<region>_R##_S##<n>.DAT.bz2
+// The Full Disk is split into 10 vertical segments (S0110…S1010), one frame per
+// 10-minute folder. The Japan and Target sectors are smaller regions scanned
+// every ~2.5 min, so each folder holds 4 single-segment frames (JP01…JP04 /
+// R301…R304). We decode the HSD ourselves and resample every band onto a common
+// fixed grid so multi-band RGB recipes line up: the 2 km grid for the full disk,
+// 1 km for the higher-res regional sectors (their grids come from the headers —
+// the Target sector is steerable and moves).
 const HIMAWARI_SCENE_FILES = new Map();
-
-const HIMAWARI_W = 5500, HIMAWARI_H = 5500; // 2 km full-disk grid
-const HIMAWARI_CFAC = 20466275, HIMAWARI_COFF = 2750.5; // CGMS nav for that grid
-const HIMAWARI_SEGMENTS = 10;
 
 // The app addresses channels by GOES ABI number; AHI numbers the visible bands
 // differently (and has no 1.37 µm cirrus band). Map ABI → AHI for file naming;
@@ -107,24 +123,25 @@ const ABI_TO_AHI = {
   1: 1, 2: 3, 3: 4, 4: null, 5: 5, 6: 6, 7: 7, 8: 8,
   9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 14, 15: 15, 16: 16,
 };
-// Native resolution code per AHI band (0.5/1/2 km); the resample ratio is read
-// back from each segment's actual width.
+// Native resolution code per AHI band (0.5/1/2 km).
 const ahiRes = (b) => (b === 3 ? 'R05' : (b === 1 || b === 2 || b === 4) ? 'R10' : 'R20');
 
-function himawariSegKey(meta, ahiBand, seg) {
+function himawariSegKey(meta, sector, ahiBand, seg) {
   const stamp = `${meta.y}${meta.mm}${meta.dd}_${meta.hhmm}`;
-  return `AHI-L1b-FLDK/${meta.y}/${meta.mm}/${meta.dd}/${meta.hhmm}/` +
-    `HS_H09_${stamp}_B${pad(ahiBand)}_FLDK_${ahiRes(ahiBand)}_S${pad(seg)}10.DAT.bz2`;
+  const segStr = `S${pad(seg)}${pad(sector.segments)}`;
+  return `${sector.product}/${meta.y}/${meta.mm}/${meta.dd}/${meta.hhmm}/` +
+    `HS_H09_${stamp}_B${pad(ahiBand)}_${sector.region(meta.frame)}_${ahiRes(ahiBand)}_${segStr}.DAT.bz2`;
 }
 
-// List the available full-disk scene times by walking the day folders for the
-// 10-minute HHMM subfolders. Returns the most recent dozen, newest last.
-async function listHimawariScenes(bucket, baseDate) {
-  const found = new Map(); // hhmm-id -> meta
-  for (let back = 0; back < 2 && found.size < 24; back++) {
+// List the available scene times by walking the day folders for their 10-minute
+// HHMM subfolders. Regional sectors expand each folder into its rapid-scan
+// frames. Returns the most recent dozen, newest last.
+async function listHimawariScenes(bucket, sector, sectorKey, baseDate) {
+  const folders = [];
+  for (let back = 0; back < 2 && folders.length < 24; back++) {
     const d = new Date(baseDate.getTime() - back * 86400000);
     const y = d.getUTCFullYear(), mm = pad(d.getUTCMonth() + 1), dd = pad(d.getUTCDate());
-    const prefix = `AHI-L1b-FLDK/${y}/${mm}/${dd}/`;
+    const prefix = `${sector.product}/${y}/${mm}/${dd}/`;
     const url = `${bucket}/?list-type=2&prefix=${encodeURIComponent(prefix)}&delimiter=/&max-keys=1000`;
     let res;
     try { res = await fetch(url); } catch (_) { continue; }
@@ -132,15 +149,18 @@ async function listHimawariScenes(bucket, baseDate) {
     const xml = await res.text();
     const re = /<Prefix>[^<]*\/(\d{4})\/<\/Prefix>/g;
     let m;
-    while ((m = re.exec(xml)) !== null) {
-      const hhmm = m[1];
-      const id = `HIMAWARI:${y}${mm}${dd}${hhmm}`;
-      if (found.has(id)) continue;
-      const time = new Date(Date.UTC(+y, +mm - 1, +dd, +hhmm.slice(0, 2), +hhmm.slice(2)));
-      found.set(id, { y, mm, dd, hhmm, time, key: id });
+    while ((m = re.exec(xml)) !== null) folders.push({ y, mm, dd, hhmm: m[1] });
+  }
+  const scenes = new Map();
+  for (const f of folders) {
+    const base = Date.UTC(+f.y, +f.mm - 1, +f.dd, +f.hhmm.slice(0, 2), +f.hhmm.slice(2));
+    for (let frame = 1; frame <= sector.frames; frame++) {
+      const time = new Date(base + (frame - 1) * 150000); // ~2.5 min between frames
+      const key = `HIMAWARI:${sectorKey}:${f.y}${f.mm}${f.dd}${f.hhmm}:${frame}`;
+      scenes.set(key, { ...f, frame, time, key, sectorKey });
     }
   }
-  const out = [...found.values()].sort((a, b) => a.time - b.time).slice(-12);
+  const out = [...scenes.values()].sort((a, b) => a.time - b.time).slice(-12);
   for (const meta of out) HIMAWARI_SCENE_FILES.set(meta.key, meta);
   return out.map((meta) => ({
     key: meta.key, time: meta.time,
@@ -172,7 +192,7 @@ export async function listScenes(satKey, sectorKey, date) {
   const sector = SECTORS[sectorKey];
   if (!sat || !sector) throw new Error('bad satellite/sector');
   if ((sat.family || 'goes') === 'himawari') {
-    return listHimawariScenes(sat.bucket, date || new Date());
+    return listHimawariScenes(sat.bucket, sector, sectorKey, date || new Date());
   }
   const base = date || new Date();
   let keys = [];
@@ -235,27 +255,23 @@ async function readChannel(h5, band) {
 }
 
 
-// Decode one HSD segment and resample it onto the common 2 km grid `out`
-// (NaN for fill / off-disk pixels). `seg` is the 1-based segment number. Returns
-// the navigation constants from the projection block (block 3).
-function decodeHimawariSegment(bytes, seg, out) {
+// Decompress one HSD segment and parse its header: grid size, calibration, CGMS
+// navigation (block 3) and the segment's first line (block 7). The 11 fixed
+// header blocks are each led by a 1-byte number and a 2-byte length.
+function parseHsdHeader(bytes) {
   const raw = decodeBzip2(bytes);
   const dv = new DataView(raw.buffer, raw.byteOffset, raw.length);
   const u16 = (o) => dv.getUint16(o, true);
+  const u32 = (o) => dv.getUint32(o, true);
+  const f32 = (o) => dv.getFloat32(o, true);
   const f64 = (o) => dv.getFloat64(o, true);
 
-  // The HSD header is 11 fixed blocks, each led by a 1-byte number and 2-byte
-  // length. Walk them to find their offsets.
   let off = 0; const blk = {};
   for (let i = 0; i < 11; i++) { blk[raw[off]] = off; off += u16(off + 1); }
-  const hdrLen = off;
-  const b2 = blk[2], b3 = blk[3], b5 = blk[5];
+  const b2 = blk[2], b3 = blk[3], b5 = blk[5], b7 = blk[7];
 
-  const cols = u16(b2 + 5), lines = u16(b2 + 7);
   const band = u16(b5 + 3);
-  const gain = f64(b5 + 19), cnst = f64(b5 + 27);   // count → radiance
-  const errCnt = u16(b5 + 15), outCnt = u16(b5 + 17); // error / off-scan fill DN
-
+  const gain = f64(b5 + 19), cnst = f64(b5 + 27);     // count → radiance
   // Bands 1–6 are visible/near-IR (radiance → albedo via c′); bands 7–16 are
   // thermal IR (radiance → brightness temperature via the inverse Planck law and
   // a band-correction polynomial), matching the GOES path's physical units.
@@ -264,62 +280,94 @@ function decodeHimawariSegment(bytes, seg, out) {
     const cprime = f64(b5 + 35);
     calibrate = (dn) => cprime * (gain * dn + cnst);
   } else {
-    const lam = f64(b5 + 5) * 1e-6;                  // central wavelength, m
+    const lam = f64(b5 + 5) * 1e-6;                    // central wavelength, m
     const c0 = f64(b5 + 35), c1 = f64(b5 + 43), c2 = f64(b5 + 51);
     const cL = f64(b5 + 83), hP = f64(b5 + 91), kB = f64(b5 + 99);
     const hck = (hP * cL) / (kB * lam);
     const planckA = (2 * hP * cL * cL) / Math.pow(lam, 5);
     calibrate = (dn) => {
-      const I = (gain * dn + cnst) * 1e6;             // W/(m² sr m)
+      const I = (gain * dn + cnst) * 1e6;               // W/(m² sr m)
       if (I <= 0) return NaN;
       const Te = hck / Math.log(planckA / I + 1);
       return c0 + c1 * Te + c2 * Te * Te;
     };
   }
 
-  // Nearest-neighbour resample from the band's native grid to the 2 km grid.
-  const ratio = Math.max(1, Math.round(cols / HIMAWARI_W));
-  const nativeRowStart = (seg - 1) * lines;
-  for (let cr = 0; cr < HIMAWARI_H; cr++) {
-    const nr = Math.floor((cr + 0.5) * ratio);
-    if (nr < nativeRowStart || nr >= nativeRowStart + lines) continue;
-    const rowBase = hdrLen + (nr - nativeRowStart) * cols * 2;
-    const outBase = cr * HIMAWARI_W;
-    for (let cc = 0; cc < HIMAWARI_W; cc++) {
-      const dn = u16(rowBase + Math.floor((cc + 0.5) * ratio) * 2);
-      out[outBase + cc] = (dn === errCnt || dn === outCnt) ? NaN : calibrate(dn);
-    }
-  }
-
-  return { subLon: f64(b3 + 3), Rs: f64(b3 + 27), Req: f64(b3 + 35), Rpol: f64(b3 + 43) };
+  return {
+    dv, hdrLen: off, cols: u16(b2 + 5), lines: u16(b2 + 7), band, calibrate,
+    errCnt: u16(b5 + 15), outCnt: u16(b5 + 17),         // error / off-scan fill DN
+    CFAC: u32(b3 + 11), LFAC: u32(b3 + 15), COFF: f32(b3 + 19), LOFF: f32(b3 + 23),
+    firstLine: u16(b7 + 5),
+    nav: { subLon: f64(b3 + 3), Rs: f64(b3 + 27), Req: f64(b3 + 35), Rpol: f64(b3 + 43) },
+  };
 }
 
-// Build one ABI channel for a scene by downloading and decoding its 10 HSD
-// segments. Missing segments (a scene still uploading) leave NaN gaps.
-async function himawariChannel(bucket, meta, abiBand, onProgress) {
-  const out = new Float32Array(HIMAWARI_W * HIMAWARI_H).fill(NaN);
+// Build the common output grid for a regional sector by scaling a band's native
+// CGMS navigation to the chosen common resolution (`commonCFAC`).
+function deriveGrid(hdr, commonCFAC) {
+  const rC = commonCFAC / hdr.CFAC, rL = commonCFAC / hdr.LFAC;
+  return {
+    W: Math.round(hdr.cols * rC), H: Math.round(hdr.lines * rL),
+    CFAC: commonCFAC, LFAC: commonCFAC,
+    COFF: (hdr.COFF - 0.5) * rC + 0.5, LOFF: (hdr.LOFF - 0.5) * rL + 0.5,
+  };
+}
+
+// Nearest-neighbour resample one segment onto the common grid `out` via the CGMS
+// line/column ↔ scan-angle relations, so native grids of any resolution and the
+// common grid stay co-registered. Fill / off-grid pixels are left untouched (the
+// caller pre-fills NaN).
+function resampleHsd(hdr, grid, out) {
+  const { dv, hdrLen, cols, lines, errCnt, outCnt, calibrate } = hdr;
+  const rC = hdr.CFAC / grid.CFAC, rL = hdr.LFAC / grid.LFAC; // native px per common px
+  const segTop = hdr.firstLine - 1;
+  for (let cr = 0; cr < grid.H; cr++) {
+    const nr = Math.round(hdr.LOFF + (cr + 1 - grid.LOFF) * rL) - 1 - segTop;
+    if (nr < 0 || nr >= lines) continue;
+    const rowBase = hdrLen + nr * cols * 2;
+    const outBase = cr * grid.W;
+    for (let cc = 0; cc < grid.W; cc++) {
+      const nc = Math.round(hdr.COFF + (cc + 1 - grid.COFF) * rC) - 1;
+      if (nc < 0 || nc >= cols) continue;
+      const dn = dv.getUint16(rowBase + nc * 2, true);
+      if (dn !== errCnt && dn !== outCnt) out[outBase + cc] = calibrate(dn);
+    }
+  }
+}
+
+// Build one ABI channel by downloading and decoding the sector's HSD segments
+// for this frame. `gridRef.grid` is established lazily from the first segment for
+// regional sectors. Missing segments (a scene still uploading) leave NaN gaps.
+async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgress) {
   const ahi = ABI_TO_AHI[abiBand];
-  if (ahi == null) return { data: out, nav: null }; // no Himawari equivalent
-  let nav = null;
-  for (let s = 1; s <= HIMAWARI_SEGMENTS; s++) {
+  const alloc = () => new Float32Array(gridRef.grid.W * gridRef.grid.H).fill(NaN);
+  if (ahi == null) return { data: gridRef.grid ? alloc() : null, nav: null };
+  let out = null, nav = null;
+  for (let s = 1; s <= sector.segments; s++) {
     let bytes;
     try {
-      bytes = await fetchBytes(bucket, himawariSegKey(meta, ahi, s),
-        onProgress ? (p) => onProgress((s - 1 + p) / HIMAWARI_SEGMENTS) : null);
+      bytes = await fetchBytes(bucket, himawariSegKey(meta, sector, ahi, s),
+        onProgress ? (p) => onProgress((s - 1 + p) / sector.segments) : null);
     } catch (_) { continue; }
-    const n = decodeHimawariSegment(bytes, s, out);
-    if (n && !nav) nav = n;
+    const hdr = parseHsdHeader(bytes);
+    if (!gridRef.grid) gridRef.grid = sector.grid || deriveGrid(hdr, sector.commonCFAC);
+    if (!out) out = alloc();
+    resampleHsd(hdr, gridRef.grid, out);
+    if (!nav) nav = hdr.nav;
   }
+  if (!out && gridRef.grid) out = alloc();
   return { data: out, nav };
 }
 
-function himawariScene(meta, channels, nav, sat, key) {
-  const k = (65536 / HIMAWARI_CFAC) * (Math.PI / 180); // scan-angle radians/column
+function himawariScene(meta, channels, nav, grid, sat, key) {
+  const g = grid || { W: 5500, H: 5500, CFAC: 20466275, LFAC: 20466275, COFF: 2750.5, LOFF: 2750.5 };
+  const kx = (65536 / g.CFAC) * (Math.PI / 180); // scan-angle radians per column
+  const ky = (65536 / g.LFAC) * (Math.PI / 180); // scan-angle radians per line
   const n = nav || { subLon: sat.lon0, Rs: 42164, Req: 6378.137, Rpol: 6356.7523 };
   return {
-    width: HIMAWARI_W, height: HIMAWARI_H,
-    xScale: -k, xOffset: (HIMAWARI_COFF - 1) * k,
-    yScale: k, yOffset: (1 - HIMAWARI_COFF) * k,
+    width: g.W, height: g.H,
+    xScale: -kx, xOffset: (g.COFF - 1) * kx,
+    yScale: ky, yOffset: (1 - g.LOFF) * ky,
     proj: {
       lon0: (n.subLon || sat.lon0) * Math.PI / 180,
       H: (n.Rs || 42164) * 1000,
@@ -328,22 +376,32 @@ function himawariScene(meta, channels, nav, sat, key) {
       sweep: 'y',
     },
     channels, time: meta.time, key,
-    _himawariMeta: meta, _satBucket: sat.bucket,
+    _himawariMeta: meta, _himawariGrid: g, _satBucket: sat.bucket,
   };
 }
 
-async function loadHimawariScene(sat, key, bands, onProgress) {
+async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
   const meta = HIMAWARI_SCENE_FILES.get(key);
   if (!meta) throw new Error('Himawari scene index expired; refresh scenes');
+  const sector = SECTORS[sectorKey];
+  const gridRef = { grid: sector.grid || null };
+  // Regional grids come from the headers; bootstrap one if every requested band
+  // lacks a Himawari equivalent (e.g. a lone 1.37 µm cirrus channel).
+  if (!gridRef.grid && bands.every((b) => ABI_TO_AHI[b] == null)) {
+    try {
+      const bytes = await fetchBytes(sat.bucket, himawariSegKey(meta, sector, 13, 1));
+      gridRef.grid = deriveGrid(parseHsdHeader(bytes), sector.commonCFAC);
+    } catch (_) { /* leave empty; the channel will be blank */ }
+  }
   const channels = {};
   let nav = null;
   for (let i = 0; i < bands.length; i++) {
-    const r = await himawariChannel(sat.bucket, meta, bands[i],
+    const r = await himawariChannel(sat.bucket, meta, sector, bands[i], gridRef,
       onProgress ? (p) => onProgress((i + p) / bands.length) : null);
-    channels[bands[i]] = r.data;
+    if (r.data) channels[bands[i]] = r.data;
     if (r.nav && !nav) nav = r.nav;
   }
-  return himawariScene(meta, channels, nav, sat, key);
+  return himawariScene(meta, channels, nav, gridRef.grid, sat, key);
 }
 
 // Download + decode a scene, reading only the channels requested. Returns the
@@ -352,7 +410,7 @@ async function loadHimawariScene(sat, key, bands, onProgress) {
 export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
   const sat = SATELLITES[satKey];
   const sector = SECTORS[sectorKey];
-  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, key, bands, onProgress);
+  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress);
   const bytes = await fetchBytes(sat.bucket, key, onProgress);
   const h5 = new HDF5File(bytes);
 
@@ -392,9 +450,12 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
 // RGB recipe) without re-fetching — and keeps memory to only what's displayed.
 export async function ensureBands(scene, bands) {
   if (scene._himawariMeta) {
+    const sector = SECTORS[scene._himawariMeta.sectorKey];
+    const gridRef = { grid: scene._himawariGrid };
     for (const b of bands) {
       if (scene.channels[b]) continue;
-      scene.channels[b] = (await himawariChannel(scene._satBucket, scene._himawariMeta, b)).data;
+      const r = await himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef);
+      if (r.data) scene.channels[b] = r.data;
     }
     return scene;
   }
@@ -405,23 +466,31 @@ export async function ensureBands(scene, bands) {
   return scene;
 }
 
-// Forward GOES fixed-grid navigation: scan angles (x,y in rad) → geodetic
-// lon/lat (deg), per the GOES-R PUG. Returns null when the point is off the
-// Earth's limb. Used to build the image's lon/lat bounding box for the GL quad.
+// Forward fixed-grid navigation: scan angles (x,y in rad) → geodetic lon/lat
+// (deg), per the GOES-R PUG. Returns null when the point is off the Earth's limb.
+// Used to build the image's lon/lat bounding box for the GL quad. The look
+// vector is parameterised by the sweep axis ('x' for GOES, 'y' for Himawari/
+// Meteosat) to match the inverse the shader runs; the rest of the solve is the
+// same ellipsoid intersection.
 export function scanToLonLat(x, y, proj) {
   const { lon0, H, rEq, rPol } = proj;
-  const sinx = Math.sin(x), cosx = Math.cos(x);
-  const siny = Math.sin(y), cosy = Math.cos(y);
-  const a = sinx * sinx + cosx * cosx * (cosy * cosy + (rEq * rEq) / (rPol * rPol) * siny * siny);
-  const b = -2 * H * cosx * cosy;
+  let Lx, Ly, Lz;
+  if (proj.sweep === 'y') {
+    const cy = Math.cos(y);
+    Lx = cy * Math.cos(x); Ly = cy * Math.sin(x); Lz = -Math.sin(y);
+  } else {
+    const cx = Math.cos(x);
+    Lx = cx * Math.cos(y); Ly = -Math.sin(x); Lz = cx * Math.sin(y);
+  }
+  const e = (rEq * rEq) / (rPol * rPol);
+  const a = Lx * Lx + Ly * Ly + e * Lz * Lz;
+  const b = -2 * H * Lx;
   const c = H * H - rEq * rEq;
   const disc = b * b - 4 * a * c;
   if (disc < 0) return null;
   const rs = (-b - Math.sqrt(disc)) / (2 * a);
-  const sx = rs * cosx * cosy;
-  const sy = -rs * sinx;
-  const sz = rs * cosx * siny;
-  const lat = Math.atan((rEq * rEq) / (rPol * rPol) * (sz / Math.sqrt((H - sx) * (H - sx) + sy * sy)));
+  const sx = rs * Lx, sy = rs * Ly, sz = rs * Lz;
+  const lat = Math.atan(e * (sz / Math.sqrt((H - sx) * (H - sx) + sy * sy)));
   const lon = lon0 - Math.atan(sy / (H - sx));
   return [lon * 180 / Math.PI, lat * 180 / Math.PI];
 }

@@ -95,7 +95,10 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   HDF5 library — just the bytes.
 - **Sectors**: GOES full-disk, CONUS, and both mesoscale floaters, plus a set of
   familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
-  Himawari covers the Full Disk over the Western Pacific / East Asia / Australia.
+  Himawari offers the Full Disk plus the higher-resolution **Japan** and
+  **Target** sectors — 1 km regional crops scanned every ~2.5 min (four rapid-scan
+  frames per 10-minute slot), resampled to a 1 km grid derived from the file
+  headers (the Target sector is steerable and moves).
 - **All 16 ABI channels** (visible/near-IR as reflectance, IR as brightness
   temperature). A colour enhancement (on by default, toggleable) gives the
   infrared window channels the classic rainbow cloud-top scale and the
