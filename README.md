@@ -64,18 +64,21 @@ the radar imagery — entirely client-side.
 The same browser-native, decode-it-yourself approach now drives two more data
 sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 
-### Satellite — GOES-R ABI (`noaa-goes16/18/19`)
+### Satellite — GOES-R ABI and Himawari AHI (`noaa-goes18/19`, `noaa-himawari8`)
 
 - **GOES ABI Level-2** multi-band cloud/moisture imagery, read straight from the
   open GOES buckets. A single `MCMIP` file carries all 16 ABI channels, so every
   channel *and* every RGB composite comes from one download.
+- **Himawari-9 AHI** imagery from NOAA's Himawari S3 bucket, with a separate
+  single-band scene decoder for the JMA/NESDIS sectorized NetCDF files.
 - **A from-scratch HDF5 / NetCDF-4 reader** (`js/hdf5.js`): superblock v2/v3,
   object-header v2 with continuation blocks, dense link/attribute storage via
   **fractal heaps**, chunked data indexed by a v1 B-tree, and the **shuffle +
   deflate** filter pipeline (deflate via the platform `DecompressionStream`). No
   HDF5 library — just the bytes.
-- **Sectors**: full-disk, CONUS, and both mesoscale floaters, plus a set of
+- **Sectors**: GOES full-disk, CONUS, and both mesoscale floaters, plus a set of
   familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
+  Himawari offers Full Disk, Japan (higher res), and Target Sector options.
 - **All 16 ABI channels** (visible/near-IR as reflectance, IR as brightness
   temperature). A colour enhancement (on by default, toggleable) gives the
   infrared window channels the classic rainbow cloud-top scale and the
@@ -83,7 +86,7 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   True Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and
   Night Microphysics.
 - **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
-  inverts web-mercator to lon/lat and runs the GOES fixed-grid navigation
+  inverts web-mercator to lon/lat and runs the geostationary fixed-grid navigation
   *backwards* per pixel, so the imagery stays crisp at any zoom.
 
 ### MRMS (`noaa-mrms-pds`)

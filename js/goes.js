@@ -17,9 +17,10 @@
 import { HDF5File } from './hdf5.js';
 
 export const SATELLITES = {
-  'goes19': { bucket: 'https://noaa-goes19.s3.amazonaws.com', label: 'GOES-19 (East)', lon0: -75.2 },
-  'goes18': { bucket: 'https://noaa-goes18.s3.amazonaws.com', label: 'GOES-18 (West)', lon0: -137.0 },
-  'goes16': { bucket: 'https://noaa-goes16.s3.amazonaws.com', label: 'GOES-16 (East, legacy)', lon0: -75.0 },
+  'goes19': { bucket: 'https://noaa-goes19.s3.amazonaws.com', label: 'GOES-19 (East)', lon0: -75.2, family: 'goes' },
+  'goes18': { bucket: 'https://noaa-goes18.s3.amazonaws.com', label: 'GOES-18 (West)', lon0: -137.0, family: 'goes' },
+  'goes16': { bucket: 'https://noaa-goes16.s3.amazonaws.com', label: 'GOES-16 (East, legacy)', lon0: -75.0, family: 'goes' },
+  'himawari9': { bucket: 'https://noaa-himawari8.s3.amazonaws.com', label: 'Himawari-9', lon0: 140.7, family: 'himawari' },
 };
 
 // Sectors. `product` is the S3 product prefix; `match` filters the sector token
@@ -30,7 +31,16 @@ export const SECTORS = {
   full: { label: 'Full Disk', product: 'ABI-L2-MCMIPF', match: 'MCMIPF', refresh: 'every ~10 min' },
   meso1: { label: 'Mesoscale 1', product: 'ABI-L2-MCMIPM', match: 'MCMIPM1', refresh: 'every ~1 min' },
   meso2: { label: 'Mesoscale 2', product: 'ABI-L2-MCMIPM', match: 'MCMIPM2', refresh: 'every ~1 min' },
+  hfd: { label: 'Full Disk', product: 'AHI-L1b-FLDK', match: 'HFD', refresh: 'every ~10 min', family: 'himawari' },
+  japan: { label: 'Japan (higher res)', product: 'AHI-L1b-Japan', match: 'HJP', refresh: 'every ~2.5 min', family: 'himawari' },
+  target: { label: 'Target Sector', product: 'AHI-L1b-Target', match: 'HTG', refresh: 'every ~2.5 min', family: 'himawari' },
 };
+
+export function sectorsForSatellite(satKey) {
+  const fam = SATELLITES[satKey]?.family || 'goes';
+  return Object.fromEntries(Object.entries(SECTORS).filter(([, s]) => (s.family || 'goes') === fam));
+}
+
 
 // "Common CONUS sectors" — familiar regional crops the forecasters use. These
 // reuse the single CONUS download and just frame the map (the imagery is the
@@ -71,6 +81,61 @@ function labelForKey(key) {
   return t ? `${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}Z` : key.split('/').pop();
 }
 
+
+const HIMAWARI_SCENE_FILES = new Map();
+
+function himawariBandForKey(key) {
+  const m = key.match(/-B(\d{2})-/);
+  return m ? +m[1] : null;
+}
+
+async function listHimawariHour(bucket, product, dateUTC, hour) {
+  const y = dateUTC.getUTCFullYear();
+  const mm = pad(dateUTC.getUTCMonth() + 1);
+  const dd = pad(dateUTC.getUTCDate());
+  const doy = pad(dayOfYear(dateUTC), 3);
+  const prefixes = [
+    `${product}/${y}/${mm}/${dd}/${pad(hour)}/`,
+    `${product}/${y}/${doy}/${pad(hour)}/`,
+    `${product}/${y}/${mm}/${dd}/`,
+    `${product}/${y}/${doy}/`,
+  ];
+  const out = [];
+  for (const prefix of prefixes) {
+    const url = `${bucket}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`;
+    const res = await fetch(url);
+    if (!res.ok) continue;
+    const xml = await res.text();
+    const re = /<Key>([^<]+)<\/Key>/g;
+    let m;
+    while ((m = re.exec(xml)) !== null) {
+      const k = m[1];
+      if (k.includes('_GH9_') && k.includes(`_s${y}${doy}${pad(hour)}`)) out.push(k);
+    }
+    if (out.length) break;
+  }
+  return out;
+}
+
+function groupHimawariKeys(keys) {
+  const groups = new Map();
+  for (const k of keys) {
+    const sm = k.match(/_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})/);
+    const band = himawariBandForKey(k);
+    if (!sm || !band) continue;
+    const id = `HIMAWARI:${sm[1]}${sm[2]}${sm[3]}${sm[4]}${sm[5]}`;
+    if (!groups.has(id)) groups.set(id, { files: {}, time: timeForKey(k) });
+    groups.get(id).files[band] = k;
+  }
+  const out = [];
+  for (const [id, g] of groups) {
+    HIMAWARI_SCENE_FILES.set(id, g.files);
+    out.push({ key: id, label: g.time ? `${pad(g.time.getUTCHours())}:${pad(g.time.getUTCMinutes())}Z` : id, time: g.time });
+  }
+  out.sort((a, b) => (a.time || 0) - (b.time || 0));
+  return out;
+}
+
 async function listHour(bucket, product, dateUTC, hour, match) {
   const y = dateUTC.getUTCFullYear();
   const doy = pad(dayOfYear(dateUTC), 3);
@@ -94,6 +159,16 @@ export async function listScenes(satKey, sectorKey, date) {
   const sat = SATELLITES[satKey];
   const sector = SECTORS[sectorKey];
   if (!sat || !sector) throw new Error('bad satellite/sector');
+  if ((sat.family || 'goes') === 'himawari') {
+    const baseH = date || new Date();
+    let hkeys = [];
+    for (let back = 0; back < 3 && hkeys.length < 16; back++) {
+      const d = new Date(baseH.getTime() - back * 3600000);
+      try { hkeys = (await listHimawariHour(sat.bucket, sector.product, d, d.getUTCHours())).concat(hkeys); }
+      catch (_) { /* hour folder may not exist yet */ }
+    }
+    return groupHimawariKeys(hkeys).slice(-12);
+  }
   const base = date || new Date();
   let keys = [];
   for (let back = 0; back < 3 && keys.length < 6; back++) {
@@ -154,11 +229,78 @@ async function readChannel(h5, band) {
   return out;
 }
 
+
+function firstAttr(h5, names) {
+  for (const n of names) {
+    try { const a = h5.readAttributes(n); if (a && Object.keys(a).length) return { name: n, attrs: a }; } catch (_) {}
+  }
+  return { name: '', attrs: {} };
+}
+
+async function readHimawariChannel(h5, band) {
+  const names = [`CMI_C${pad(band)}`, `Sectorized_CMI`, `CMI`, `Rad`, `B${pad(band)}`];
+  let v = null, name = null;
+  for (const n of names) {
+    try { v = await h5.readVariable(n); name = n; break; } catch (_) {}
+  }
+  if (!v) throw new Error(`Himawari band ${pad(band)} variable not found`);
+  const a = h5.readAttributes(name);
+  const scale = a.scale_factor != null ? a.scale_factor : 1;
+  const offset = a.add_offset != null ? a.add_offset : 0;
+  const fill = v.fill != null ? v.fill : a._FillValue;
+  const out = new Float32Array(v.data.length);
+  for (let i = 0; i < v.data.length; i++) {
+    const raw = v.data[i];
+    out[i] = raw === fill ? NaN : raw * scale + offset;
+  }
+  return { data: out, dims: v.dims };
+}
+
+async function loadHimawariScene(sat, sector, key, bands, onProgress) {
+  const files = HIMAWARI_SCENE_FILES.get(key);
+  if (!files) throw new Error('Himawari scene index expired; refresh scenes');
+  const channels = {};
+  let geom = null, h5First = null;
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    const fkey = files[b] || files[14] || Object.values(files)[0];
+    const bytes = await fetchBytes(sat.bucket, fkey, onProgress ? (p) => onProgress((i + p) / bands.length) : null);
+    const h5 = new HDF5File(bytes);
+    const ch = await readHimawariChannel(h5, b);
+    channels[b] = ch.data;
+    if (!geom) { geom = ch.dims; h5First = h5; }
+  }
+  const [H, W] = geom;
+  const projInfo = firstAttr(h5First, ['goes_imager_projection', 'fixedgrid_projection', 'imager_projection', 'projection']);
+  const xa = firstAttr(h5First, ['x', 'x_image', 'x_image_bounds']).attrs;
+  const ya = firstAttr(h5First, ['y', 'y_image', 'y_image_bounds']).attrs;
+  const full = sector.product.includes('FLDK');
+  const xSpan = full ? 0.3037 : 0.08;
+  const ySpan = full ? 0.3037 : 0.08;
+  const p = projInfo.attrs;
+  return {
+    width: W, height: H,
+    xScale: xa.scale_factor || (xSpan / W), xOffset: xa.add_offset != null ? xa.add_offset : -xSpan / 2,
+    yScale: ya.scale_factor || (-ySpan / H), yOffset: ya.add_offset != null ? ya.add_offset : ySpan / 2,
+    proj: {
+      lon0: (p.longitude_of_projection_origin != null ? p.longitude_of_projection_origin : sat.lon0) * Math.PI / 180,
+      H: (p.perspective_point_height || p.nominal_satellite_height || 35785831) + (p.semi_major_axis || 6378137),
+      rEq: p.semi_major_axis || 6378137,
+      rPol: p.semi_minor_axis || 6356752.31414,
+      sweep: p.sweep_angle_axis || 'y',
+    },
+    channels, time: timeForKey(Object.values(files)[0]), key,
+    _himawariFiles: files, _satBucket: sat.bucket,
+  };
+}
+
 // Download + decode a scene, reading only the channels requested. Returns the
 // grid geometry, the geostationary projection constants, and the per-band
 // physical arrays — everything satProducts.buildRGBA / satelliteLayer need.
 export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
   const sat = SATELLITES[satKey];
+  const sector = SECTORS[sectorKey];
+  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sector, key, bands, onProgress);
   const bytes = await fetchBytes(sat.bucket, key, onProgress);
   const h5 = new HDF5File(bytes);
 
@@ -197,6 +339,16 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
 // the already-downloaded file. Lets product switches add channels (e.g. for an
 // RGB recipe) without re-fetching — and keeps memory to only what's displayed.
 export async function ensureBands(scene, bands) {
+  if (scene._himawariFiles) {
+    for (const b of bands) {
+      if (scene.channels[b]) continue;
+      const fkey = scene._himawariFiles[b] || scene._himawariFiles[14] || Object.values(scene._himawariFiles)[0];
+      const bytes = await fetchBytes(scene._satBucket, fkey);
+      const h5 = new HDF5File(bytes);
+      scene.channels[b] = (await readHimawariChannel(h5, b)).data;
+    }
+    return scene;
+  }
   if (!scene._h5) return scene;
   for (const b of bands) {
     if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b);
