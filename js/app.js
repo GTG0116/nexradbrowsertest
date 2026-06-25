@@ -8,7 +8,7 @@ import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
 import { AlertsController } from './alerts.js';
-import { SATELLITES, SECTORS, CONUS_VIEWS, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox, lonLatToColRow } from './goes.js';
+import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox, lonLatToColRow } from './goes.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
@@ -1368,6 +1368,22 @@ function refreshActive() {
 // ---------------------------------------------------------------------------
 // Satellite (GOES ABI)
 // ---------------------------------------------------------------------------
+function satProviderName() {
+  const sat = SATELLITES[state.sat.satKey];
+  return sat && sat.family === 'himawari' ? 'Himawari' : 'GOES';
+}
+
+function rebuildSectorSelect() {
+  const sectors = sectorsForSatellite(state.sat.satKey);
+  el.sectorSelect.innerHTML = '';
+  for (const [key, sec] of Object.entries(sectors)) {
+    const o = document.createElement('option');
+    o.value = key; o.textContent = sec.label;
+    if (key === state.sat.sectorKey) o.selected = true;
+    el.sectorSelect.appendChild(o);
+  }
+}
+
 function initSatSelects() {
   for (const [key, sat] of Object.entries(SATELLITES)) {
     const o = document.createElement('option');
@@ -1375,12 +1391,7 @@ function initSatSelects() {
     if (key === state.sat.satKey) o.selected = true;
     el.satSelect.appendChild(o);
   }
-  for (const [key, sec] of Object.entries(SECTORS)) {
-    const o = document.createElement('option');
-    o.value = key; o.textContent = sec.label;
-    if (key === state.sat.sectorKey) o.selected = true;
-    el.sectorSelect.appendChild(o);
-  }
+  rebuildSectorSelect();
   CONUS_VIEWS.forEach(([name], i) => {
     const o = document.createElement('option');
     o.value = String(i); o.textContent = name;
@@ -1389,13 +1400,20 @@ function initSatSelects() {
 
   el.satSelect.addEventListener('change', () => {
     state.sat.satKey = el.satSelect.value;
+    const sectors = sectorsForSatellite(state.sat.satKey);
+    if (!sectors[state.sat.sectorKey]) state.sat.sectorKey = Object.keys(sectors)[0];
+    rebuildSectorSelect();
     state.sat._centered = false;
+    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat._bbox = null;
+    clearSatellite();
     loadSatScenes();
     saveSettings();
   });
   el.sectorSelect.addEventListener('change', () => {
     state.sat.sectorKey = el.sectorSelect.value;
     state.sat._centered = false;
+    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat._bbox = null;
+    clearSatellite();
     applyModePanels();
     loadSatScenes();
     saveSettings();
@@ -1429,10 +1447,10 @@ function buildSatProductButtons() {
       buildSatLegend();
       // Decode any extra bands this product needs from the cached file first.
       if (state.sat.scene) {
-        setStatus('rendering GOES…', true);
+        setStatus(`rendering ${satProviderName()}…`, true);
         await ensureBands(state.sat.scene, bandsFor(id));
         renderSatellite();
-        setStatus('GOES ready');
+        setStatus(`${satProviderName()} ready`);
       }
       updateSatInfo();
       saveSettings();
@@ -1461,14 +1479,14 @@ function buildSatList() {
 
 async function loadSatScenes() {
   if (state.mode !== 'satellite') return;
-  setStatus('listing GOES…', true);
+  setStatus(`listing ${satProviderName()}…`, true);
   buildSatList();
   try {
     const when = state.live ? new Date() : state.date;
     const scenes = await listScenes(state.sat.satKey, state.sat.sectorKey, when);
     state.sat.scenes = scenes;
     buildSatList();
-    setStatus(`${scenes.length} GOES scenes`);
+    setStatus(`${scenes.length} ${satProviderName()} scenes`);
     if (!scenes.length) return;
     const latest = scenes[scenes.length - 1].key;
     if (state._forceLatest || !state.sat.scene || state.live) {
@@ -1476,7 +1494,7 @@ async function loadSatScenes() {
       if (latest !== state.sat.sceneKey) loadSatScene(latest);
     }
   } catch (e) {
-    setStatus(`GOES list error: ${e.message}`);
+    setStatus(`${satProviderName()} list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -1486,7 +1504,7 @@ async function loadSatScene(key) {
   state.sat.sceneKey = key;
   buildSatList();
   const seq = ++satLoadSeq;
-  setStatus('downloading GOES…', true);
+  setStatus(`downloading ${satProviderName()}…`, true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
@@ -1494,7 +1512,7 @@ async function loadSatScene(key) {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
     if (seq !== satLoadSeq) return; // a newer selection superseded this one
-    setStatus('rendering GOES…', true);
+    setStatus(`rendering ${satProviderName()}…`, true);
     el.decoding.classList.add('show');
     state.sat.scene = scene;
     state.sat._bbox = null;
@@ -1505,9 +1523,9 @@ async function loadSatScene(key) {
     }
     renderSatellite();
     updateSatInfo();
-    setStatus(`GOES ${SECTORS[state.sat.sectorKey].label} loaded`);
+    setStatus(`${satProviderName()} ${SECTORS[state.sat.sectorKey].label} loaded`);
   } catch (e) {
-    if (seq === satLoadSeq) setStatus(`GOES error: ${e.message}`);
+    if (seq === satLoadSeq) setStatus(`${satProviderName()} error: ${e.message}`);
     console.error(e);
   } finally {
     if (seq === satLoadSeq) {
@@ -2254,7 +2272,7 @@ function dockInfo() {
     return {
       prod,
       name,
-      source: sat ? sat.label.replace(/\s*\(.*\)$/, '') : 'GOES',
+      source: sat ? sat.label.replace(/\s*\(.*\)$/, '') : 'Satellite',
       time: t ? t.label : '—',
     };
   }
@@ -3398,7 +3416,7 @@ function buildExportCaption() {
     const sat = SATELLITES[state.sat.satKey];
     const sec = SECTORS[state.sat.sectorKey];
     cap.title = sat ? sat.label : 'GOES';
-    cap.sub = `${state.sat.productId} · ${sec ? sec.label : ''} · GOES ABI`;
+    cap.sub = `${state.sat.productId} · ${sec ? sec.label : ''} · ${sat && sat.family === 'himawari' ? 'Himawari AHI' : 'GOES ABI'}`;
     const t = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
     cap.time = t ? t.label : '';
   } else if (state.mode === 'mrms') {
@@ -3512,6 +3530,8 @@ function applyStoredSettings(s) {
     if (typeof s.sat.sectorKey === 'string') state.sat.sectorKey = s.sat.sectorKey;
     if (typeof s.sat.productId === 'string') state.sat.productId = s.sat.productId;
     if (typeof s.sat.enhanceIR === 'boolean') state.sat.enhanceIR = s.sat.enhanceIR;
+    const satSectors = sectorsForSatellite(state.sat.satKey);
+    if (!satSectors[state.sat.sectorKey]) state.sat.sectorKey = Object.keys(satSectors)[0];
   }
   if (s.mrms && typeof s.mrms.productId === 'string') state.mrms.productId = s.mrms.productId;
   if (s.models && typeof s.models === 'object') {
