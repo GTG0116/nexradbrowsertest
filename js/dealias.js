@@ -45,6 +45,18 @@ const MIN_REF_GATES = 3;
 const HIGH_VELOCITY_MPS = 44;
 const MIN_SPOKE_GATES = 18;
 
+// Azimuthal de-spoke passes. A continuity unfold walks each radial outward in
+// isolation, so a single ambiguous gate can flip a whole radial onto the wrong
+// 2·VN co-interval — painting a one-radial-wide "beam" (e.g. a real +30 m/s spoke
+// folded down to a cyan ≈-10 m/s streak, too low for the high-velocity spoke
+// guard to catch). Such a beam is, by definition, discontinuous with the *good*
+// radials on either side of it, so after the per-radial unfold we compare every
+// gate to the same gate in its two azimuth neighbours: when both neighbours agree
+// the gate is offset by the same whole number of 2·VN intervals, that's the
+// unmistakable signature of a fold error and we snap the gate back into line. A
+// few passes let a correction propagate across a rare run of adjacent spokes.
+const DESPOKE_PASSES = 3;
+
 // Dealias a sweep's VEL moment, memoised per sweep object. Returns the original
 // sweep unchanged when there's no velocity data or no Nyquist information.
 export function dealiasSweep(sweep) {
@@ -90,6 +102,45 @@ function suppressHighVelocitySpokes(vals, nativeVals, folds) {
   }
 }
 
+// Snap each gate that two neighbouring radials both place a whole 2·VN interval
+// away back onto the neighbours' co-interval. Operates in place on the unfolded
+// `vals` arrays gathered in `infos` (already azimuth-sorted, so consecutive
+// entries are azimuth neighbours; the list wraps 359°→0°). A correction is only
+// applied when both neighbours agree on the *same* nonzero fold, so genuine
+// features — which span several radials, making neighbours agree with the gate
+// (fold 0) — are never touched, while a lone mis-folded beam, whose good
+// neighbours both disagree by the same 2·VN, is pulled back into continuity.
+function despokeAzimuthal(infos) {
+  const n = infos.length;
+  if (n < 3) return;
+  for (let pass = 0; pass < DESPOKE_PASSES; pass++) {
+    let corrected = 0;
+    for (let i = 0; i < n; i++) {
+      const cur = infos[i];
+      if (!cur.canUnfold) continue;
+      const prev = infos[(i - 1 + n) % n];
+      const next = infos[(i + 1) % n];
+      const { vals, folds, twoVN } = cur;
+      const pv = prev.vals, nv = next.vals;
+      const pn = pv.length, nn = nv.length;
+      for (let g = 0; g < vals.length; g++) {
+        const v = vals[g];
+        if (Number.isNaN(v)) continue;
+        if (g >= pn || g >= nn) continue;
+        const a = pv[g], b = nv[g];
+        if (Number.isNaN(a) || Number.isNaN(b)) continue;
+        const fa = Math.round((a - v) / twoVN);
+        if (fa === 0) continue;
+        if (Math.round((b - v) / twoVN) !== fa) continue;
+        vals[g] = v + fa * twoVN;
+        folds[g] += fa;
+        corrected++;
+      }
+    }
+    if (!corrected) break; // converged — no spokes left to pull in
+  }
+}
+
 function computeDealias(sweep) {
   const velRadials = sweep.radials.filter((r) => r.moments.VEL);
   if (!velRadials.length) return sweep;
@@ -101,10 +152,12 @@ function computeDealias(sweep) {
 
   // Process in azimuth order for stable, deterministic output.
   const ordered = [...velRadials].sort((a, b) => a.azimuth - b.azimuth);
-  const rebuilt = new Map();
   const win = new Float32Array(WIN);
   const scratch = new Float32Array(WIN);
 
+  // Phase 1 — unfold each radial in isolation (continuity walk outward), keeping
+  // the per-radial arrays so a second, cross-radial pass can de-spoke them.
+  const infos = [];
   for (const r of ordered) {
     const m = r.moments.VEL;
     const gc = m.gateCount;
@@ -146,7 +199,17 @@ function computeDealias(sweep) {
     }
 
     suppressHighVelocitySpokes(vals, nativeVals, folds);
+    infos.push({ r, m, vals, nativeVals, folds, twoVN, canUnfold });
+  }
 
+  // Phase 2 — pull any remaining mis-folded beams back into azimuthal continuity.
+  despokeAzimuthal(infos);
+
+  // Phase 3 — re-encode each rebuilt VEL block from the corrected values.
+  const rebuilt = new Map();
+  for (const info of infos) {
+    const { r, m, vals } = info;
+    const gc = m.gateCount;
     const newRaw = new Uint16Array(gc);
     for (let g = 0; g < gc; g++) {
       const v = vals[g];

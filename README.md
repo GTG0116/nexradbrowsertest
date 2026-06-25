@@ -41,7 +41,17 @@ the radar imagery — entirely client-side.
   it for *any* layer (radar, satellite or MRMS), and all readouts are in
   **imperial units** (mph, miles, inches, °F).
 - **Velocity dealiasing** (optional): a continuity unfold that removes the false
-  green-beside-red folds where Doppler velocity exceeds the Nyquist limit.
+  green-beside-red folds where Doppler velocity exceeds the Nyquist limit. A
+  second, cross-radial pass then snaps any mis-folded single-radial "beam" back
+  into azimuthal continuity, so a stuck radial no longer paints a coloured spoke
+  across the sweep.
+- **SPC convective outlook** (optional): an overlay of the Storm Prediction
+  Center's outlooks for **days 1–8**, drawn straight from SPC's GeoJSON with the
+  official risk colours and a legend built from the areas in view. Days 1 & 2
+  offer the **Categorical** outlook plus probabilistic **Tornado / Wind / Hail**;
+  day 3 offers **Categorical** and combined severe **Probability**; days 4–8 show
+  the extended **Probability** outlook. The translucent risk fill sits beneath the
+  radar (live warnings still read on top) while the outline stays above it.
 - **Data smoothing** (optional, off by default): a **Smooth data** toggle that
   switches the per-pixel lookup in the radar, satellite and model/MRMS shaders
   from nearest-neighbour to an in-shader interpolation, blending neighbouring

@@ -8,6 +8,7 @@ import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
 import { AlertsController } from './alerts.js';
+import { SpcOutlookController, SPC_TYPE_LABELS, spcTypesForDay } from './spcOutlook.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox, lonLatToColRow } from './goes.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
@@ -267,10 +268,25 @@ function setupOverlays(map) {
 
   if (!map.getSource('alerts'))
     map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getSource('spc-outlook'))
+    map.addSource('spc-outlook', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   if (!map.getSource('rings'))
     map.addSource('rings', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   if (!map.getSource('sites'))
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
+
+  // SPC outlook fill — translucent risk-area shading, beneath the alert fill (and
+  // the radar) so live warnings always read on top. Each feature carries its
+  // official `fill`/`stroke` risk colours, so the layers just read them through.
+  map.addLayer(
+    {
+      id: 'spc-outlook-fill',
+      type: 'fill',
+      source: 'spc-outlook',
+      paint: { 'fill-color': ['get', 'fill'], 'fill-opacity': 0.3 },
+    },
+    dataAnchor
+  );
 
   // Translucent alert fill — sits below the radar (and the basemap roads).
   map.addLayer(
@@ -290,6 +306,17 @@ function setupOverlays(map) {
       type: 'line',
       source: 'alerts',
       paint: { 'line-color': ['get', 'color'], 'line-width': 2.5, 'line-opacity': 0.95 },
+    },
+    anchor
+  );
+  // SPC outlook outline — kept above the radar (label anchor) so risk boundaries
+  // stay visible even where radar echoes cover the translucent fill.
+  map.addLayer(
+    {
+      id: 'spc-outlook-line',
+      type: 'line',
+      source: 'spc-outlook',
+      paint: { 'line-color': ['get', 'stroke'], 'line-width': 1.6, 'line-opacity': 0.9 },
     },
     anchor
   );
@@ -352,6 +379,7 @@ function setupOverlays(map) {
   // Re-apply the single-site radar overlay if it's enabled in a non-radar mode.
   if (state.mode !== 'radar' && state.radarOverlay) applyRadarOverlay();
   if (state.alerts) state.alerts.refreshVisible();
+  if (state.spc) state.spc.reapply();
 }
 
 // Hand the current sweep to the custom WebGL radar layer, inserting the layer at
@@ -439,6 +467,10 @@ const state = {
   styleReady: false,
   geo: null,
   alerts: null,
+  // SPC convective outlook overlay (days 1–8). `_spc` holds the restored prefs
+  // applied when the controller is built at init.
+  spc: null,
+  _spc: { on: false, day: 1, type: 'cat' },
   shownSweep: null,
   shownSite: null,
   inspect: false,
@@ -531,6 +563,12 @@ function cacheEls() {
   el.alertClose = $('#alertClose');
   el.alertPreview = $('#alertPreview');
   el.alertPreviewCard = $('#alertPreviewCard');
+  el.spcPanel = $('#spcPanel');
+  el.spcToggle = $('#spcToggle');
+  el.spcDaySelect = $('#spcDaySelect');
+  el.spcTypeSelect = $('#spcTypeSelect');
+  el.spcStatus = $('#spcStatus');
+  el.spcLegend = $('#spcLegend');
 
   // Source modes (radar / satellite / MRMS).
   el.modeSwitch = $('#modeSwitch');
@@ -2399,6 +2437,63 @@ function enableSheetSwipe() {
   handle.addEventListener('touchcancel', end, { passive: true });
 }
 
+// Fill the SPC type picker with the hazard types valid for the current day,
+// keeping the controller's selected type (it falls back to the first valid type
+// when the previous one doesn't exist for the new day).
+function populateSpcTypes() {
+  const sel = el.spcTypeSelect;
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const t of spcTypesForDay(state.spc.day)) {
+    const o = document.createElement('option');
+    o.value = t;
+    o.textContent = SPC_TYPE_LABELS[t];
+    sel.appendChild(o);
+  }
+  sel.value = state.spc.type;
+}
+
+// Wire the SPC outlook controller to its panel: ON/OFF toggle, day + type
+// pickers, and persistence of all three across sessions.
+function setupSpcOutlook() {
+  state.spc = new SpcOutlookController(state.map, {
+    daySelect: el.spcDaySelect,
+    typeSelect: el.spcTypeSelect,
+    legend: el.spcLegend,
+    status: el.spcStatus,
+  });
+  // Restore saved day/type before building the type list and applying enablement.
+  state.spc.day = state._spc.day;
+  state.spc.type = state._spc.type;
+  if (el.spcDaySelect) el.spcDaySelect.value = String(state.spc.day);
+  populateSpcTypes();
+  setToggleBtn(el.spcToggle, state._spc.on);
+  if (state._spc.on) state.spc.setEnabled(true);
+
+  if (el.spcToggle) {
+    el.spcToggle.addEventListener('click', () => {
+      const on = !el.spcToggle.classList.contains('active');
+      setToggleBtn(el.spcToggle, on);
+      state.spc.setEnabled(on);
+      setStatus(on ? `SPC outlook on (day ${state.spc.day})` : 'SPC outlook off');
+      saveSettings();
+    });
+  }
+  if (el.spcDaySelect) {
+    el.spcDaySelect.addEventListener('change', () => {
+      state.spc.setDay(Number(el.spcDaySelect.value));
+      populateSpcTypes(); // day change may swap the valid type set
+      saveSettings();
+    });
+  }
+  if (el.spcTypeSelect) {
+    el.spcTypeSelect.addEventListener('change', () => {
+      state.spc.setType(el.spcTypeSelect.value);
+      saveSettings();
+    });
+  }
+}
+
 // Distribute the control panels into the mobile swipe carousel pages. Page 0 is
 // the controls for the current product; page 1 the source settings (its mode
 // switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
@@ -2406,14 +2501,14 @@ function enableSheetSwipe() {
 function layoutMobilePages() {
   el.pageControls.append(el.productPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
   el.pageSettings.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
-  el.pageMap.append(el.basemapPanel, el.metaPanel);
+  el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
 }
 
 // Put every panel back in its rail (desktop), in the original order.
 function layoutDesktopRails() {
   el.railLeft.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
   el.railRight.append(
-    el.productPanel, el.basemapPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel, el.metaPanel
+    el.productPanel, el.basemapPanel, el.spcPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel, el.metaPanel
   );
 }
 
@@ -3490,6 +3585,9 @@ function saveSettings() {
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
         alertsOn: state.alerts ? state.alerts.enabled : true,
+        spc: state.spc
+          ? { on: state.spc.enabled, day: state.spc.day, type: state.spc.type }
+          : state._spc,
         playbackFrames: state.playbackFrames,
         dockTool: state.dockTool,
         sat: {
@@ -3525,6 +3623,14 @@ function applyStoredSettings(s) {
   if (typeof s.playbackFrames === 'number') state.playbackFrames = s.playbackFrames;
   if (typeof s.dockTool === 'string') state.dockTool = s.dockTool;
   if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
+  if (s.spc && typeof s.spc === 'object') {
+    if (typeof s.spc.on === 'boolean') state._spc.on = s.spc.on;
+    if (Number.isInteger(s.spc.day) && s.spc.day >= 1 && s.spc.day <= 8) state._spc.day = s.spc.day;
+    if (typeof s.spc.type === 'string') state._spc.type = s.spc.type;
+    // Guard: a restored type must be valid for the restored day.
+    if (!spcTypesForDay(state._spc.day).includes(state._spc.type))
+      state._spc.type = spcTypesForDay(state._spc.day)[0];
+  }
   if (s.sat && typeof s.sat === 'object') {
     if (typeof s.sat.satKey === 'string') state.sat.satKey = s.sat.satKey;
     if (typeof s.sat.sectorKey === 'string') state.sat.sectorKey = s.sat.sectorKey;
@@ -3732,6 +3838,9 @@ function init() {
     state.alerts.setEnabled(on);
     saveSettings();
   });
+
+  // ---- SPC convective outlook overlay (days 1–8) ----
+  setupSpcOutlook();
 
   // ---- Map tools: METARs, draw / measure / storm track, split view ----
   setupMapTools();

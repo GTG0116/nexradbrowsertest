@@ -780,6 +780,50 @@ input[type='range']::-moz-range-thumb {
   background: rgba(255, 120, 40, 0.14);
 }
 
+/* ---------------- SPC outlook panel ---------------- */
+.spc-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.spc-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.spc-controls .field {
+  margin-bottom: 6px;
+}
+.spc-status {
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 0.3px;
+  margin: 4px 0 8px;
+  min-height: 14px;
+}
+.spc-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.spc-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.spc-legend-sw {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+.spc-legend-label {
+  font-size: 11px;
+  color: var(--ink);
+  letter-spacing: 0.3px;
+}
+
 .alert-list {
   display: flex;
   flex-direction: column;
