@@ -42,6 +42,19 @@ class BitReader {
   bit() {
     return this.bits(1);
   }
+
+  // Discard buffered bits up to the next byte boundary in the underlying stream.
+  // bzip2 pads each stream to a whole byte, so concatenated streams (and the
+  // trailing bytes after one stream's EOS) begin on a byte boundary.
+  align() {
+    const extra = this.count % 8;
+    if (extra) this.bits(extra);
+  }
+
+  // True once no whole bytes remain to start another concatenated stream.
+  eof() {
+    return this.count < 8 && this.pos >= this.bytes.length;
+  }
 }
 
 // Build the canonical Huffman decode tables (limit/base/perm) used by bzip2.
@@ -255,24 +268,37 @@ class ByteSink {
 
 export function decodeBzip2(bytes) {
   const br = new BitReader(bytes);
-  if (br.bits(16) !== STREAM_MAGIC_1) throw new Error('bzip2: bad magic');
-  if (br.bits(8) !== 0x68) throw new Error('bzip2: expected "h"'); // 'h'
-  const level = br.bits(8) - 0x30; // '1'..'9'
-  if (level < 1 || level > 9) throw new Error('bzip2: bad block size');
-  const blockSize = level * 100000 + 1;
-
   const out = new ByteSink();
+
+  // A bzip2 file may be several independently-compressed streams concatenated
+  // (each begins with the "BZh" magic). Standard `bunzip2` decodes them all and
+  // joins the output; Himawari Standard Data `.bz2` segments are stored this way,
+  // so we loop over every stream rather than stopping at the first EOS.
   for (;;) {
-    const m1 = br.bits(24);
-    const m2 = br.bits(24);
-    if (m1 === BLOCK_PI && m2 === BLOCK_PI2) {
-      decodeBlock(br, blockSize, out);
-    } else if (m1 === EOS_SQRT && m2 === EOS_SQRT2) {
-      br.bits(32); // combined CRC
-      break;
-    } else {
-      throw new Error('bzip2: bad block magic');
+    if (br.bits(16) !== STREAM_MAGIC_1) {
+      if (out.len) break; // trailing garbage after the last stream — ignore
+      throw new Error('bzip2: bad magic');
     }
+    if (br.bits(8) !== 0x68) throw new Error('bzip2: expected "h"'); // 'h'
+    const level = br.bits(8) - 0x30; // '1'..'9'
+    if (level < 1 || level > 9) throw new Error('bzip2: bad block size');
+    const blockSize = level * 100000 + 1;
+
+    for (;;) {
+      const m1 = br.bits(24);
+      const m2 = br.bits(24);
+      if (m1 === BLOCK_PI && m2 === BLOCK_PI2) {
+        decodeBlock(br, blockSize, out);
+      } else if (m1 === EOS_SQRT && m2 === EOS_SQRT2) {
+        br.bits(32); // combined CRC
+        break;
+      } else {
+        throw new Error('bzip2: bad block magic');
+      }
+    }
+
+    br.align(); // streams are byte-aligned; skip any padding before the next one
+    if (br.eof()) break;
   }
   return out.toUint8Array();
 }

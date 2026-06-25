@@ -75,13 +75,19 @@ the radar imagery — entirely client-side.
 The same browser-native, decode-it-yourself approach now drives two more data
 sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 
-### Satellite — GOES-R ABI and Himawari AHI (`noaa-goes18/19`, `noaa-himawari8`)
+### Satellite — GOES-R ABI and Himawari AHI (`noaa-goes18/19`, `noaa-himawari9`)
 
 - **GOES ABI Level-2** multi-band cloud/moisture imagery, read straight from the
   open GOES buckets. A single `MCMIP` file carries all 16 ABI channels, so every
   channel *and* every RGB composite comes from one download.
-- **Himawari-9 AHI** imagery from NOAA's Himawari S3 bucket, with a separate
-  single-band scene decoder for the JMA/NESDIS sectorized NetCDF files.
+- **Himawari-9 AHI** full-disk imagery from NOAA's `noaa-himawari9` bucket. These
+  are the raw **Himawari Standard Data (HSD)** L1b files — a custom binary format,
+  bzip2-compressed, with each band split into 10 vertical segments. We decompress
+  them (`js/bzip2.js`), parse the HSD header, calibrate counts to physical units
+  (albedo for the visible bands, brightness temperature via the inverse Planck law
+  for the IR bands), and resample every band onto the common 2 km fixed grid so
+  RGB recipes line up. The visible AHI bands are renumbered to the matching GOES
+  ABI channels (AHI has no 1.37 µm cirrus band).
 - **A from-scratch HDF5 / NetCDF-4 reader** (`js/hdf5.js`): superblock v2/v3,
   object-header v2 with continuation blocks, dense link/attribute storage via
   **fractal heaps**, chunked data indexed by a v1 B-tree, and the **shuffle +
@@ -89,7 +95,7 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   HDF5 library — just the bytes.
 - **Sectors**: GOES full-disk, CONUS, and both mesoscale floaters, plus a set of
   familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
-  Himawari offers Full Disk, Japan (higher res), and Target Sector options.
+  Himawari covers the Full Disk over the Western Pacific / East Asia / Australia.
 - **All 16 ABI channels** (visible/near-IR as reflectance, IR as brightness
   temperature). A colour enhancement (on by default, toggleable) gives the
   infrared window channels the classic rainbow cloud-top scale and the
