@@ -20,7 +20,7 @@ export const SATELLITES = {
   'goes19': { bucket: 'https://noaa-goes19.s3.amazonaws.com', label: 'GOES-19 (East)', lon0: -75.2, family: 'goes' },
   'goes18': { bucket: 'https://noaa-goes18.s3.amazonaws.com', label: 'GOES-18 (West)', lon0: -137.0, family: 'goes' },
   'goes16': { bucket: 'https://noaa-goes16.s3.amazonaws.com', label: 'GOES-16 (East, legacy)', lon0: -75.0, family: 'goes' },
-  'himawari9': { bucket: 'https://noaa-himawari9.s3.amazonaws.com', label: 'Himawari-9', lon0: 140.7, family: 'himawari' },
+  'himawari9': { bucket: 'https://noaa-himawari8.s3.amazonaws.com', label: 'Himawari-9', lon0: 140.7, family: 'himawari' },
 };
 
 // Sectors. `product` is the S3 product prefix; `match` filters the sector token
@@ -31,9 +31,9 @@ export const SECTORS = {
   full: { label: 'Full Disk', product: 'ABI-L2-MCMIPF', match: 'MCMIPF', refresh: 'every ~10 min' },
   meso1: { label: 'Mesoscale 1', product: 'ABI-L2-MCMIPM', match: 'MCMIPM1', refresh: 'every ~1 min' },
   meso2: { label: 'Mesoscale 2', product: 'ABI-L2-MCMIPM', match: 'MCMIPM2', refresh: 'every ~1 min' },
-  hfd: { label: 'Full Disk', product: 'AHI-L1b-FLDK', match: 'FLDK', refresh: 'every ~10 min', family: 'himawari' },
-  japan: { label: 'Japan (higher res)', product: 'AHI-L1b-Japan', match: 'Japan', refresh: 'every ~2.5 min', family: 'himawari' },
-  target: { label: 'Target Sector', product: 'AHI-L1b-Target', match: 'Target', refresh: 'every ~2.5 min', family: 'himawari' },
+  hfd: { label: 'Full Disk', product: 'AHI-L1b-FLDK', match: 'HFD', refresh: 'every ~10 min', family: 'himawari' },
+  japan: { label: 'Japan (higher res)', product: 'AHI-L1b-Japan', match: 'HJP', refresh: 'every ~2.5 min', family: 'himawari' },
+  target: { label: 'Target Sector', product: 'AHI-L1b-Target', match: 'HTG', refresh: 'every ~2.5 min', family: 'himawari' },
 };
 
 export function sectorsForSatellite(satKey) {
@@ -85,7 +85,7 @@ function labelForKey(key) {
 const HIMAWARI_SCENE_FILES = new Map();
 
 function himawariBandForKey(key) {
-  const m = key.match(/(?:-|_)B(\d{2})(?:-|_)/);
+  const m = key.match(/-B(\d{2})-/);
   return m ? +m[1] : null;
 }
 
@@ -94,10 +94,11 @@ async function listHimawariHour(bucket, product, dateUTC, hour) {
   const mm = pad(dateUTC.getUTCMonth() + 1);
   const dd = pad(dateUTC.getUTCDate());
   const doy = pad(dayOfYear(dateUTC), 3);
-  const hh = pad(hour);
   const prefixes = [
-    `${product}/${y}/${mm}/${dd}/${hh}`,
-    `${product}/${y}/${doy}/${hh}`,
+    `${product}/${y}/${mm}/${dd}/${pad(hour)}/`,
+    `${product}/${y}/${doy}/${pad(hour)}/`,
+    `${product}/${y}/${mm}/${dd}/`,
+    `${product}/${y}/${doy}/`,
   ];
   const out = [];
   for (const prefix of prefixes) {
@@ -109,7 +110,7 @@ async function listHimawariHour(bucket, product, dateUTC, hour) {
     let m;
     while ((m = re.exec(xml)) !== null) {
       const k = m[1];
-      if (k.includes('_GH9_') && (k.includes(`_s${y}${doy}${hh}`) || k.includes(`_${y}${mm}${dd}_${hh}`))) out.push(k);
+      if (k.includes('_GH9_') && k.includes(`_s${y}${doy}${pad(hour)}`)) out.push(k);
     }
     if (out.length) break;
   }
