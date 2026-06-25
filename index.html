@@ -27,6 +27,36 @@
     <link rel="stylesheet" href="css/style.css" />
   </head>
   <body>
+    <!-- First-run gate: the viewer needs a Mapbox public access token, which the
+         user supplies themselves (kept in localStorage) so the deployment carries
+         no shared/billable key. Shown only when no token is stored yet. -->
+    <div id="mbxGate" class="mbx-gate" hidden>
+      <div class="mbx-gate-card">
+        <div class="mbx-gate-kicker">AETHER · setup</div>
+        <h2>Add your Mapbox token</h2>
+        <p>
+          The basemap is drawn with Mapbox GL. To keep this viewer free to host,
+          AETHER uses <b>your own</b> Mapbox public access token — it stays in this
+          browser only (localStorage) and is never sent anywhere but Mapbox.
+        </p>
+        <ol class="mbx-gate-steps">
+          <li>Create a free account at <a href="https://account.mapbox.com/auth/signup/" target="_blank" rel="noopener">mapbox.com</a>.</li>
+          <li>Copy your <b>default public token</b> from <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener">account → tokens</a> (it starts with <code>pk.</code>).</li>
+          <li>Paste it below. The free tier covers ~50k map loads/month.</li>
+        </ol>
+        <input
+          type="text"
+          id="mbxGateInput"
+          class="mbx-gate-input"
+          placeholder="pk.eyJ1Ijoi…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="mbxGateError" class="mbx-gate-error"></div>
+        <button id="mbxGateSave" class="mbx-gate-save">Save token &amp; launch</button>
+      </div>
+    </div>
+
     <div class="app">
       <!-- Top bar -->
       <header class="topbar">
@@ -119,7 +149,6 @@
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
               <button id="toolWeather" class="map-tool" title="Local current conditions">☼</button>
-              <button id="toolSounding" class="map-tool" title="Model sounding at map center" hidden>⊙</button>
               <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
               <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
               <button id="toolClear" class="map-tool" title="Clear drawings">✕</button>
@@ -171,10 +200,10 @@
               <span>Dealias velocity</span>
               <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
             </div>
-            <div class="toggle-field" id="smoothField">
-              <span>Smooth data</span>
-              <button id="smoothToggle" class="alerts-toggle" title="Bilinear-smooth the plotted radar / satellite / model data instead of crisp native pixels">OFF</button>
-            </div>
+            <label class="field opacity-field" id="smoothField">
+              <span>Smoothing <b id="smoothVal">None</b></span>
+              <input type="range" id="smooth" min="0" max="3" value="0" step="1" title="Smooth the plotted radar / satellite / model data — none, low, medium or high" />
+            </label>
             <div class="toggle-field" id="radarOverlayField" hidden>
               <span>Radar overlay</span>
               <button id="radarOverlayToggle" class="alerts-toggle" title="Overlay the single-site radar on this source">OFF</button>
@@ -278,7 +307,10 @@
       <!-- ============================================================= -->
       <div id="playbackBar" class="playback-bar" hidden>
         <button id="playToggle" class="pb-play" title="Play / pause">⏸</button>
-        <input type="range" id="playScrub" class="pb-scrub" min="0" max="9" value="9" step="1" />
+        <div class="pb-scrub-wrap">
+          <div id="playScrubProg" class="pb-scrub-prog"></div>
+          <input type="range" id="playScrub" class="pb-scrub" min="0" max="9" value="9" step="1" />
+        </div>
         <span id="playLabel" class="pb-label">—</span>
         <button id="playClose" class="pb-close" title="Exit playback">✕</button>
       </div>
