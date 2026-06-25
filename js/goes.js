@@ -32,10 +32,12 @@ export const SATELLITES = {
 // rapid-refresh sectors (≈1 min meso, 5 min CONUS, 10 min full disk).
 //
 // Himawari sectors also carry the HSD layout: `segments` (vertical strips per
-// band), `frames` (rapid-scan observations per 10-minute folder), `region(f)`
-// (the filename area token for frame f), and either a fixed `grid` (full disk)
-// or `commonCFAC` (the resample resolution for region sectors, whose grids are
-// read from the file headers — the Target sector is steerable and moves).
+// band), `region(f)` (the filename area token for frame f), and either a fixed
+// `grid` (full disk) or `commonCFAC` (the resample resolution for region
+// sectors, whose grids are read from the file headers — the Target sector is
+// steerable and moves). Region sectors set `framePrefix`: they are rapid-scanned
+// a *variable* number of times per 10-minute folder, so the frames that actually
+// exist are discovered from the bucket rather than assumed.
 export const SECTORS = {
   conus: { label: 'CONUS', product: 'ABI-L2-MCMIPC', match: 'MCMIPC', refresh: 'every ~5 min' },
   full: { label: 'Full Disk', product: 'ABI-L2-MCMIPF', match: 'MCMIPF', refresh: 'every ~10 min' },
@@ -43,16 +45,16 @@ export const SECTORS = {
   meso2: { label: 'Mesoscale 2', product: 'ABI-L2-MCMIPM', match: 'MCMIPM2', refresh: 'every ~1 min' },
   hfd: {
     label: 'Full Disk', product: 'AHI-L1b-FLDK', refresh: 'every ~10 min', family: 'himawari',
-    segments: 10, frames: 1, region: () => 'FLDK',
+    segments: 10, region: () => 'FLDK',
     grid: { W: 5500, H: 5500, CFAC: 20466275, LFAC: 20466275, COFF: 2750.5, LOFF: 2750.5 },
   },
   japan: {
     label: 'Japan (higher res)', product: 'AHI-L1b-Japan', refresh: 'every ~2.5 min', family: 'himawari',
-    segments: 1, frames: 4, region: (f) => `JP0${f}`, commonCFAC: 40932549,
+    segments: 1, framePrefix: 'JP0', region: (f) => `JP0${f}`, commonCFAC: 40932549,
   },
   target: {
     label: 'Target Sector', product: 'AHI-L1b-Target', refresh: 'every ~2.5 min', family: 'himawari',
-    segments: 1, frames: 4, region: (f) => `R30${f}`, commonCFAC: 40932549,
+    segments: 1, framePrefix: 'R30', region: (f) => `R30${f}`, commonCFAC: 40932549,
   },
 };
 
@@ -133,12 +135,31 @@ function himawariSegKey(meta, sector, ahiBand, seg) {
     `HS_H09_${stamp}_B${pad(ahiBand)}_${sector.region(meta.frame)}_${ahiRes(ahiBand)}_${segStr}.DAT.bz2`;
 }
 
+// Discover which rapid-scan frames actually exist in one folder by listing its
+// band-13 files (always produced); the region token's trailing digit is the
+// frame number. Returns an ascending list (often 2 or 4, sometimes none).
+async function himawariFrames(bucket, sector, f) {
+  const stamp = `${f.y}${f.mm}${f.dd}_${f.hhmm}`;
+  const prefix = `${sector.product}/${f.y}/${f.mm}/${f.dd}/${f.hhmm}/HS_H09_${stamp}_B13_`;
+  const url = `${bucket}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=20`;
+  let res;
+  try { res = await fetch(url); } catch (_) { return []; }
+  if (!res.ok) return [];
+  const xml = await res.text();
+  const re = new RegExp(`_B13_${sector.framePrefix}(\\d)_`, 'g');
+  const frames = new Set();
+  let m;
+  while ((m = re.exec(xml)) !== null) frames.add(+m[1]);
+  return [...frames].sort((a, b) => a - b);
+}
+
 // List the available scene times by walking the day folders for their 10-minute
-// HHMM subfolders. Regional sectors expand each folder into its rapid-scan
-// frames. Returns the most recent dozen, newest last.
+// HHMM subfolders. Full disk has one frame per folder; the rapid-scan region
+// sectors expand each folder into however many frames the bucket actually holds.
+// Returns the most recent dozen, newest last.
 async function listHimawariScenes(bucket, sector, sectorKey, baseDate) {
   const folders = [];
-  for (let back = 0; back < 2 && folders.length < 24; back++) {
+  for (let back = 0; back < 2; back++) {
     const d = new Date(baseDate.getTime() - back * 86400000);
     const y = d.getUTCFullYear(), mm = pad(d.getUTCMonth() + 1), dd = pad(d.getUTCDate());
     const prefix = `${sector.product}/${y}/${mm}/${dd}/`;
@@ -151,16 +172,23 @@ async function listHimawariScenes(bucket, sector, sectorKey, baseDate) {
     let m;
     while ((m = re.exec(xml)) !== null) folders.push({ y, mm, dd, hhmm: m[1] });
   }
-  const scenes = new Map();
+  // Newest folders first, so frame discovery (one request each for region
+  // sectors) stops as soon as we have a full dozen scenes.
+  const folderTime = (f) => Date.UTC(+f.y, +f.mm - 1, +f.dd, +f.hhmm.slice(0, 2), +f.hhmm.slice(2));
+  folders.sort((a, b) => folderTime(b) - folderTime(a));
+
+  const scenes = [];
   for (const f of folders) {
+    if (scenes.length >= 12) break;
+    const frames = sector.framePrefix ? await himawariFrames(bucket, sector, f) : [1];
     const base = Date.UTC(+f.y, +f.mm - 1, +f.dd, +f.hhmm.slice(0, 2), +f.hhmm.slice(2));
-    for (let frame = 1; frame <= sector.frames; frame++) {
+    for (const frame of frames) {
       const time = new Date(base + (frame - 1) * 150000); // ~2.5 min between frames
       const key = `HIMAWARI:${sectorKey}:${f.y}${f.mm}${f.dd}${f.hhmm}:${frame}`;
-      scenes.set(key, { ...f, frame, time, key, sectorKey });
+      scenes.push({ ...f, frame, time, key, sectorKey });
     }
   }
-  const out = [...scenes.values()].sort((a, b) => a.time - b.time).slice(-12);
+  const out = scenes.sort((a, b) => a.time - b.time).slice(-12);
   for (const meta of out) HIMAWARI_SCENE_FILES.set(meta.key, meta);
   return out.map((meta) => ({
     key: meta.key, time: meta.time,
