@@ -2498,14 +2498,35 @@ function playbackContextKey() {
   return m;
 }
 
+async function buildRadarPlaybackFrames(n) {
+  const current = state.volumes.slice(-n);
+  if (current.length >= n) return current;
+
+  // When the selected UTC day has started but does not yet contain enough
+  // scans for the requested loop length, fill the oldest side of the loop with
+  // the newest scans from the previous UTC day. The active date/list stays on
+  // the user's selected day; this only affects playback assembly.
+  const previousDay = new Date(state.date);
+  previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+  try {
+    const needed = n - current.length;
+    const previous = (await listVolumes(state.site, previousDay)).slice(-needed);
+    return previous.concat(current);
+  } catch (e) {
+    console.warn('previous-day playback fill failed:', e.message);
+    return current;
+  }
+}
+
 // Build the per-mode playback provider against the current state. `frames` are
 // ordered oldest→newest; `ck` is a globally-unique cache key per frame. Every
 // source loops the same user-chosen number of frames (state.playbackFrames).
-function buildPlaybackProvider() {
+async function buildPlaybackProvider() {
   const n = state.playbackFrames;
   if (state.mode === 'radar') {
+    const frames = await buildRadarPlaybackFrames(n);
     return {
-      frames: state.volumes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      frames: frames.map((v) => ({ label: v.label, ck: v.key, key: v.key })),
       async load(f) { return await decodeVolume(await fetchVolume(f.key)); },
       render(vol) { displaySweep(pickSweep(vol.sweeps), vol.site); },
       idle() { displaySweep(currentSweep(), state.volume && state.volume.site); },
@@ -2567,7 +2588,7 @@ function createPlayback() {
 
     async start() {
       if (this.active) return;
-      const provider = buildPlaybackProvider();
+      const provider = await buildPlaybackProvider();
       if (!provider.frames || !provider.frames.length) {
         setStatus('no frames to play back');
         return;
