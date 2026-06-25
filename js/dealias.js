@@ -17,7 +17,8 @@
 // the wrong colour. Referencing a short window's median instead lets the good
 // gates outvote a single bad one, so a mistake stays a lone speckle and the beam
 // self-heals on the next gate. A fresh run (the first gate, or the first gate
-// after a no-data gap) is seeded from the same gate in the previous radial.
+// after a no-data gap) starts from the native value instead of copying the
+// previous radial, preventing one bad azimuth from becoming a whole spoke.
 //
 // The result is a sweep whose VEL moment blocks carry re-encoded 16-bit codes
 // (so unfolded values beyond the original ±VN range still fit) with a matching
@@ -33,6 +34,16 @@ const VMIN = -200;
 // well under one Nyquist interval on ordinary gradients (so it never invents a
 // fold), large enough that a single mis-unfolded gate is outvoted by the median.
 const WIN = 5;
+
+// Require a small local history before applying a fold correction. This avoids
+// letting the first valid gate after a blank range gap choose an arbitrary
+// 2·Nyquist offset and paint the rest of that radial as a 100+ mph beam.
+const MIN_REF_GATES = 3;
+
+// Radar velocities around 100 mph (≈45 m/s) can be real in compact couplets, but
+// a long, one-radial-wide run at that magnitude is usually an unfolding spoke.
+const HIGH_VELOCITY_MPS = 44;
+const MIN_SPOKE_GATES = 18;
 
 // Dealias a sweep's VEL moment, memoised per sweep object. Returns the original
 // sweep unchanged when there's no velocity data or no Nyquist information.
@@ -58,6 +69,27 @@ function windowMedian(buf, n, scratch) {
   return n & 1 ? scratch[mid] : (scratch[mid - 1] + scratch[mid]) / 2;
 }
 
+
+function suppressHighVelocitySpokes(vals, nativeVals, folds) {
+  let start = -1;
+  for (let g = 0; g <= vals.length; g++) {
+    const suspect = g < vals.length
+      && folds[g] !== 0
+      && Math.abs(vals[g]) >= HIGH_VELOCITY_MPS;
+    if (suspect && start < 0) start = g;
+    if ((!suspect || g === vals.length) && start >= 0) {
+      const end = g;
+      if (end - start >= MIN_SPOKE_GATES) {
+        for (let i = start; i < end; i++) {
+          vals[i] = nativeVals[i];
+          folds[i] = 0;
+        }
+      }
+      start = -1;
+    }
+  }
+}
+
 function computeDealias(sweep) {
   const velRadials = sweep.radials.filter((r) => r.moments.VEL);
   if (!velRadials.length) return sweep;
@@ -67,12 +99,11 @@ function computeDealias(sweep) {
   const SC = velRadials[0].moments.VEL.scale || 1;
   const OFF2 = 2 - VMIN * SC; // value v -> code = round(v*SC + OFF2) >= 2
 
-  // Process in azimuth order so a fresh run can seed from the adjacent beam.
+  // Process in azimuth order for stable, deterministic output.
   const ordered = [...velRadials].sort((a, b) => a.azimuth - b.azimuth);
   const rebuilt = new Map();
   const win = new Float32Array(WIN);
   const scratch = new Float32Array(WIN);
-  let prevVals = null; // previous radial's unfolded values (for seeding)
 
   for (const r of ordered) {
     const m = r.moments.VEL;
@@ -81,6 +112,8 @@ function computeDealias(sweep) {
     const mOff = m.offset;
     const mSc = m.scale || 1;
     const vals = new Float32Array(gc);
+    const nativeVals = new Float32Array(gc);
+    const folds = new Int16Array(gc);
     const VN = r.nyquist;
     const canUnfold = VN > 0 && VN < 100;
     const twoVN = 2 * VN;
@@ -92,26 +125,27 @@ function computeDealias(sweep) {
       // No echo / range folded: emit NaN and break beam continuity, so a gate on
       // the far side of a gap is never referenced against one before it.
       if (c < 2) { vals[g] = NaN; wn = 0; wi = 0; continue; }
-      let v = (c - mOff) / mSc;
+      const native = (c - mOff) / mSc;
+      let v = native;
+      nativeVals[g] = native;
       if (canUnfold) {
-        let ref;
-        if (wn > 0) {
-          // Anchor to the recent beam: the median rejects a lone bad gate.
-          ref = windowMedian(win, wn, scratch);
-        } else if (prevVals && g < prevVals.length && !Number.isNaN(prevVals[g])) {
-          // Fresh run — seed from the same gate in the previous radial.
-          ref = prevVals[g];
-        } else {
-          // Near the radar with nothing to lean on: assume it's unaliased.
-          ref = NaN;
+        // Anchor only to a mature recent-beam median. If the window was just
+        // reset by no-data/range-folded gates, keep the first few gates native
+        // until there is enough same-radial evidence to avoid a long false spoke.
+        if (wn >= MIN_REF_GATES) {
+          const ref = windowMedian(win, wn, scratch);
+          const fold = Math.round((ref - v) / twoVN);
+          v += fold * twoVN;
+          folds[g] = fold;
         }
-        if (!Number.isNaN(ref)) v += Math.round((ref - v) / twoVN) * twoVN;
         win[wi] = v;
         wi = (wi + 1) % WIN;
         if (wn < WIN) wn++;
       }
       vals[g] = v;
     }
+
+    suppressHighVelocitySpokes(vals, nativeVals, folds);
 
     const newRaw = new Uint16Array(gc);
     for (let g = 0; g < gc; g++) {
@@ -121,7 +155,6 @@ function computeDealias(sweep) {
       newRaw[g] = code < 2 ? 2 : code > 65535 ? 65535 : code;
     }
     rebuilt.set(r, { ...m, raw: newRaw, offset: OFF2, scale: SC });
-    prevVals = vals;
   }
 
   // Preserve the original radial order; swap in the rebuilt VEL blocks.
