@@ -124,6 +124,38 @@ async function listVolumesAws(site, date) {
   }));
 }
 
+// The time of a site's most recent volume scan, regardless of UTC day, or null
+// if none can be found (used to flag "down" radars on the map). Prefers the IEM
+// dir.list — a rolling recent window, so it answers in one small fetch and isn't
+// fooled by the day boundary (a radar that last scanned at 23:55Z still shows up
+// just after 00Z). Falls back to the AWS bucket (today, then yesterday) when IEM
+// is unreachable (e.g. blocked by CORS) or empty.
+export async function latestScanTime(site) {
+  try {
+    const SITE = site.toUpperCase();
+    const res = await fetch(viaProxy(`${IEM_BASE}/${SITE}/dir.list`));
+    if (res.ok) {
+      const text = await res.text();
+      let newest = null;
+      for (const line of text.split('\n')) {
+        const name = line.trim().split(/\s+/).pop();
+        const t = name && timeForName(name);
+        if (t && (!newest || t > newest)) newest = t;
+      }
+      if (newest) return newest;
+    }
+  } catch (_) { /* fall through to the AWS mirror */ }
+  const now = new Date();
+  for (let back = 0; back < 2; back++) {
+    const d = new Date(now.getTime() - back * 86400000);
+    try {
+      const vols = await listVolumesAws(site, d);
+      if (vols.length) return vols[vols.length - 1].time;
+    } catch (_) { /* try the previous day */ }
+  }
+  return null;
+}
+
 // --- shared helpers ------------------------------------------------------
 
 function labelForTime(t) {
