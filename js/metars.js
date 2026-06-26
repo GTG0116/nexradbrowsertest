@@ -4,8 +4,17 @@
 // switched off aviationweather.gov because it serves no Access-Control-Allow-
 // Origin header, so browser fetches were blocked by CORS; IEM responds with
 // `access-control-allow-origin: *` and is already this app's radar feed. IEM
-// has no bbox query, so we map the visible view to the US states it covers and
-// pull each state's `{ST}_ASOS` network, then filter to the view client-side.
+// has no bbox query, so we map the visible view to the networks it covers and
+// pull each one, then filter to the view client-side:
+//   • inside the US, the per-state `{ST}_ASOS` networks (fine-grained), and
+//   • elsewhere in the world, IEM's per-country `{ISO2}__ASOS` networks
+//     (note the *double* underscore) — e.g. GB__ASOS, FR__ASOS, JP__ASOS —
+//     so international stations plot too, all from the one CORS-enabled feed.
+//
+// Only the stations inside the current view are kept, the marker set is diffed
+// each refresh (so plots vanish as they leave frame), and a hard cap thins dense
+// regions to the stations nearest the view centre — so the screen stays readable
+// however far you zoom out.
 //
 // Each station renders as a WMO station-model plot: a sky-cover circle with the
 // temperature (upper-left, °F), dewpoint (lower-left, °F), sea-level pressure
@@ -18,8 +27,9 @@
 const IEM_URL = 'https://mesonet.agron.iastate.edu/api/1/currents.json';
 // Drop observations older than this (minutes) so a stale ASOS doesn't mislead.
 const MAX_AGE_MIN = 150;
-// Cap how many state networks one view fans out to (a tight view spans 1–3).
-const MAX_STATES = 6;
+// Cap how many networks one view fans out to (a tight view spans 1–3 states or
+// countries; a zoomed-out view over Europe can clip a dozen, so allow a few more).
+const MAX_NETWORKS = 10;
 const REFRESH_MS = 5 * 60 * 1000;
 // Below this zoom the plots would overlap into mush, so we hide them and show a
 // hint instead of fetching the whole country.
@@ -203,17 +213,17 @@ export class MetarController {
     }
     const b = this.map.getBounds();
     const view = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]; // W,S,E,N
-    const states = statesInView(view).slice(0, MAX_STATES);
-    if (!states.length) {
+    const networks = networksInView(view).slice(0, MAX_NETWORKS);
+    if (!networks.length) {
       this.clearMarkers();
       if (this.onStatus) this.onStatus('no surface obs in view');
       return;
     }
     const seq = ++this._seq;
     try {
-      // One request per state network; tolerate individual failures (a state
-      // network may briefly 5xx) as long as at least one returns.
-      const settled = await Promise.allSettled(states.map((st) => fetchStateObs(st)));
+      // One request per network; tolerate individual failures (a network may
+      // briefly 5xx) as long as at least one returns.
+      const settled = await Promise.allSettled(networks.map((net) => fetchNetworkObs(net)));
       if (seq !== this._seq || !this.enabled) return;
       const ok = settled.filter((s) => s.status === 'fulfilled');
       if (!ok.length) throw new Error('all state requests failed');
@@ -277,10 +287,11 @@ export class MetarController {
 
 // ---- IEM source helpers --------------------------------------------------
 
-// Fetch one state's ASOS network current obs (the lean per-network endpoint;
-// the broader state query also pulls COOP/DCP/SCAN sites we don't plot).
-async function fetchStateObs(st) {
-  const url = `${IEM_URL}?network=${st}_ASOS&minutes=${MAX_AGE_MIN}`;
+// Fetch one IEM network's current obs. `net` is the fully-qualified network name
+// (e.g. `OK_ASOS` for a US state, `FR__ASOS` for a country) so this works for the
+// US and international networks alike.
+async function fetchNetworkObs(net) {
+  const url = `${IEM_URL}?network=${net}&minutes=${MAX_AGE_MIN}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -318,22 +329,25 @@ function normalizeIem(rec) {
   };
 }
 
-// US states whose bounding box intersects the view [W,S,E,N], roughly ordered
-// by proximity of the state's center to the view center so the MAX_STATES cap
-// keeps the most relevant networks.
-function statesInView(view) {
+// IEM networks whose bounding box intersects the view [W,S,E,N], ordered by
+// proximity of the box centre to the view centre so the MAX_NETWORKS cap keeps
+// the most relevant ones. US states map to `{ST}_ASOS`; world countries map to
+// `{ISO2}__ASOS` (double underscore — IEM's international convention).
+function networksInView(view) {
   const [w, s, e, n] = view;
   const cx = (w + e) / 2;
   const cy = (s + n) / 2;
   const hits = [];
-  for (const st in STATE_BBOX) {
-    const [sw, ss, se, sn] = STATE_BBOX[st];
-    if (se < w || sw > e || sn < s || ss > n) continue; // no overlap
-    const dx = (sw + se) / 2 - cx;
-    const dy = (ss + sn) / 2 - cy;
-    hits.push({ st, d: dx * dx + dy * dy });
-  }
-  return hits.sort((a, b) => a.d - b.d).map((h) => h.st);
+  const consider = (box, net) => {
+    const [bw, bs, be, bn] = box;
+    if (be < w || bw > e || bn < s || bs > n) return; // no overlap
+    const dx = (bw + be) / 2 - cx;
+    const dy = (bs + bn) / 2 - cy;
+    hits.push({ net, d: dx * dx + dy * dy });
+  };
+  for (const st in STATE_BBOX) consider(STATE_BBOX[st], `${st}_ASOS`);
+  for (const cc in COUNTRY_BBOX) consider(COUNTRY_BBOX[cc], `${cc}__ASOS`);
+  return hits.sort((a, b) => a.d - b.d).map((h) => h.net);
 }
 
 // Approximate [west, south, east, north] bounding boxes for the 50 states + DC.
@@ -366,4 +380,47 @@ const STATE_BBOX = {
   WI: [-92.9, 42.4, -86.8, 47.1], WV: [-82.7, 37.1, -77.7, 40.7],
   WY: [-111.1, 40.9, -104.0, 45.1],
   AK: [-179.2, 51.0, -129.9, 71.5], HI: [-160.3, 18.9, -154.8, 22.3],
+};
+
+// Approximate [west, south, east, north] boxes for world countries with IEM
+// `{ISO2}__ASOS` networks. Only used to decide which networks to query (obs are
+// filtered to the exact view), so coarse boxes and over-selecting neighbours are
+// harmless. The US is omitted — its states above already cover it.
+const COUNTRY_BBOX = {
+  CA: [-141.0, 41.7, -52.6, 70.0], MX: [-117.2, 14.5, -86.7, 32.7],
+  GB: [-8.6, 49.9, 1.8, 60.9], IE: [-10.5, 51.4, -6.0, 55.4],
+  FR: [-5.1, 41.3, 9.6, 51.1], ES: [-9.3, 36.0, 3.3, 43.8],
+  PT: [-9.5, 36.9, -6.2, 42.2], DE: [5.9, 47.3, 15.0, 55.1],
+  NL: [3.4, 50.8, 7.2, 53.6], BE: [2.5, 49.5, 6.4, 51.5],
+  CH: [5.9, 45.8, 10.5, 47.8], AT: [9.5, 46.4, 17.2, 49.0],
+  IT: [6.6, 36.6, 18.5, 47.1], GR: [19.4, 34.8, 28.3, 41.8],
+  PL: [14.1, 49.0, 24.2, 54.9], CZ: [12.1, 48.5, 18.9, 51.1],
+  SK: [16.8, 47.7, 22.6, 49.6], HU: [16.1, 45.7, 22.9, 48.6],
+  RO: [20.2, 43.6, 29.7, 48.3], BG: [22.3, 41.2, 28.6, 44.2],
+  RS: [18.8, 42.2, 23.0, 46.2], HR: [13.4, 42.4, 19.4, 46.6],
+  DK: [8.0, 54.5, 12.7, 57.8], NO: [4.5, 57.9, 31.1, 71.2],
+  SE: [11.1, 55.3, 24.2, 69.1], FI: [20.5, 59.7, 31.6, 70.1],
+  EE: [23.3, 57.5, 28.2, 59.7], LV: [20.9, 55.6, 28.2, 58.1],
+  LT: [20.9, 53.9, 26.8, 56.5], BY: [23.1, 51.2, 32.8, 56.2],
+  UA: [22.1, 44.3, 40.2, 52.4], RU: [27.0, 41.2, 180.0, 77.0],
+  TR: [25.6, 35.8, 44.8, 42.1], IS: [-24.6, 63.3, -13.5, 66.6],
+  MA: [-13.2, 27.6, -1.0, 35.9], DZ: [-8.7, 18.9, 12.0, 37.1],
+  TN: [7.5, 30.2, 11.6, 37.5], EG: [24.7, 22.0, 36.9, 31.7],
+  ZA: [16.4, -34.9, 32.9, -22.1], KE: [33.9, -4.7, 41.9, 5.0],
+  NG: [2.7, 4.3, 14.7, 13.9], ET: [33.0, 3.4, 47.9, 14.9],
+  IN: [68.1, 6.5, 97.4, 35.5], PK: [60.9, 23.7, 77.8, 37.1],
+  CN: [73.5, 18.2, 134.8, 53.6], JP: [129.4, 31.0, 145.8, 45.5],
+  KR: [125.9, 33.1, 129.6, 38.6], TW: [120.0, 21.9, 122.0, 25.3],
+  TH: [97.3, 5.6, 105.6, 20.5], VN: [102.1, 8.4, 109.5, 23.4],
+  MY: [99.6, 0.8, 119.3, 7.4], ID: [95.0, -11.0, 141.0, 6.1],
+  PH: [116.9, 4.6, 126.6, 19.6], SG: [103.6, 1.2, 104.1, 1.5],
+  AE: [51.0, 22.6, 56.4, 26.1], SA: [34.5, 16.4, 55.7, 32.2],
+  IL: [34.2, 29.5, 35.9, 33.3], IR: [44.0, 25.1, 63.3, 39.8],
+  IQ: [38.8, 29.1, 48.6, 37.4], AU: [112.9, -43.7, 153.6, -10.1],
+  NZ: [166.4, -47.3, 178.6, -34.4], BR: [-74.0, -33.8, -34.8, 5.3],
+  AR: [-73.6, -55.1, -53.6, -21.8], CL: [-75.7, -55.9, -66.4, -17.5],
+  PE: [-81.4, -18.4, -68.7, -0.0], CO: [-79.0, -4.2, -66.9, 12.5],
+  VE: [-73.4, 0.6, -59.8, 12.2], EC: [-81.0, -5.0, -75.2, 1.4],
+  BO: [-69.6, -22.9, -57.5, -9.7], PY: [-62.6, -27.6, -54.3, -19.3],
+  UY: [-58.4, -34.9, -53.1, -30.1],
 };
