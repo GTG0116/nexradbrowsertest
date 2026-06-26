@@ -664,8 +664,21 @@ function rangeFromIdx(text, src) {
       if (src.acc instanceof RegExp ? !src.acc.test(fc) : fc !== src.acc) continue;
     }
     const start = parseInt(f[1], 10);
-    const next = lines[i + 1] ? parseInt(lines[i + 1].split(':')[1], 10) : null;
-    return { start, end: next == null ? null : next - 1 };
+    // wgrib2 indexes fields packed together in one GRIB message as submessages
+    // "rec.sub" (e.g. NAM stores UGRD as "20.1" and VGRD as "20.2" at the *same*
+    // byte offset). The 0-based submessage index tells decodeGrib2 which field to
+    // pull; default 0 for a plain single-field record.
+    const dot = f[0].indexOf('.');
+    const sub = dot >= 0 ? Math.max(0, parseInt(f[0].slice(dot + 1), 10) - 1) : 0;
+    // The message spans to the next record with a *different* byte offset — using
+    // the immediate next line would give a zero-length range for the first field
+    // of a multi-field message (its sibling shares the offset).
+    let end = null;
+    for (let j = i + 1; j < lines.length; j++) {
+      const ns = parseInt(lines[j].split(':')[1], 10);
+      if (ns !== start) { end = ns - 1; break; }
+    }
+    return { start, end, sub };
   }
   throw new Error(`field ${src.varName}/${src.level} not in index`);
 }
@@ -801,10 +814,11 @@ export function resampleLambert(grid, step = 0.025) {
   return { proj: 'latlon', ni: niT, nj: njT, lon1, lat1, di: step, dj: step, scanMode: 0, values: out };
 }
 
-// Fetch + decode + resample a single index source into a lat/lon grid. `.idx`
-// text is memoised per file in `idxCache` so multi-field products (overlays,
-// derived parameters) read each index only once.
-async function loadSource(model, run, fhour, src, idxCache, onProgress) {
+// Fetch + decode a single index source into its *native* decoded grid (Lambert
+// or lat/lon), without resampling. `.idx` text is memoised per file in `idxCache`
+// so multi-field reads (overlays, derived parameters, a sounding column) read
+// each index only once.
+async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
   const f = fhour + (src.fhourDelta || 0);
   // Apply any per-model level-string override (e.g. NAM lightning at 'surface').
   const fix = model.levelFix && model.levelFix[src.varName];
@@ -829,9 +843,127 @@ async function loadSource(model, run, fhour, src, idxCache, onProgress) {
   }
   const range = rangeFromIdx(idxText, src);
   const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
-  const decoded = await decodeGrib2(bytes);
+  return decodeGrib2(bytes, range.sub);
+}
+
+// Fetch + decode + resample a single index source into a regular lat/lon grid.
+async function loadSource(model, run, fhour, src, idxCache, onProgress) {
+  const decoded = await fetchDecodeSource(model, run, fhour, src, idxCache, onProgress);
   if (decoded.proj === 'lambert') return resampleLambert(decoded);
   return recenterGlobal(decoded);
+}
+
+// Nearest-sample a single (lat, lon) point straight from a decoded grid, without
+// the full resample — cheap enough to pull a whole sounding column field by
+// field. Mirrors the forward projection in resampleLambert for Lambert grids,
+// and does a plain index lookup (with longitude wrap) for lat/lon grids.
+export function sampleGridAt(grid, lat, lon) {
+  if (grid.proj === 'lambert') {
+    const D2R = Math.PI / 180;
+    const Re = 6371229;
+    const phi1 = grid.latin1 * D2R, phi2 = grid.latin2 * D2R;
+    const lam0 = grid.lov * D2R, phi0 = grid.lad * D2R;
+    const n = Math.abs(phi1 - phi2) < 1e-9
+      ? Math.sin(phi1)
+      : Math.log(Math.cos(phi1) / Math.cos(phi2)) /
+        Math.log(Math.tan(Math.PI / 4 + phi2 / 2) / Math.tan(Math.PI / 4 + phi1 / 2));
+    const F = Math.cos(phi1) * Math.pow(Math.tan(Math.PI / 4 + phi1 / 2), n) / n;
+    const rho0 = Re * F / Math.pow(Math.tan(Math.PI / 4 + phi0 / 2), n);
+    const rhoOf = (la) => Re * F / Math.pow(Math.tan(Math.PI / 4 + la * D2R / 2), n);
+    const fwd = (lo, la) => {
+      const th = n * (lo * D2R - lam0), r = rhoOf(la);
+      return [r * Math.sin(th), rho0 - r * Math.cos(th)];
+    };
+    const [x0, y0] = fwd(grid.lo1, grid.la1);
+    const [x, y] = fwd(lon, lat);
+    const si = Math.round((x - x0) / grid.dx), sj = Math.round((y - y0) / grid.dy);
+    if (si < 0 || si >= grid.ni || sj < 0 || sj >= grid.nj) return NaN;
+    return grid.values[sj * grid.ni + si];
+  }
+  // lat/lon grid: rows run north→south from lat1; columns east from lon1.
+  const { ni, nj, lon1, lat1, di, dj, values } = grid;
+  let dlon = lon - lon1;
+  while (dlon < 0) dlon += 360;
+  while (dlon >= 360) dlon -= 360;
+  const si = Math.round(dlon / di), sj = Math.round((lat1 - lat) / dj);
+  if (si < 0 || si >= ni || sj < 0 || sj >= nj) return NaN;
+  return values[sj * ni + si];
+}
+
+// Pressure levels (hPa) probed for a native model sounding column — denser in the
+// lower troposphere (where CAPE/shear live) and thinning aloft, to keep the
+// per-level field count (and thus the request/decode load) reasonable.
+const COLUMN_LEVELS = [1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750,
+  700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100];
+
+// Surface / near-surface fields for the sounding base + the convective indices.
+const COLUMN_SFC = {
+  t2: { varName: 'TMP', level: '2 m above ground' },
+  d2: { varName: 'DPT', level: '2 m above ground' },
+  rh2: { varName: 'RH', level: '2 m above ground' },
+  u10: { varName: 'UGRD', level: '10 m above ground' },
+  v10: { varName: 'VGRD', level: '10 m above ground' },
+  psfc: { varName: 'PRES', level: 'surface' },
+  zsfc: { varName: 'HGT', level: 'surface' },
+  cape: { varName: 'CAPE', level: 'surface' },
+  cin: { varName: 'CIN', level: 'surface' },
+};
+
+// Pull a vertical column at (lat, lon) straight from a model's own GRIB2 — the
+// data path for models Open-Meteo doesn't serve a browser-reachable sounding for
+// (NAM / NAM Nest / RAP). Each pressure-level field is a separate Range-fetched
+// message, point-sampled here; we never resample the whole grid. Returns raw
+// GRIB units (T in K, heights in gpm, winds in m/s, pressure in Pa) for the
+// caller to convert. `onProgress(frac)` reports load progress.
+export async function loadModelColumn(modelKey, run, fhour, lat, lon, onProgress) {
+  const model = MODELS[modelKey];
+  if (!model) throw new Error('unknown model');
+  const idxCache = new Map();
+
+  const sample = async (src) => {
+    try {
+      const g = await fetchDecodeSource(model, run, fhour, src, idxCache);
+      return sampleGridAt(g, lat, lon);
+    } catch (_) {
+      return NaN; // a field/level this model doesn't carry — just skip it
+    }
+  };
+
+  // One task per field. Pressure-level fields (T, RH, height, wind components)
+  // plus the surface set, all sampled with bounded concurrency.
+  const tasks = [];
+  for (const p of COLUMN_LEVELS)
+    for (const vn of ['TMP', 'RH', 'HGT', 'UGRD', 'VGRD'])
+      tasks.push({ p, vn, src: { varName: vn, level: `${p} mb`, file: 'prs' } });
+  for (const k of Object.keys(COLUMN_SFC)) tasks.push({ sfc: k, src: COLUMN_SFC[k] });
+
+  const results = new Array(tasks.length);
+  let next = 0, done = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      results[i] = await sample(tasks[i].src);
+      if (onProgress) onProgress(++done / tasks.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(12, tasks.length) }, worker));
+
+  const levelMap = new Map();
+  const sfc = {};
+  results.forEach((v, i) => {
+    const t = tasks[i];
+    if (t.sfc) { sfc[t.sfc] = v; return; }
+    let o = levelMap.get(t.p);
+    if (!o) { o = { p: t.p }; levelMap.set(t.p, o); }
+    o[t.vn] = v;
+  });
+
+  // Keep only levels that came back with a temperature and a height.
+  const levels = [...levelMap.values()].filter(
+    (o) => Number.isFinite(o.TMP) && Number.isFinite(o.HGT));
+  if (!levels.length) throw new Error(`${model.label} GRIB column unavailable for this run/point.`);
+  return { levels, sfc };
 }
 
 // Prepare a lat/lon grid (GFS) for the web-mercator GPU layer:
