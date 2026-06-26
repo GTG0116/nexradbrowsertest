@@ -247,9 +247,18 @@ export function createSatelliteLayer() {
       gl.uniform1f(this.u.u_yScale, U.yScale);
       gl.uniform1f(this.u.u_yOffset, U.yOffset);
       gl.uniform1f(this.u.u_lon0, U.lon0);
-      gl.uniform1f(this.u.u_satH, U.satH);
-      gl.uniform1f(this.u.u_rEq, U.rEq);
-      gl.uniform1f(this.u.u_rPol, U.rPol);
+      // Feed the projection lengths normalised by the equatorial radius. The
+      // shader builds the satellite scan angles purely from ratios of these, and
+      // the disk-visibility test scales uniformly, so the result is identical —
+      // but every intermediate stays O(1) instead of ~1e7 (and its square ~1e15).
+      // At that magnitude some desktop GPUs' highp floats lose enough precision
+      // that the visibility test discards the whole disk and nothing draws (iOS /
+      // Apple GPUs keep more, which is why it rendered there); normalising fixes
+      // it everywhere.
+      const s = U.rEq || 6378137;
+      gl.uniform1f(this.u.u_satH, U.satH / s);
+      gl.uniform1f(this.u.u_rEq, U.rEq / s);
+      gl.uniform1f(this.u.u_rPol, U.rPol / s);
       gl.uniform1f(this.u.u_sweepY, U.sweepY);
       gl.uniform1f(this.u.u_opacity, this.opacity);
       gl.uniform1f(this.u.u_smooth, this.smooth);
