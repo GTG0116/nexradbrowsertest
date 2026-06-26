@@ -49,7 +49,7 @@ uniform float u_offset, u_scaleM;                      // code -> value
 uniform float u_lo, u_hi, u_steps;                     // value -> LUT index
 uniform float u_siteLat, u_siteLon, u_mPerDegLon;
 uniform float u_opacity;
-uniform float u_smooth;          // 0 = nearest (crisp gates), 1 = bilinear smooth
+uniform float u_smooth;          // 0 = none, 1 = low, 2 = medium, 3 = high (Gaussian)
 
 const float PI = 3.141592653589793;
 const float M_PER_DEG_LAT = 111320.0;
@@ -91,32 +91,30 @@ void main() {
     if (gv.y < 0.5) discard;     // below threshold / range folded
     v = gv.x;
   } else {
-    // Bilinear interpolation in (gate, azimuth) data space. Gate centres sit at
-    // integer range steps; azimuth cell centres sit at (row + 0.5), so the
-    // continuous coords below put a sample's neighbours at the integer corners.
+    // Gaussian low-pass over a 7x7 neighbourhood in (gate, azimuth) data space.
+    // Gate centres sit at integer range steps and azimuth cell centres at
+    // integer (az/360*naz - 0.5), so the distances below are in cell widths. Each
+    // tap is weighted by a Gaussian of that distance times the gate's validity,
+    // then renormalised so missing/folded gates neither leak nor darken the blend.
+    // Sigma grows with the level (low/medium/high) for a stronger blur each step.
+    float sigma = u_smooth < 1.5 ? 0.6 : (u_smooth < 2.5 ? 1.1 : 1.8);
     float gc = (range - u_firstGate) / u_gateSpacing;
     float rc = az / 360.0 * u_naz - 0.5;
-    float g0 = floor(gc), fg = gc - g0;
-    float r0 = floor(rc), fr = rc - r0;
-    // Hermite-smooth the blend fractions (zero slope at the cell centres) so the
-    // interpolation is C1 instead of piecewise-linear: this rounds off the
-    // diamond facets / Mach-band creases that make plain bilinear read "pixely",
-    // while the gate centres still hold their true value so pixels stay legible.
-    fg = fg * fg * (3.0 - 2.0 * fg);
-    fr = fr * fr * (3.0 - 2.0 * fr);
-    vec2 s00 = gateValue(g0,       r0);
-    vec2 s10 = gateValue(g0 + 1.0, r0);
-    vec2 s01 = gateValue(g0,       r0 + 1.0);
-    vec2 s11 = gateValue(g0 + 1.0, r0 + 1.0);
-    // Weight each corner by its bilinear share AND its validity, then
-    // renormalise — so missing/folded gates neither leak nor darken the blend.
-    float w00 = (1.0 - fg) * (1.0 - fr) * s00.y;
-    float w10 = fg         * (1.0 - fr) * s10.y;
-    float w01 = (1.0 - fg) * fr         * s01.y;
-    float w11 = fg         * fr         * s11.y;
-    float wsum = w00 + w10 + w01 + w11;
-    if (wsum < 1e-4) discard;    // no valid gate nearby
-    v = (s00.x * w00 + s10.x * w10 + s01.x * w01 + s11.x * w11) / wsum;
+    float gn = floor(gc + 0.5), rn = floor(rc + 0.5);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    float sv = 0.0, sw = 0.0;
+    for (int m = -3; m <= 3; m++) {
+      for (int n = -3; n <= 3; n++) {
+        float gi = gn + float(n), ri = rn + float(m);
+        vec2 gv = gateValue(gi, ri);
+        float dg = gi - gc, dr = ri - rc;
+        float w = exp(-(dg * dg + dr * dr) * inv2s2) * gv.y;
+        sv += gv.x * w;
+        sw += w;
+      }
+    }
+    if (sw < 1e-4) discard;    // no valid gate nearby
+    v = sv / sw;
   }
 
   float li = clamp(floor((v - u_lo) * (u_steps - 1.0) / (u_hi - u_lo) + 0.5),
@@ -212,7 +210,7 @@ export function createRadarLayer() {
     uni: null,         // numeric uniforms for the current sweep
     quadVerts: null,   // Float32Array of 6 mercator vertices
     opacity: 0.85,
-    smooth: false,     // bilinear-interpolate gates instead of crisp nearest
+    smooth: 0,         // 0 none, 1 low, 2 medium, 3 high (Gaussian smoothing)
 
     onAdd(map, gl) {
       this.map = map;
@@ -332,8 +330,8 @@ export function createRadarLayer() {
       if (this.map) this.map.triggerRepaint();
     },
 
-    setSmooth(on) {
-      this.smooth = !!on;
+    setSmooth(level) {
+      this.smooth = +level || 0;
       if (this.map) this.map.triggerRepaint();
     },
 
@@ -383,7 +381,7 @@ export function createRadarLayer() {
       gl.uniform1f(this.u.u_siteLon, U.siteLon);
       gl.uniform1f(this.u.u_mPerDegLon, U.mPerDegLon);
       gl.uniform1f(this.u.u_opacity, this.opacity);
-      gl.uniform1f(this.u.u_smooth, this.smooth ? 1 : 0);
+      gl.uniform1f(this.u.u_smooth, this.smooth);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied alpha
