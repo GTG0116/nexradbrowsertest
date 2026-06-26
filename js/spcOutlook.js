@@ -150,7 +150,7 @@ export class SpcOutlookController {
       if (!key) continue;
       const prev = byLabel.get(key);
       if (!prev || (p.DN || 0) > prev.dn) {
-        byLabel.set(key, { label: key, fill: p.fill || '#888', stroke: p.stroke || '#444', dn: p.DN || 0 });
+        byLabel.set(key, { label: key, code: p.LABEL || '', fill: p.fill || '#888', stroke: p.stroke || '#444', dn: p.DN || 0 });
       }
     }
     const items = [...byLabel.values()].sort((a, b) => a.dn - b.dn);
@@ -159,14 +159,16 @@ export class SpcOutlookController {
       return;
     }
     legend.innerHTML = items
-      .map(
-        (it) =>
-          `<div class="spc-legend-row"><span class="spc-legend-sw" style="background:${esc(
-            it.fill
-          )};border-color:${esc(it.stroke)}"></span><span class="spc-legend-label">${esc(
-            it.label
-          )}</span></div>`
-      )
+      .map((it) => {
+        // Conditional Intensity Group areas are drawn as hatching on the map, so
+        // give the swatch a matching diagonal hatch (denser with the level)
+        // instead of the flat grey their `fill` would show.
+        const m = /^CIG(\d)/.exec(it.code);
+        const sw = m
+          ? `<span class="spc-legend-sw spc-legend-hatch" data-cig="${m[1]}"></span>`
+          : `<span class="spc-legend-sw" style="background:${esc(it.fill)};border-color:${esc(it.stroke)}"></span>`;
+        return `<div class="spc-legend-row">${sw}<span class="spc-legend-label">${esc(it.label)}</span></div>`;
+      })
       .join('');
   }
 }
