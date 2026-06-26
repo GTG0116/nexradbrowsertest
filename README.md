@@ -53,7 +53,6 @@ the radar imagery — entirely client-side.
   second, cross-radial pass then snaps any mis-folded single-radial "beam" back
   into azimuthal continuity, so a stuck radial no longer paints a coloured spoke
   across the sweep.
-<<<<<<< HEAD
 - **Forecast outlooks** (optional, `js/outlooks.js`): a single overlay that draws
   any of several official outlooks — pick the **product** then a **detail**:
   - **SPC Convective** — days 1–8, drawn straight from SPC's GeoJSON with the
@@ -79,15 +78,7 @@ the radar imagery — entirely client-side.
   shared fill/line layers read it. A legend is built from the areas in view; the
   translucent fill sits beneath the radar (live warnings still read on top) while
   the outline stays above it.
-=======
-- **SPC convective outlook** (optional): an overlay of the Storm Prediction
-  Center's outlooks for **days 1–8**, drawn straight from SPC's GeoJSON with the
-  official risk colours and a legend built from the areas in view. Days 1 & 2
-  offer the **Categorical** outlook plus probabilistic **Tornado / Wind / Hail**;
-  day 3 offers **Categorical** and combined severe **Probability**; days 4–8 show
-  the extended **Probability** outlook. The translucent risk fill sits beneath the
-  radar (live warnings still read on top) while the outline stays above it.
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
+
 - **Data smoothing** (optional, off by default): a **Smoothing** slider with four
   stops — **None · Low · Medium · High** — that controls an in-shader Gaussian
   low-pass on the per-pixel lookup in the radar, satellite and model/MRMS shaders.
