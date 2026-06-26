@@ -208,6 +208,10 @@
               <span>Radar overlay</span>
               <button id="radarOverlayToggle" class="alerts-toggle" title="Overlay the single-site radar on this source">OFF</button>
             </div>
+            <div class="toggle-field" id="modelCityValuesField" hidden>
+              <span>City values</span>
+              <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled model values above city labels">ON</button>
+            </div>
             <div class="toggle-field" id="loopField">
               <span>Playback loop</span>
               <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
@@ -248,26 +252,17 @@
 
           <section class="panel" id="spcPanel">
             <h2 class="panel-title spc-title">
-              SPC outlook
-              <button id="spcToggle" class="alerts-toggle" title="Toggle SPC convective outlook">OFF</button>
+              Outlooks
+              <button id="spcToggle" class="alerts-toggle" title="Toggle forecast outlook overlay">OFF</button>
             </h2>
             <div class="spc-controls">
               <label class="field">
-                <span>Day</span>
-                <select id="spcDaySelect">
-                  <option value="1">Day 1</option>
-                  <option value="2">Day 2</option>
-                  <option value="3">Day 3</option>
-                  <option value="4">Day 4</option>
-                  <option value="5">Day 5</option>
-                  <option value="6">Day 6</option>
-                  <option value="7">Day 7</option>
-                  <option value="8">Day 8</option>
-                </select>
+                <span>Outlook</span>
+                <select id="outlookSelect"></select>
               </label>
               <label class="field">
-                <span>Type</span>
-                <select id="spcTypeSelect"></select>
+                <span>Detail</span>
+                <select id="outlookDetail"></select>
               </label>
             </div>
             <div id="spcStatus" class="spc-status"></div>
