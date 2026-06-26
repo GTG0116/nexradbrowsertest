@@ -28,7 +28,7 @@ uniform float u_xScale, u_xOffset, u_yScale, u_yOffset;
 uniform float u_lon0, u_satH, u_rEq, u_rPol;
 uniform float u_sweepY;
 uniform float u_opacity;
-uniform float u_smooth;          // 0 = nearest (crisp pixels), 1 = bicubic smooth
+uniform float u_smooth;          // 0 = none, 1 = low, 2 = medium, 3 = high (Gaussian)
 const float PI = 3.141592653589793;
 
 // Premultiplied-colour fetch of one grid cell; off-disk / missing texels
@@ -37,24 +37,6 @@ vec4 texelAt(float col, float row) {
   if (col < 0.0 || col >= u_W || row < 0.0 || row >= u_H) return vec4(0.0);
   vec4 c = texture2D(u_tex, vec2((col + 0.5) / u_W, (row + 0.5) / u_H));
   return vec4(c.rgb * c.a, c.a);   // premultiply so the blend is colour-correct
-}
-
-// Cubic B-spline weights for taps at offsets -1,0,1,2 (low-pass smoothing, so
-// coarse ABI pixels — 2 km IR — blur into a solid wash instead of staying
-// visible as blocks). The four weights sum to 1.
-vec4 cubicW(float t) {
-  float t2 = t * t, t3 = t2 * t;
-  return vec4(1.0 - 3.0 * t + 3.0 * t2 - t3,
-              4.0 - 6.0 * t2 + 3.0 * t3,
-              1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3,
-              t3) / 6.0;
-}
-// Index a vec4 without dynamic component indexing (unsupported on some GPUs).
-float pick(vec4 v, int i) {
-  if (i == 0) return v.x;
-  if (i == 1) return v.y;
-  if (i == 2) return v.z;
-  return v.w;
 }
 
 void main() {
@@ -101,20 +83,20 @@ void main() {
     rgb = c.rgb;
     alpha = c.a;
   } else {
-    // Bicubic B-spline over the 4x4 pixel neighbourhood — a wide low-pass blur,
-    // so even coarse ABI pixels dissolve into a smooth field instead of staying
-    // visible as blocks. The texels are premultiplied, so blending colour and
-    // alpha with the cubic weights is colour-correct; off-disk neighbours
-    // (alpha 0) just soften the disk edge.
-    float cc = col - 0.5, rr = row - 0.5;
-    float c0 = floor(cc), r0 = floor(rr);
-    vec4 wx = cubicW(cc - c0);
-    vec4 wy = cubicW(rr - r0);
+    // Gaussian low-pass over a 7x7 pixel neighbourhood — sigma grows with the
+    // level (low/medium/high) so even coarse ABI pixels dissolve into a smooth
+    // field instead of staying visible as blocks. The texels are premultiplied,
+    // so blending colour and alpha with the Gaussian weights is colour-correct;
+    // off-disk neighbours (alpha 0) just soften the disk edge.
+    float sigma = u_smooth < 1.5 ? 0.6 : (u_smooth < 2.5 ? 1.1 : 1.8);
+    float cn = floor(col + 0.5), rn = floor(row + 0.5);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
     vec4 sum = vec4(0.0);
-    for (int m = 0; m < 4; m++) {
-      for (int n = 0; n < 4; n++) {
-        sum += texelAt(c0 + float(n) - 1.0, r0 + float(m) - 1.0)
-             * (pick(wx, n) * pick(wy, m));
+    for (int m = -3; m <= 3; m++) {
+      for (int n = -3; n <= 3; n++) {
+        float ci = cn + float(n), rj = rn + float(m);
+        float dx = ci - col, dy = rj - row;
+        sum += texelAt(ci, rj) * exp(-(dx * dx + dy * dy) * inv2s2);
       }
     }
     if (sum.a < 1e-4) discard;
@@ -157,7 +139,7 @@ export function createSatelliteLayer() {
     uni: null,
     quadVerts: null,
     opacity: 0.95,
-    smooth: false,
+    smooth: 0,         // 0 none, 1 low, 2 medium, 3 high (Gaussian smoothing)
 
     onAdd(map, gl) {
       this.map = map;
@@ -231,7 +213,7 @@ export function createSatelliteLayer() {
 
     setOpacity(o) { this.opacity = o; if (this.map) this.map.triggerRepaint(); },
 
-    setSmooth(on) { this.smooth = !!on; if (this.map) this.map.triggerRepaint(); },
+    setSmooth(level) { this.smooth = +level || 0; if (this.map) this.map.triggerRepaint(); },
 
     clear() {
       this.has = false;
@@ -270,7 +252,7 @@ export function createSatelliteLayer() {
       gl.uniform1f(this.u.u_rPol, U.rPol);
       gl.uniform1f(this.u.u_sweepY, U.sweepY);
       gl.uniform1f(this.u.u_opacity, this.opacity);
-      gl.uniform1f(this.u.u_smooth, this.smooth ? 1 : 0);
+      gl.uniform1f(this.u.u_smooth, this.smooth);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
