@@ -4,6 +4,8 @@
 // satellite GL layer samples; all the colour science lives here on the CPU so
 // the shader only has to handle the geostationary projection.
 
+import { scanToLonLat } from './goes.js';
+
 // ---- the 16 ABI channels ----------------------------------------------------
 // type: 'vis' (reflectance factor 0..~1) or 'ir' (brightness temperature, K).
 export const SAT_CHANNELS = [
@@ -29,6 +31,17 @@ export const SAT_CHANNELS = [
 // a physical range with a gamma, following the CIRA / EUMETSAT quick guides.
 // `green: 'synthetic'` flags the GOES true-colour green synthesis.
 export const SAT_RGB = {
+  // GeoColor blends daytime true colour with a night-time IR cloud rendering,
+  // crossfading across the terminator by solar elevation — so one product reads
+  // naturally at any local time (the headline product of most modern viewers).
+  GEOCOLOR: {
+    name: 'GeoColor', short: 'GeoColor', day: false, geocolor: true,
+    green: 'synthetic',
+    r: { band: 2, lo: 0, hi: 1, gamma: 2.2 },
+    b: { band: 1, lo: 0, hi: 1, gamma: 2.2 },
+    veg: { band: 3, lo: 0, hi: 1, gamma: 2.2 },
+    ir: { band: 13 },
+  },
   TRUECOLOR: {
     name: 'True Color', short: 'TrueColor', day: true,
     green: 'synthetic',
@@ -62,7 +75,7 @@ export const SAT_RGB = {
   },
 };
 
-export const SAT_RGB_ORDER = ['TRUECOLOR', 'NATCOLOR', 'DAYCLOUDPHASE', 'AIRMASS', 'NIGHTMICRO'];
+export const SAT_RGB_ORDER = ['GEOCOLOR', 'TRUECOLOR', 'NATCOLOR', 'DAYCLOUDPHASE', 'AIRMASS', 'NIGHTMICRO'];
 
 // Which bands a product needs (so we only download/decode those channels).
 export function bandsFor(productId) {
@@ -70,7 +83,7 @@ export function bandsFor(productId) {
   const recipe = SAT_RGB[productId.replace(/^RGB_/, '')];
   if (!recipe) return [13];
   const set = new Set();
-  for (const k of ['r', 'g', 'b', 'veg']) {
+  for (const k of ['r', 'g', 'b', 'veg', 'ir']) {
     const c = recipe[k];
     if (!c) continue;
     if (c.band) set.add(c.band);
@@ -158,6 +171,74 @@ export function enhancementGradientCSS(band) {
   return `linear-gradient(90deg,${stops.join(',')})`;
 }
 
+// Subsolar point (solar declination + subsolar longitude, radians/degrees) for a
+// UTC instant — a NOAA-almanac approximation good to a fraction of a degree, ample
+// for shading the GeoColor terminator.
+function subsolarPoint(date) {
+  const d = date || new Date();
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+  const doy = (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - start) / 86400000;
+  const frac = (d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600) / 24;
+  const g = (2 * Math.PI / 365) * (doy - 1 + (frac - 0.5));
+  const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g)
+    - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g)
+    - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g)
+    - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const subLon = -((frac * 1440 + eqt) / 4 - 180); // degrees
+  return { decl, sinDecl: Math.sin(decl), cosDecl: Math.cos(decl), subLon };
+}
+
+// Render GeoColor: daytime true colour crossfaded with a night-time IR cloud
+// rendering by solar elevation, evaluated per pixel from the scene's geostationary
+// navigation and scan time.
+function buildGeoColor(scene, recipe, out) {
+  const W = scene.width, H = scene.height, ch = scene.channels;
+  const ir = ch[recipe.ir.band];
+  const sun = subsolarPoint(scene.time);
+  const D2R = Math.PI / 180;
+  const comp = (spec, i) => stretch(ch[spec.band][i], spec.lo, spec.hi, spec.gamma);
+  for (let row = 0; row < H; row++) {
+    const yy = scene.yOffset + row * scene.yScale;
+    for (let col = 0; col < W; col++) {
+      const i = row * W + col, o = i * 4;
+      const r0 = comp(recipe.r, i), b0 = comp(recipe.b, i);
+      const bt = ir ? ir[i] : NaN;
+      if (Number.isNaN(r0) && Number.isNaN(b0) && Number.isNaN(bt)) { out[o + 3] = 0; continue; }
+
+      // Day true colour (CIMSS synthetic green), reused from the true-colour path.
+      // Kept 0 where the visible bands are missing (night side) so a NaN can't
+      // poison the blend through the wDay=0 weighting below.
+      let dr = 0, dg = 0, db = 0;
+      if (!Number.isNaN(r0)) { dr = r0; db = b0; dg = 0.45 * r0 + 0.45 * b0 + 0.1 * comp(recipe.veg, i); }
+
+      // Night IR: clear scenes a deep navy "earth", cold cloud tops brightening to
+      // white, so storms stand out against the dark side.
+      const cloud = clamp01((290 - bt) / (290 - 220));
+      const nr = 6 + cloud * 224, ng = 14 + cloud * 226, nb = 38 + cloud * 200;
+
+      // Crossfade by solar elevation: full day a few degrees above the horizon,
+      // full night a few below, a soft band across the terminator.
+      let wDay = 1;
+      const ll = scanToLonLat(scene.xOffset + col * scene.xScale, yy, scene.proj);
+      if (ll) {
+        const latR = ll[1] * D2R;
+        const mu = Math.sin(latR) * sun.sinDecl
+          + Math.cos(latR) * sun.cosDecl * Math.cos((ll[0] - sun.subLon) * D2R);
+        wDay = clamp01((mu + 0.10) / 0.20);
+      }
+      if (Number.isNaN(r0)) wDay = 0;        // no daytime data here — show night
+      if (Number.isNaN(bt)) wDay = 1;        // no IR — fall back to day colour
+
+      out[o] = (clamp01(dr * wDay + nr / 255 * (1 - wDay)) * 255) | 0;
+      out[o + 1] = (clamp01(dg * wDay + ng / 255 * (1 - wDay)) * 255) | 0;
+      out[o + 2] = (clamp01(db * wDay + nb / 255 * (1 - wDay)) * 255) | 0;
+      out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
 // Build the W×H RGBA texture for a product. `enhance` (IR colour) only affects
 // single IR channels.
 export function buildRGBA(scene, productId, opts = {}) {
@@ -196,6 +277,7 @@ export function buildRGBA(scene, productId, opts = {}) {
   // ---- RGB composite ----
   const recipe = SAT_RGB[productId.replace(/^RGB_/, '')];
   if (!recipe) return out;
+  if (recipe.geocolor) return buildGeoColor(scene, recipe, out);
   const comp = (spec, i) => {
     if (!spec) return 0;
     if (spec.diff) {
