@@ -408,9 +408,23 @@ function himawariScene(meta, channels, nav, grid, sat, key) {
   };
 }
 
+// Reconstruct a Himawari scene's metadata straight from its key
+// (`HIMAWARI:<sector>:<YYYYMMDDHHMM>:<frame>`). The listing populates an in-memory
+// index for the page, but a decode running in a worker has its own empty module
+// state — and the key already carries everything loadHimawariScene needs, so we
+// rebuild from it rather than depend on that index (and a stale index can't
+// "expire" the scene out from under a load anymore).
+function himawariMetaFromKey(key) {
+  const m = /^HIMAWARI:([^:]+):(\d{4})(\d{2})(\d{2})(\d{4}):(\d+)$/.exec(key || '');
+  if (!m) return null;
+  const [, sectorKey, y, mm, dd, hhmm, frame] = m;
+  const base = Date.UTC(+y, +mm - 1, +dd, +hhmm.slice(0, 2), +hhmm.slice(2));
+  return { y, mm, dd, hhmm, frame: +frame, sectorKey, key, time: new Date(base + (+frame - 1) * 150000) };
+}
+
 async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
-  const meta = HIMAWARI_SCENE_FILES.get(key);
-  if (!meta) throw new Error('Himawari scene index expired; refresh scenes');
+  const meta = HIMAWARI_SCENE_FILES.get(key) || himawariMetaFromKey(key);
+  if (!meta) throw new Error('bad Himawari scene key');
   const sector = SECTORS[sectorKey];
   const gridRef = { grid: sector.grid || null };
   // Regional grids come from the headers; bootstrap one if every requested band
