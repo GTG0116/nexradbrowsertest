@@ -425,6 +425,14 @@ button {
 .map-readout.show {
   opacity: 1;
 }
+/* Desktop inspect: the readout follows the cursor (positioned in JS), so drop the
+   fixed top-centre anchoring and its horizontal centering transform. */
+.map-readout.at-cursor {
+  top: 0;
+  left: 0;
+  transform: none;
+  text-align: left;
+}
 .map-readout b {
   display: block;
   font-size: 15px;
@@ -817,6 +825,23 @@ input[type='range']::-moz-range-thumb {
   height: 12px;
   border-radius: 3px;
   border: 1px solid rgba(255, 255, 255, 0.4);
+}
+/* CIG (Conditional Intensity Group) swatch — diagonal hatch on a light fill so
+   the black lines read, density rising with the level to mirror the map. */
+.spc-legend-hatch {
+  background-color: #e8edf5;
+  border-color: #000;
+}
+.spc-legend-hatch[data-cig="1"] {
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, #000 4px 5px);
+}
+.spc-legend-hatch[data-cig="2"] {
+  background-image: repeating-linear-gradient(45deg, transparent 0 2px, #000 2px 3px);
+}
+.spc-legend-hatch[data-cig="3"] {
+  background-image:
+    repeating-linear-gradient(45deg, transparent 0 2px, #000 2px 3px),
+    repeating-linear-gradient(-45deg, transparent 0 2px, #000 2px 3px);
 }
 .spc-legend-label {
   font-size: 11px;
@@ -1912,8 +1937,53 @@ input[type='range']::-moz-range-thumb {
   font-size: 15px;
   cursor: pointer;
 }
-.pb-scrub {
+/* The scrub track shows frame-load progress: a row of segments, one per frame,
+   that turn green as each frame finishes loading (grey = still loading). The
+   native range input sits on top with a transparent track so the segments show
+   through, and the thumb stays draggable across all the loaded frames. */
+.pb-scrub-wrap {
+  position: relative;
   flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 24px;
+}
+.pb-scrub-prog {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(120, 140, 170, 0.28);
+  overflow: hidden;
+  display: flex;
+  gap: 0;
+  pointer-events: none;
+}
+.pb-scrub-prog .seg {
+  flex: 1 1 0;
+  min-width: 0;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.pb-scrub-prog .seg.loaded {
+  background: #36c46a;
+}
+.pb-scrub {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  width: 100%;
+  background: transparent;
+}
+.pb-scrub::-webkit-slider-runnable-track {
+  background: transparent;
+}
+.pb-scrub::-moz-range-track {
+  background: transparent;
 }
 /* The desktop "Playback loop" button is redundant on mobile, where the bottom
    dock already carries a ▶ control — hide it there. */
@@ -2228,12 +2298,12 @@ input[type='range']::-moz-range-thumb {
 }
 .snd-pgroup h3 {
   margin: 0 0 8px;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.6px;
+  letter-spacing: 1px;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--accent);
 }
 .snd-pgrid {
   display: grid;
@@ -2259,38 +2329,52 @@ input[type='range']::-moz-range-thumb {
   white-space: nowrap;
 }
 
-/* Tablet / desktop: a centred two-column workspace — diagrams side by side on
-   the left, parameters on the right. */
+/* Tablet / desktop: the operational layout from the reference — a tall Skew-T
+   filling the left half, with the hodograph top-right and the parameter panels
+   stacked beneath it on the right. The two chart <figure>s use `display:contents`
+   so they sit directly in the body grid alongside the params. */
 @media (min-width: 820px) {
   .snd-body {
     display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
-    gap: 18px;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 0.82fr);
+    grid-template-rows: auto auto;
+    gap: 16px 18px;
     padding: 18px 22px;
-    max-width: 1400px;
+    max-width: 1500px;
     width: 100%;
     margin: 0 auto;
+    align-content: start;
+  }
+  .snd-status {
+    grid-column: 1 / -1;
   }
   .snd-charts {
-    flex-direction: row;
-    align-items: stretch;
+    display: contents;
   }
   .snd-skewt {
-    flex: 1 1 58%;
-  }
-  .snd-hodo {
-    flex: 1 1 42%;
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    display: flex;
+    flex-direction: column;
   }
   .snd-skewt canvas {
-    height: 72vh;
-    min-height: 460px;
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 72vh;
+  }
+  .snd-hodo {
+    grid-column: 2;
+    grid-row: 1;
+    margin: 0;
   }
   .snd-hodo canvas {
     height: auto;
     aspect-ratio: 1 / 1;
-    max-height: 72vh;
+    max-height: 46vh;
   }
   .snd-params {
+    grid-column: 2;
+    grid-row: 2;
     margin-top: 0;
     align-content: start;
   }
@@ -2392,30 +2476,70 @@ input[type='range']::-moz-range-thumb {
 .mt-label-storm { border-color: #ff5a7a; color: #ffb3c2; }
 
 /* Storm-track control panel (bottom-center of the map). */
+/* Storm-track control: a floating card styled like the alert preview popup —
+   a coloured header band over a glass body with the controls + town summary. */
 .storm-panel {
   position: absolute;
   left: 50%;
-  bottom: 16px;
+  bottom: 24px;
   transform: translateX(-50%);
-  z-index: 620;
-  max-width: 92%;
-  padding: 10px 12px;
-  border-radius: 11px;
-  background: rgba(8, 16, 32, 0.94);
+  z-index: 1260;
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(18, 30, 54, 0.97), rgba(8, 14, 28, 0.97));
   border: 1px solid #ff5a7a;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 24px rgba(255, 90, 122, 0.22);
   font-family: 'Space Grotesk', system-ui, sans-serif;
 }
+.storm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: #ff5a7a;
+  color: #1a0410;
+}
+.storm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #1a0410;
+  box-shadow: 0 0 0 3px rgba(26, 4, 16, 0.25);
+}
+.storm-kicker {
+  flex: 1;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.storm-x {
+  border: none;
+  background: rgba(26, 4, 16, 0.18);
+  color: #1a0410;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.storm-x:hover { background: rgba(26, 4, 16, 0.32); }
 .storm-msg {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--ink);
-  margin-bottom: 8px;
+  margin: 0;
+  padding: 11px 12px 8px;
+  line-height: 1.45;
 }
 .storm-inputs {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  padding: 0 12px 12px;
   font-size: 11px;
   color: var(--ink-dim);
 }
@@ -2440,6 +2564,16 @@ input[type='range']::-moz-range-thumb {
 .storm-inputs button:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* While the storm-track tool owns the screen, hide the bottom UI (dock, legend,
+   footer, playback bar) so the track + town labels read cleanly. The storm card
+   stays — it's the control surface for the tool. */
+body.storm-active .mobile-dock,
+body.storm-active .legend,
+body.storm-active .footer,
+body.storm-active .playback-bar {
+  display: none !important;
 }
 
 /* ---- Split screen (second synced pane) ---- */
@@ -2541,16 +2675,10 @@ input[type='range']::-moz-range-thumb {
   .app.alert-preview-open .playback-bar {
     display: none !important;
   }
-  /* Storm-track controls used to sit at the very bottom, under the dock/sheet,
-     where they were unreachable. Lift them clear of the bottom UI, widen them,
-     and enlarge the touch targets. */
+  /* Storm track hides the bottom dock while active, so the card can sit low and
+     centered; just enlarge the touch targets for phones. */
   .storm-panel {
-    bottom: 200px;
-    left: 8px;
-    right: 8px;
-    max-width: none;
-    transform: none;
-    padding: 12px;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   }
   .storm-inputs {
     gap: 12px;
@@ -2569,6 +2697,50 @@ input[type='range']::-moz-range-thumb {
      collide with the nav control / toolbar at the top. */
   .map-wrap.split #map .split-badge { top: 8px; }
   .map-wrap.split #map2 .split-badge { top: auto; bottom: 8px; }
+}
+
+/* PC / iPad: the two-pane split is LEFT/RIGHT (each half the width) rather than
+   stacked top/bottom — more like a desktop comparison workspace. The phone width
+   keeps the stacked arrangement above. */
+@media (min-width: 820px) {
+  .map-wrap.split #map {
+    right: 50%;
+    top: 0;
+  }
+  .map-wrap.split #map2 {
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid var(--panel-edge);
+    border-bottom: none;
+  }
+  .map-wrap.split #map .split-badge,
+  .map-wrap.split #map2 .split-badge {
+    top: 10px;
+    bottom: auto;
+  }
+
+  /* Four-quadrant split: four equal panes, each its own product over the same
+     view. Panes 3/4 only exist in this mode (built by SplitView). */
+  .map-wrap.quad #map { right: 50%; bottom: 50%; top: 0; }
+  .map-wrap.quad #map2 { left: 50%; bottom: 50%; top: 0; border: none; border-left: 1px solid var(--panel-edge); }
+  .map-wrap.quad #map3 { left: 0; right: 50%; top: 50%; bottom: 0; }
+  .map-wrap.quad #map4 { left: 50%; right: 0; top: 50%; bottom: 0; border-left: 1px solid var(--panel-edge); }
+  .map-wrap.quad #map3, .map-wrap.quad #map4 { border-top: 1px solid var(--panel-edge); }
+}
+
+/* The extra quadrant panes share #map2's base styling. */
+#map3, #map4 {
+  position: absolute;
+  inset: 0;
+  background: #04080f;
+}
+#map3[hidden], #map4[hidden] { display: none; }
+.map-wrap.quad #map.pane-active,
+.map-wrap.quad #map2.pane-active,
+.map-wrap.quad #map3.pane-active,
+.map-wrap.quad #map4.pane-active {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3100,3 +3272,111 @@ input[type='range']::-moz-range-thumb {
 @media (max-width: 760px) {
   .legend.weather-card { max-width: calc(100vw - 24px); }
 }
+
+/* ---------------------------------------------------------------------------
+   First-run Mapbox token gate — a centered glass card shown until the user
+   supplies their own Mapbox public token (kept in localStorage). Sits above
+   everything so the app can't be used without a valid key.
+   --------------------------------------------------------------------------- */
+.mbx-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: radial-gradient(120% 120% at 50% 0%, rgba(13, 22, 44, 0.96), rgba(5, 9, 18, 0.98));
+  backdrop-filter: blur(6px);
+}
+.mbx-gate-card {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(18, 30, 54, 0.96), rgba(9, 16, 30, 0.96));
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  box-shadow: var(--glow), 0 24px 64px rgba(0, 0, 0, 0.55);
+  padding: 26px 26px 24px;
+  color: var(--ink);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
+.mbx-gate-kicker {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.mbx-gate-card h2 {
+  margin: 8px 0 12px;
+  font-size: 22px;
+  letter-spacing: 0.01em;
+}
+.mbx-gate-card p {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink-dim);
+}
+.mbx-gate-card p b { color: var(--ink); }
+.mbx-gate-steps {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+.mbx-gate-steps li { margin-bottom: 4px; }
+.mbx-gate-steps code,
+.mbx-gate-card code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: rgba(54, 224, 200, 0.1);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+.mbx-gate-card a {
+  color: var(--accent-2);
+  text-decoration: none;
+}
+.mbx-gate-card a:hover { text-decoration: underline; }
+.mbx-gate-input {
+  width: 100%;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  color: var(--ink);
+  background: rgba(5, 9, 18, 0.8);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  padding: 12px 13px;
+  outline: none;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+.mbx-gate-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(54, 224, 200, 0.18);
+}
+.mbx-gate-error {
+  min-height: 18px;
+  margin: 8px 2px 0;
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.mbx-gate-save {
+  width: 100%;
+  margin-top: 10px;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: #03121a;
+  background: linear-gradient(180deg, var(--accent), #1fb9a4);
+  border: none;
+  border-radius: 10px;
+  padding: 13px;
+  cursor: pointer;
+  transition: filter var(--dur-base) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.mbx-gate-save:hover { filter: brightness(1.08); }
+.mbx-gate-save:active { transform: translateY(1px); }
