@@ -45,29 +45,11 @@ function destination(origin, brngDeg, distM) {
   return [((lo2 * 180) / Math.PI + 540) % 360 - 180, (la2 * 180) / Math.PI];
 }
 
-// Spherical polygon area in m² (positive), via the spherical-excess formula.
-function ringArea(coords) {
-  if (coords.length < 3) return 0;
-  let total = 0;
-  for (let i = 0; i < coords.length; i++) {
-    const p1 = coords[i];
-    const p2 = coords[(i + 1) % coords.length];
-    total += toRad(p2[0] - p1[0]) * (2 + Math.sin(toRad(p1[1])) + Math.sin(toRad(p2[1])));
-  }
-  return Math.abs((total * R_EARTH * R_EARTH) / 2);
-}
-
 function fmtDist(m) {
   const mi = m * M_TO_MI;
   const km = m * M_TO_KM;
   if (mi < 0.2) return `${Math.round(m * 3.28084)} ft · ${Math.round(m)} m`;
   return `${mi.toFixed(mi < 10 ? 2 : 1)} mi · ${km.toFixed(km < 10 ? 2 : 1)} km`;
-}
-
-function fmtArea(m2) {
-  const mi2 = m2 * 3.861e-7;
-  const km2 = m2 * 1e-6;
-  return `${mi2.toFixed(mi2 < 10 ? 2 : 1)} mi² · ${km2.toFixed(km2 < 10 ? 1 : 0)} km²`;
 }
 
 const bgColor = { draw: '#36e0c8', measure: '#ffd54a', storm: '#ff5a7a' };
@@ -84,6 +66,8 @@ export class MapTools {
     this.onToolEnd = null;
     this.stormSpeed = 30; // mph
     this.stormMinutes = 60;
+    this.stormMaxTowns = 20; // cap on town labels in the cone (user-adjustable)
+    this._stormSeq = 0; // guards against overlapping async town lookups
     this._storm = null; // { a, b }
 
     // Add our source/layers now if the style is already up, otherwise on
@@ -191,9 +175,10 @@ export class MapTools {
     this.tool = tool;
     const canvas = this.map.getCanvas();
     canvas.style.cursor = tool ? 'crosshair' : '';
-    // Freehand draw needs full pointer control; the click tools keep the map
-    // interactive but suppress double-click zoom while finishing a shape.
-    if (tool === 'draw') this.map.dragPan.disable();
+    // Freehand draw and the drag-to-measure both need the pointer (no map pan
+    // while the gesture is in progress); the storm click tool keeps the map
+    // interactive but suppresses double-click zoom while finishing a shape.
+    if (tool === 'draw' || tool === 'measure') this.map.dragPan.disable();
     else this.map.dragPan.enable();
     if (tool) this.map.doubleClickZoom.disable();
     else this.map.doubleClickZoom.enable();
@@ -222,69 +207,101 @@ export class MapTools {
   _bindPointer() {
     const map = this.map;
     let drawing = false;
+    let measuring = false;
 
     map.on('mousedown', (e) => {
-      if (this.tool !== 'draw') return;
-      drawing = true;
-      this.draft = { kind: 'draw', coords: [[e.lngLat.lng, e.lngLat.lat]] };
+      const pt = [e.lngLat.lng, e.lngLat.lat];
+      if (this.tool === 'draw') {
+        drawing = true;
+        this.draft = { kind: 'draw', coords: [pt] };
+      } else if (this.tool === 'measure') {
+        // Drag-to-measure: press sets the start, the end follows the pointer.
+        measuring = true;
+        this.draft = { kind: 'measure', coords: [pt, pt] };
+        this._renderMeasureLabels();
+        this._refresh();
+      }
     });
     map.on('mousemove', (e) => {
-      if (this.tool !== 'draw' || !drawing) return;
-      this.draft.coords.push([e.lngLat.lng, e.lngLat.lat]);
-      this._refresh();
+      const pt = [e.lngLat.lng, e.lngLat.lat];
+      if (this.tool === 'draw' && drawing) {
+        this.draft.coords.push(pt);
+        this._refresh();
+      } else if (this.tool === 'measure' && measuring) {
+        this.draft.coords[1] = pt;
+        this._renderMeasureLabels();
+        this._refresh();
+      }
     });
     map.on('mouseup', () => {
-      if (this.tool !== 'draw' || !drawing) return;
-      drawing = false;
-      this._commitDraft();
+      if (this.tool === 'draw' && drawing) {
+        drawing = false;
+        this._commitDraft();
+      } else if (this.tool === 'measure' && measuring) {
+        measuring = false;
+        this._commitMeasure();
+      }
     });
 
-    // Touch: freehand draw on the canvas directly so we get every move.
+    // Touch: freehand draw and drag-measure on the canvas directly so we get
+    // every move (Mapbox swallows touch pans before its own move events).
     const canvas = map.getCanvas();
     let touchDrawing = false;
+    let touchMeasuring = false;
     const llFromTouch = (t) => {
       const rect = canvas.getBoundingClientRect();
       return map.unproject([t.clientX - rect.left, t.clientY - rect.top]);
     };
     canvas.addEventListener('touchstart', (e) => {
-      if (this.tool !== 'draw' || e.touches.length !== 1) return;
-      e.preventDefault();
-      touchDrawing = true;
+      if (e.touches.length !== 1) return;
       const ll = llFromTouch(e.touches[0]);
-      this.draft = { kind: 'draw', coords: [[ll.lng, ll.lat]] };
+      const pt = [ll.lng, ll.lat];
+      if (this.tool === 'draw') {
+        e.preventDefault();
+        touchDrawing = true;
+        this.draft = { kind: 'draw', coords: [pt] };
+      } else if (this.tool === 'measure') {
+        e.preventDefault();
+        touchMeasuring = true;
+        this.draft = { kind: 'measure', coords: [pt, pt] };
+        this._renderMeasureLabels();
+        this._refresh();
+      }
     }, { passive: false });
     canvas.addEventListener('touchmove', (e) => {
-      if (this.tool !== 'draw' || !touchDrawing) return;
-      e.preventDefault();
       const ll = llFromTouch(e.touches[0]);
-      this.draft.coords.push([ll.lng, ll.lat]);
-      this._refresh();
+      const pt = [ll.lng, ll.lat];
+      if (this.tool === 'draw' && touchDrawing) {
+        e.preventDefault();
+        this.draft.coords.push(pt);
+        this._refresh();
+      } else if (this.tool === 'measure' && touchMeasuring) {
+        e.preventDefault();
+        this.draft.coords[1] = pt;
+        this._renderMeasureLabels();
+        this._refresh();
+      }
     }, { passive: false });
     canvas.addEventListener('touchend', () => {
-      if (this.tool !== 'draw' || !touchDrawing) return;
-      touchDrawing = false;
-      this._commitDraft();
-    });
-
-    // Click tools: measure + storm vertices.
-    map.on('click', (e) => {
-      const pt = [e.lngLat.lng, e.lngLat.lat];
-      if (this.tool === 'measure') this._measureClick(pt);
-      else if (this.tool === 'storm') this._stormClick(pt);
-    });
-    map.on('dblclick', (e) => {
-      if (this.tool === 'measure' && this.draft) {
-        e.preventDefault();
+      if (this.tool === 'draw' && touchDrawing) {
+        touchDrawing = false;
+        this._commitDraft();
+      } else if (this.tool === 'measure' && touchMeasuring) {
+        touchMeasuring = false;
         this._commitMeasure();
       }
+    });
+
+    // Storm track still places discrete points by click/tap.
+    map.on('click', (e) => {
+      const pt = [e.lngLat.lng, e.lngLat.lat];
+      if (this.tool === 'storm') this._stormClick(pt);
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.tool) {
         if (this.draft) this._cancelDraft();
         else this.setTool(null);
         if (this.onToolEnd) this.onToolEnd();
-      } else if (e.key === 'Enter' && this.tool === 'measure' && this.draft) {
-        this._commitMeasure();
       }
     });
   }
@@ -301,56 +318,39 @@ export class MapTools {
     this._emit();
   }
 
-  // ---- Measure ----
-  _measureClick(pt) {
-    if (!this.draft) this.draft = { kind: 'measure', coords: [] };
-    this.draft.coords.push(pt);
-    this._renderMeasureLabels();
-    this._refresh();
-  }
-
+  // ---- Measure (drag: press start → drag → release end) ----
   _renderMeasureLabels() {
     for (const m of this.draftMarkers) m.remove();
     this.draftMarkers = [];
     const coords = this.draft.coords;
-    let cum = 0;
-    for (let i = 0; i < coords.length; i++) {
-      if (i > 0) cum += haversine(coords[i - 1], coords[i]);
-      if (i === coords.length - 1) {
-        const txt = coords.length === 1 ? 'click to measure' : fmtDist(cum);
-        this.draftMarkers.push(this._label(coords[i], txt, 'measure'));
-      }
-    }
-    if (coords.length >= 3) {
-      const area = ringArea(coords);
-      const c = centroid(coords);
-      this.draftMarkers.push(this._label(c, fmtArea(area), 'measure', true));
-    }
+    const dist = coords.length >= 2 ? haversine(coords[0], coords[coords.length - 1]) : 0;
+    const txt = coords.length < 2 ? 'drag to measure' : fmtDist(dist);
+    this.draftMarkers.push(this._label(coords[coords.length - 1], txt, 'measure'));
   }
 
   _commitMeasure() {
-    if (!this.draft || this.draft.coords.length < 2) { this._cancelDraft(); return; }
-    const coords = this.draft.coords;
-    let total = 0;
-    for (let i = 1; i < coords.length; i++) total += haversine(coords[i - 1], coords[i]);
+    const coords = this.draft && this.draft.coords;
+    // A tap without a drag (start ≈ end) is not a measurement — discard it.
+    if (!coords || coords.length < 2 || haversine(coords[0], coords[1]) < 1) {
+      this._cancelDraft();
+      return;
+    }
+    const total = haversine(coords[0], coords[coords.length - 1]);
     this.shapes.push({
       type: 'Feature',
-      geometry: { type: 'LineString', coordinates: coords },
+      geometry: { type: 'LineString', coordinates: coords.slice() },
       properties: { kind: 'measure', color: bgColor.measure },
     });
     for (const c of coords)
       this.shapes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: { kind: 'measure', color: bgColor.measure, role: 'vertex' } });
-    // Promote the live labels to committed markers.
-    const last = coords[coords.length - 1];
-    this.labelMarkers.push(this._label(last, fmtDist(total), 'measure'));
-    if (coords.length >= 3)
-      this.labelMarkers.push(this._label(centroid(coords), fmtArea(ringArea(coords)), 'measure', true));
+    // Promote the live label to a committed marker.
+    this.labelMarkers.push(this._label(coords[coords.length - 1], fmtDist(total), 'measure'));
     for (const m of this.draftMarkers) m.remove();
     this.draftMarkers = [];
     this.draft = null;
     this._emit();
-    this.setTool(null);
-    if (this.onToolEnd) this.onToolEnd();
+    // Stay armed so the user can drag another measurement; toggle the tool off to
+    // exit.
   }
 
   // ---- Storm track ----
@@ -377,19 +377,21 @@ export class MapTools {
   async _buildStormTrack() {
     const { a, b } = this._storm;
     this._lastStorm = { a, b }; // remember so speed/time edits can re-plot
+    const seq = ++this._stormSeq; // invalidate any in-flight town lookup
     const brng = bearing(a, b);
     const speedMph = this.stormSpeed;
     const minutes = this.stormMinutes;
     const speedMs = speedMph * 0.44704;
     const totalM = speedMs * minutes * 60;
     const end = destination(a, brng, totalM);
+    const cone = coneRing(a, brng, totalM);
 
     // Forecast cone — a wedge that widens with lead time to convey positional
     // uncertainty (like an NHC/SPC track cone). Drawn first so the track line
     // and ticks sit on top of its translucent fill.
     this.shapes.push({
       type: 'Feature',
-      geometry: { type: 'Polygon', coordinates: [coneRing(a, brng, totalM)] },
+      geometry: { type: 'Polygon', coordinates: [cone] },
       properties: { kind: 'storm', color: bgColor.storm, dashed: true, role: 'cone' },
     });
 
@@ -403,28 +405,46 @@ export class MapTools {
     // Storm position marker.
     this.shapes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a }, properties: { kind: 'storm', color: bgColor.storm, role: 'storm-pos' } });
 
-    // Tick marks + town lookups every 15 minutes along the path.
+    // Tick marks every 15 minutes along the centreline, for the time scale.
     const stepMin = 15;
     const now = Date.now();
-    const labels = [];
     for (let t = stepMin; t <= minutes; t += stepMin) {
       const p = destination(a, brng, speedMs * t * 60);
       this.shapes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: p }, properties: { kind: 'storm', color: bgColor.storm, role: 'vertex' } });
-      const eta = new Date(now + t * 60000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-      labels.push({ p, t, eta });
     }
     this._cleanupStormDraft();
     this._emit();
-    this._showStormPanel(`Heading ${compass(brng)} at ${speedMph} mph — locating towns…`);
+    this._showStormPanel(`Heading ${compass(brng)} at ${speedMph} mph — finding towns in the cone…`, true);
 
-    // Look up the nearest town for each tick via the weather.gov point API.
-    for (const lab of labels) {
-      let town = '';
-      try { town = await nearestTown(lab.p); } catch (_) { /* keep ETA only */ }
-      const text = town ? `${town}\n+${lab.t}m · ${lab.eta}` : `+${lab.t}m · ${lab.eta}`;
-      this.labelMarkers.push(this._label(lab.p, text, 'storm'));
+    // Flood the cone with every town inside it (not just centreline ticks): pull
+    // all populated places in the cone's bbox from OpenStreetMap (Overpass), keep
+    // those actually inside the cone polygon, and tag each with the ETA at which
+    // the storm passes its closest approach. Sorted by ETA, capped to maxTowns.
+    let towns = [];
+    try {
+      towns = await townsInCone(cone);
+    } catch (_) { /* keep the track even if the town service is down */ }
+    if (seq !== this._stormSeq) return; // a newer rebuild superseded this one
+
+    const along = projectAlong(a, brng); // → metres along heading
+    const scored = [];
+    for (const tn of towns) {
+      const d = along(tn.lon, tn.lat);
+      if (d < -2000 || d > totalM) continue; // behind the storm or past the window
+      const tMin = Math.max(0, d / speedMs / 60);
+      scored.push({ ...tn, tMin });
     }
-    this._showStormPanel(`Track plotted · ${compass(brng)} at ${speedMph} mph. Adjust speed/time or click ✕ to finish.`, true);
+    scored.sort((x, y) => x.tMin - y.tMin);
+    const shown = scored.slice(0, Math.max(1, this.stormMaxTowns | 0));
+    for (const tn of shown) {
+      const eta = new Date(now + tn.tMin * 60000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const text = `${tn.name}\n+${Math.round(tn.tMin)}m · ${eta}`;
+      this.labelMarkers.push(this._label([tn.lon, tn.lat], text, 'storm'));
+    }
+    const note = scored.length > shown.length
+      ? `${shown.length} of ${scored.length} towns in cone (raise max to show more)`
+      : `${shown.length} town${shown.length === 1 ? '' : 's'} in cone`;
+    this._showStormPanel(`Track · ${compass(brng)} at ${speedMph} mph — ${note}.`, true);
   }
 
   _cleanupStormDraft() {
@@ -444,18 +464,25 @@ export class MapTools {
     }
     const p = this._stormPanel;
     p.innerHTML = `
+      <div class="storm-head">
+        <span class="storm-dot"></span>
+        <span class="storm-kicker">Storm track</span>
+        <button id="stormDone" class="storm-x" title="Finish (Esc)">✕</button>
+      </div>
       <div class="storm-msg">${msg}</div>
       <div class="storm-inputs">
         <label>Speed <input type="number" min="5" max="120" value="${this.stormSpeed}" id="stormSpeed"> mph</label>
         <label>Time <input type="number" min="15" max="180" step="15" value="${this.stormMinutes}" id="stormMin"> min</label>
+        <label>Max towns <input type="number" min="1" max="200" step="1" value="${this.stormMaxTowns}" id="stormMaxTowns"></label>
         <button id="stormReset">Reset</button>
-        <button id="stormDone">✕</button>
       </div>`;
     const sp = p.querySelector('#stormSpeed');
     const mn = p.querySelector('#stormMin');
+    const mx = p.querySelector('#stormMaxTowns');
     const recompute = () => {
       this.stormSpeed = Math.max(5, Number(sp.value) || 30);
       this.stormMinutes = Math.max(15, Number(mn.value) || 60);
+      this.stormMaxTowns = Math.min(200, Math.max(1, Number(mx.value) || 20));
       // Re-plot if a heading is already defined.
       if (this._storm && this._storm.a && this._storm.b) {
         this._removeStormShapes();
@@ -468,6 +495,7 @@ export class MapTools {
     };
     sp.addEventListener('change', recompute);
     mn.addEventListener('change', recompute);
+    mx.addEventListener('change', recompute);
     p.querySelector('#stormReset').addEventListener('click', () => { this._removeStormShapes(); this._startStorm(); });
     p.querySelector('#stormDone').addEventListener('click', () => { this.setTool(null); if (this.onToolEnd) this.onToolEnd(); });
     if (this._storm && this._storm.a && this._storm.b) this._lastStorm = { ...this._storm };
@@ -514,31 +542,71 @@ function coneRing(origin, brngDeg, totalM) {
   return [...left, ...right.reverse(), left[0]];
 }
 
-function centroid(coords) {
-  let x = 0, y = 0;
-  for (const c of coords) { x += c[0]; y += c[1]; }
-  return [x / coords.length, y / coords.length];
-}
-
 function compass(deg) {
   const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
   return dirs[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
 }
 
-// Nearest town for a [lon,lat] point, from the NWS point metadata endpoint
-// (relativeLocation gives the closest community + state). CORS-enabled.
-const townCache = new Map();
-async function nearestTown(pt) {
-  const key = `${pt[1].toFixed(3)},${pt[0].toFixed(3)}`;
-  if (townCache.has(key)) return townCache.get(key);
-  const res = await fetch(`https://api.weather.gov/points/${pt[1].toFixed(4)},${pt[0].toFixed(4)}`, {
-    headers: { Accept: 'application/geo+json' },
+// Signed distance (metres) of a point along the storm heading from `origin`,
+// using a local equirectangular approximation (good for a few hundred km). Used
+// to turn a town's position into the ETA at which the storm reaches it.
+function projectAlong(origin, brngDeg) {
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos(toRad(origin[1]));
+  const ux = Math.sin(toRad(brngDeg)); // east component of heading
+  const uy = Math.cos(toRad(brngDeg)); // north component
+  return (lon, lat) => {
+    const dx = (lon - origin[0]) * mPerDegLon;
+    const dy = (lat - origin[1]) * mPerDegLat;
+    return dx * ux + dy * uy;
+  };
+}
+
+// Ray-casting point-in-polygon for a [lon,lat] ring.
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    const hit = (yi > lat) !== (yj > lat) &&
+      lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
+
+// All populated places inside the storm cone, from OpenStreetMap via the public
+// Overpass API (CORS-enabled, key-free, global). We query the cone's bounding
+// box, then keep only the nodes actually inside the cone polygon. Returns
+// [{ name, lat, lon }].
+async function townsInCone(coneRingCoords) {
+  let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+  for (const [lon, lat] of coneRingCoords) {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  // Overpass bbox order is (south,west,north,east).
+  const bbox = `${minLat},${minLon},${maxLat},${maxLon}`;
+  const query = `[out:json][timeout:25];(node["place"~"^(city|town|village)$"]["name"](${bbox}););out body 600;`;
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'data=' + encodeURIComponent(query),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
   const json = await res.json();
-  const rl = json.properties && json.properties.relativeLocation;
-  const props = rl && rl.properties;
-  const town = props ? `${props.city}, ${props.state}` : '';
-  townCache.set(key, town);
-  return town;
+  const out = [];
+  const seen = new Set();
+  for (const eln of json.elements || []) {
+    const name = eln.tags && eln.tags.name;
+    if (!name || eln.lat == null || eln.lon == null) continue;
+    if (!pointInRing(eln.lon, eln.lat, coneRingCoords)) continue;
+    const key = name + '@' + eln.lat.toFixed(2) + ',' + eln.lon.toFixed(2);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, lat: eln.lat, lon: eln.lon });
+  }
+  return out;
 }
