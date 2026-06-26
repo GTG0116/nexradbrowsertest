@@ -12,11 +12,14 @@
 // motion, helicity, composites) here in the browser, exactly as the rest of the
 // app does its own science.
 //
-// The profile follows whichever model is selected for the active forecast hour:
-// the in-app model key is mapped to the matching Open-Meteo model below. Only
-// HRRR and GFS publish browser-reachable pressure-level columns, so the regional
-// CONUS models (NAM/NAM Nest/RAP) fall back to HRRR — the closest high-resolution
-// column — and the sounding is always labelled with the model actually used.
+// The profile follows whichever model is selected for the active forecast hour.
+// Only HRRR and GFS publish browser-reachable pressure-level columns via
+// Open-Meteo; for the regional CONUS models (NAM / NAM Nest / RAP) we instead
+// build the column straight from the model's own GRIB2 — Range-fetching and
+// point-sampling each pressure-level field (see models.js loadModelColumn) — so
+// the sounding reflects the actual selected model rather than a HRRR stand-in.
+
+import { loadModelColumn } from './models.js';
 
 const KT2MS = 0.514444;
 const MS2KT = 1.943844;
@@ -28,22 +31,21 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
   500, 450, 400, 350, 300, 250, 200, 150, 100, 50];
 
-// Map an in-app model key to the Open-Meteo model that serves pressure-level
-// columns for it, plus a short label for the panel. Open-Meteo only publishes
-// browser-reachable soundings for HRRR and GFS, so the regional CONUS models
-// (NAM/NAM Nest/RAP) borrow HRRR — the nearest high-resolution column.
-const OM_SOUNDING = {
-  hrrr:    { id: 'gfs_hrrr',   label: 'HRRR' },
-  gfs:     { id: 'gfs_global', label: 'GFS' },
-  nam:     { id: 'gfs_hrrr',   label: 'HRRR' },
-  namnest: { id: 'gfs_hrrr',   label: 'HRRR' },
-  rap:     { id: 'gfs_hrrr',   label: 'HRRR' },
+// The sounding source for each in-app model: HRRR/GFS use Open-Meteo's
+// pressure-level column (`id` is the Open-Meteo model); the regional models use
+// their own GRIB2 (`native: true`). `label` names the model shown in the panel —
+// now always the model actually used, since nothing borrows HRRR anymore.
+const SOUNDING_SOURCE = {
+  hrrr:    { id: 'gfs_hrrr',   label: 'HRRR',     native: false },
+  gfs:     { id: 'gfs_global', label: 'GFS',      native: false },
+  nam:     { label: 'NAM',      native: true },
+  namnest: { label: 'NAM Nest', native: true },
+  rap:     { label: 'RAP',      native: true },
 };
 
-// The Open-Meteo model + display label for an in-app model key (defaults to HRRR
-// for anything without its own browser-reachable column).
+// The sounding source descriptor for an in-app model key (defaults to HRRR).
 export function soundingModel(modelKey) {
-  return OM_SOUNDING[modelKey] || OM_SOUNDING.hrrr;
+  return SOUNDING_SOURCE[modelKey] || SOUNDING_SOURCE.hrrr;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,72 @@ function pushLevel(arr, p, z, T, Td, spdKt, dir) {
 }
 
 const num = (x) => (x == null ? NaN : x);
+
+// ---------------------------------------------------------------------------
+// Native GRIB2 column (NAM / NAM Nest / RAP) — same profile shape as the
+// Open-Meteo path, built from the model's own data via models.js.
+// ---------------------------------------------------------------------------
+
+// Dew point (°C) from temperature (°C) and relative humidity (%).
+function dewFromRH(Tc, rh) {
+  const r = Math.max(1, Math.min(100, rh));
+  const es = 6.112 * Math.exp((17.67 * Tc) / (Tc + 243.5));
+  const ln = Math.log(((r / 100) * es) / 6.112);
+  return (243.5 * ln) / (17.67 - ln);
+}
+
+// Push a column level, deriving speed/direction from native u/v (eastward /
+// northward m/s) wind components — the same (u, v) convention the hodograph and
+// helicity math use directly.
+function pushColumnLevel(arr, p, z, T, Td, u, v) {
+  if (z == null || !Number.isFinite(z) || !Number.isFinite(T)) return;
+  if (Td != null && Td > T) Td = T;
+  const uu = Number.isFinite(u) ? u : 0;
+  const vv = Number.isFinite(v) ? v : 0;
+  const spd = Math.hypot(uu, vv);
+  const dir = (Math.atan2(-uu, -vv) * R2D + 360) % 360;
+  arr.push({ p, z, T, Td: Td == null ? T - 30 : Td, spdKt: spd * MS2KT, dir, u: uu, v: vv });
+}
+
+// Build a sounding from a model's native GRIB2 column. `run` is a listModels
+// entry, `fhour` the forecast hour, `onProgress(frac)` reports load progress.
+export async function fetchSoundingNative(modelKey, run, fhour, lat, lon, validTime, onProgress) {
+  const src = soundingModel(modelKey);
+  const { levels: raw, sfc } = await loadModelColumn(modelKey, run, fhour, lat, lon, onProgress);
+
+  const sfcZ = Number.isFinite(sfc.zsfc) ? sfc.zsfc : 0;
+  const sfcP = Number.isFinite(sfc.psfc) ? sfc.psfc / 100 : NaN; // Pa → hPa
+
+  const levels = [];
+  // Surface (2 m / 10 m) as the base of the profile.
+  if (Number.isFinite(sfc.t2)) {
+    const t2 = sfc.t2 - 273.15;
+    let td2;
+    if (Number.isFinite(sfc.d2)) td2 = sfc.d2 - 273.15;
+    else if (Number.isFinite(sfc.rh2)) td2 = dewFromRH(t2, sfc.rh2);
+    pushColumnLevel(levels, Number.isFinite(sfcP) ? sfcP : raw[0].p, sfcZ, t2, td2, sfc.u10, sfc.v10);
+  }
+  // Pressure levels above the ground.
+  for (const o of raw) {
+    if (Number.isFinite(sfcP) && o.p >= sfcP) continue; // below ground
+    const Tc = o.TMP - 273.15;
+    const td = Number.isFinite(o.RH) ? dewFromRH(Tc, o.RH) : Tc - 30;
+    pushColumnLevel(levels, o.p, o.HGT, Tc, td, o.UGRD, o.VGRD);
+  }
+  if (levels.length < 3) throw new Error(`${src.label} sounding column was too sparse to plot.`);
+
+  levels.sort((a, b) => b.p - a.p); // surface → top
+  for (const lv of levels) lv.zAGL = lv.z - sfcZ;
+
+  const cape = Number.isFinite(sfc.cape) ? sfc.cape : NaN;
+  // GRIB CIN is a negative J/kg; params/panel expect a positive magnitude.
+  const cin = Number.isFinite(sfc.cin) ? Math.max(0, -sfc.cin) : NaN;
+
+  const profile = { lat, lon, validTime, sfcZ, sfcP, levels, cape, cin, li: NaN };
+  profile.params = computeParams(profile);
+  profile.modelLabel = src.label;
+  return profile;
+}
 
 // ---------------------------------------------------------------------------
 // Meteorology
