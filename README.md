@@ -52,17 +52,14 @@ the radar imagery — entirely client-side.
   day 3 offers **Categorical** and combined severe **Probability**; days 4–8 show
   the extended **Probability** outlook. The translucent risk fill sits beneath the
   radar (live warnings still read on top) while the outline stays above it.
-- **Data smoothing** (optional, off by default): a **Smooth data** toggle that
-  switches the per-pixel lookup in the radar, satellite and model/MRMS shaders
-  from nearest-neighbour to an in-shader interpolation, blending neighbouring
-  gates/cells for the soft, high-res look — without ever rasterising, so it stays
-  resolution-independent at any zoom. The kernel is matched to each source's
-  effective resolution: fine grids (single-site radar, the max-pooled MRMS mosaic)
-  use **hermite-smoothed bilinear**, while the coarser grids whose cells would
-  otherwise stay visible (the ~3 km weather models, ~2 km GOES ABI) use a wider
-  **bicubic B-spline** low-pass so their blocks dissolve into a solid wash. Left
-  off, every source keeps its crisp, native-resolution pixels (no auto smoothing);
-  the choice is remembered.
+- **Data smoothing** (optional, off by default): a **Smoothing** slider with four
+  stops — **None · Low · Medium · High** — that controls an in-shader Gaussian
+  low-pass on the per-pixel lookup in the radar, satellite and model/MRMS shaders.
+  At *None* every source keeps its crisp, native-resolution pixels (nearest-
+  neighbour, no auto smoothing); *Low → High* widen the Gaussian's σ so neighbouring
+  gates/cells blend into an increasingly soft, high-res wash that dissolves even the
+  coarse ~3 km model / ~2 km GOES ABI blocks. It never rasterises, so it stays
+  resolution-independent at any zoom, and the chosen level is remembered.
 - **Split-cut aware product selection**: modern VCPs split the Doppler moments
   (VEL/SW) and dual-pol moments (ρHV/ZDR/φDP) into separate sweeps at nearly the
   same elevation. For the chosen product the viewer renders whichever sweep
@@ -208,10 +205,9 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
   hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
   the right rail like radar elevation tilts.
-- **Point soundings** (`js/sounding.js`): in HRRR/models mode, the **⊙ Sounding**
-  map tool (in the top-right toolbar, and selectable in the mobile dock's tool
-  slot — both shown only when models is the active source) opens a full-screen,
-  mobile-first briefing for the column under the map center:
+- **Point soundings** (`js/sounding.js`): in models mode, **right-click** (desktop)
+  or **long-press** (mobile) anywhere on the map to open a full-screen, mobile-first
+  briefing for the column under that point:
   - a proper **Skew-T / log-P** with dry & moist adiabats, mixing-ratio lines,
     skewed isotherms, temperature/dewpoint traces, a lifted surface-parcel path
     with **CAPE/CIN shading**, and wind barbs up the right margin;
@@ -223,14 +219,21 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     Bunkers right mover), and the STP/SCP/EHI composites — all computed in the
     browser from the profile.
 
-  A *point* sounding is the one place the decode-it-yourself path can't reach:
-  GRIB2 complex packing with spatial differencing can't be subset to a single
-  grid cell, so reading one column from the wrfprs file would mean downloading
-  the whole ~130 MB file per tap. Instead the profile comes from the
-  CORS-enabled **Open-Meteo HRRR point API** (`models=gfs_hrrr`) — one small
-  JSON request, pinned to the displayed run's valid hour — and every diagram and
-  derived parameter is then computed locally (parcel theory, Bunkers motion,
-  helicity and the SPC composites), in the same spirit as the rest of the app.
+  The profile source depends on the selected model:
+  - **HRRR / GFS** come from the CORS-enabled **Open-Meteo point API**
+    (`gfs_hrrr` / `gfs_global`) — one small JSON request per column.
+  - **NAM / NAM Nest / RAP**, which Open-Meteo doesn't serve a browser-reachable
+    column for, are built straight from the model's **own GRIB2** (`loadModelColumn`
+    in `js/models.js`): each pressure-level field (T, RH, height, U/V) is pulled
+    with an `.idx`-guided byte-range request and **point-sampled** at the map
+    centre — projecting the tap into the model's native Lambert grid rather than
+    resampling the whole field — so the sounding reflects the actual model. (A full
+    grid column avoids downloading the ~130 MB file: the fields are fetched
+    concurrently and a progress percentage is shown while they load.)
+
+  Either way the column is pinned to the displayed run's valid hour, and every
+  diagram and derived parameter is then computed locally (parcel theory, Bunkers
+  motion, helicity and the SPC composites), in the same spirit as the rest of the app.
 
 ## Source switching, overlay and playback
 
@@ -239,11 +242,17 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   **Radar overlay** toggle is switched on — then the live radar is drawn on top
   of the other source.
 - **Playback** works for every source: it loops recent radar volumes, MRMS
-  frames or satellite scenes, and steps through a model run's **forecast hours**.
-  Each frame is loaded into a compact GPU-ready payload and cached, so a loop
-  scrubs instantly without holding the (often >100 MB) raw decoded fields. The
-  number of frames a loop preloads is adjustable (the **Playback frames** slider,
-  default 5).
+  frames or satellite scenes, and steps through a model run's **forecast hours** —
+  for models the scrubber spans the **entire selected run** (every forecast hour
+  out to its max lead time), not just a fixed window. Each frame is loaded into a
+  compact GPU-ready payload and cached, so a loop scrubs instantly without holding
+  the (often >100 MB) raw decoded fields.
+- **Progressive loading**: the scrubber appears immediately and frames stream in
+  with bounded concurrency rather than blocking on the whole loop. The track shows
+  a **green progress bar** — each frame's slice turns green as it finishes loading
+  (grey = still loading) — and you can play or scrub across the already-loaded
+  frames while the rest arrive. For radar/MRMS/satellite the loop length is the
+  **Playback frames** slider (default 5); models always cover the full run.
 
 ## Map tools
 
