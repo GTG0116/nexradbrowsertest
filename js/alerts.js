@@ -508,19 +508,7 @@ export class AlertsController {
     // Tornado Warning inside a Tornado Watch inside a Flash Flood Warning). Pass
     // every feature under the cursor so the briefing can offer arrows to cycle
     // through all the alerts active at that one location.
-    const openFromEvent = (e) => {
-      // If a radar-site dot sits on top of this alert polygon, the dot owns the
-      // tap — selecting that radar — so don't also pop an alert briefing. (The
-      // 'sites' layer only exists in radar mode; guard the query accordingly.)
-      if (map.getLayer && map.getLayer('sites')) {
-        const onSite = map.queryRenderedFeatures(e.point, { layers: ['sites'] });
-        if (onSite && onSite.length) return;
-      }
-      const feats = e.features || [];
-      if (!feats.length) return;
-      const ids = feats.map((f) => f.properties.id);
-      this.openPreview(ids[0], ids);
-    };
+    const openFromEvent = (e) => this._openAlertFromEvent(e.target, e);
     map.on('click', 'alerts-fill', openFromEvent);
     map.on('click', 'alerts-line', openFromEvent);
 
@@ -573,13 +561,39 @@ export class AlertsController {
     for (const m of this.mirrors) apply(m);
   }
 
+  // Open the compact alert preview for the alert(s) under a click, from any map
+  // (the main scope or a split-view pane). Shared so every pane behaves the same.
+  _openAlertFromEvent(map, e) {
+    // While a click-consuming map tool is active (storm/measure/draw), the tap is
+    // meant for that tool, not for opening an alert briefing.
+    if (this.els.suppressClick && this.els.suppressClick()) return;
+    // If a radar-site dot sits on top of this alert polygon, the dot owns the tap
+    // (the 'sites' layer only exists on the main map in radar mode).
+    if (map.getLayer && map.getLayer('sites')) {
+      const onSite = map.queryRenderedFeatures(e.point, { layers: ['sites'] });
+      if (onSite && onSite.length) return;
+    }
+    const feats = e.features || [];
+    if (!feats.length) return;
+    const ids = feats.map((f) => f.properties.id);
+    this.openPreview(ids[0], ids);
+  }
+
   // Register a second map that should show the same alert polygons, and prime it
   // with the current features. Safe to call again after the mirror's style is
   // reloaded (e.g. a basemap switch rebuilds its empty `alerts` source) — it
-  // re-pushes the latest features without duplicating the registration.
+  // re-pushes the latest features without duplicating the registration. Also
+  // wires click handlers (once) so clicking an alert in the pane opens the same
+  // preview popup the main scope does.
   addMirror(map) {
     if (!map) return;
     if (!this.mirrors.includes(map)) this.mirrors.push(map);
+    if (!map.__alertClickBound) {
+      map.__alertClickBound = true;
+      const open = (e) => this._openAlertFromEvent(map, e);
+      map.on('click', 'alerts-fill', open);
+      map.on('click', 'alerts-line', open);
+    }
     const src = map.getSource && map.getSource('alerts');
     if (src) src.setData({ type: 'FeatureCollection', features: this._lastFeatures });
   }
