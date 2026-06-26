@@ -917,6 +917,10 @@ export class AlertsController {
     this._setGroup(id, group);
 
     document.querySelector('.app').classList.add('alert-mode');
+    document.querySelector('.app').classList.toggle(
+      'alert-split-mode',
+      !!document.querySelector('.map-wrap.split')
+    );
     this.els.detail.hidden = false;
     this.renderDetail();
     this._fitTo(this.selectedId);
@@ -952,7 +956,7 @@ export class AlertsController {
     this.group = [];
     this.groupIndex = 0;
     this.els.detail.hidden = true;
-    document.querySelector('.app').classList.remove('alert-mode');
+    document.querySelector('.app').classList.remove('alert-mode', 'alert-split-mode');
     setTimeout(() => this.map.resize(), 60);
   }
 
