@@ -25,7 +25,7 @@ uniform sampler2D u_lut;
 uniform float u_ni, u_nj;
 uniform float u_lon1, u_lat1, u_di, u_dj;
 uniform float u_steps, u_opacity;
-uniform float u_smooth;          // 0 = nearest, 1 = hermite-bilinear, 2 = bicubic
+uniform float u_smooth;          // 0 = none, 1 = low, 2 = medium, 3 = high (Gaussian)
 const float PI = 3.141592653589793;
 
 // Decode one grid cell to vec2(t, valid), t in [0,1]. Missing cells (code 0)
@@ -38,24 +38,11 @@ vec2 cellValue(float ci, float cj) {
   return vec2((code - 1.0) / 65534.0, 1.0);
 }
 
-// Cubic B-spline weights for the four taps at offsets -1,0,1,2 around fraction t.
-// (B-spline, not Catmull-Rom: it low-pass *smooths* rather than interpolating, so
-// coarse grids — model / satellite cells — blur into a solid wash instead of
-// reading as blocks, while still tracking the field.) The four weights sum to 1.
-vec4 cubicW(float t) {
-  float t2 = t * t, t3 = t2 * t;
-  return vec4(1.0 - 3.0 * t + 3.0 * t2 - t3,
-              4.0 - 6.0 * t2 + 3.0 * t3,
-              1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3,
-              t3) / 6.0;
-}
-// Pick a vec4 component by index without dynamic indexing (unsupported on some
-// WebGL1 GPUs).
-float pick(vec4 v, int i) {
-  if (i == 0) return v.x;
-  if (i == 1) return v.y;
-  if (i == 2) return v.z;
-  return v.w;
+// Gaussian sigma (in cell widths) for each smoothing level. Level 0 is nearest;
+// 1/2/3 (low/medium/high) widen the blur so a single slider spans crisp pixels
+// → a heavy wash that dissolves even coarse model cells.
+float smoothSigma(float level) {
+  return level < 1.5 ? 0.6 : (level < 2.5 ? 1.1 : 1.8);
 }
 
 void main() {
@@ -70,43 +57,22 @@ void main() {
     vec2 cv = cellValue(floor(fi), floor(fj));   // NEAREST: crisp cell
     if (cv.y < 0.5) discard;                      // missing
     t = cv.x;
-  } else if (u_smooth < 1.5) {
-    // Bilinear interpolation in (i, j) cell space. Cell centres sit at integer
-    // indices, so shifting by -0.5 lands a sample's neighbours on the corners.
-    float ic = fi - 0.5, jc = fj - 0.5;
-    float i0 = floor(ic), fi2 = ic - i0;
-    float j0 = floor(jc), fj2 = jc - j0;
-    // Hermite-smooth the blend fractions (zero slope at the cell centres) so the
-    // interpolation is C1 instead of piecewise-linear: rounds off the diamond
-    // facets that make plain bilinear read "pixely", while the cell centres still
-    // hold their true value so pixels stay legible.
-    fi2 = fi2 * fi2 * (3.0 - 2.0 * fi2);
-    fj2 = fj2 * fj2 * (3.0 - 2.0 * fj2);
-    vec2 s00 = cellValue(i0,       j0);
-    vec2 s10 = cellValue(i0 + 1.0, j0);
-    vec2 s01 = cellValue(i0,       j0 + 1.0);
-    vec2 s11 = cellValue(i0 + 1.0, j0 + 1.0);
-    float w00 = (1.0 - fi2) * (1.0 - fj2) * s00.y;
-    float w10 = fi2         * (1.0 - fj2) * s10.y;
-    float w01 = (1.0 - fi2) * fj2         * s01.y;
-    float w11 = fi2         * fj2         * s11.y;
-    float wsum = w00 + w10 + w01 + w11;
-    if (wsum < 1e-4) discard;                     // no valid cell nearby
-    t = (s00.x * w00 + s10.x * w10 + s01.x * w01 + s11.x * w11) / wsum;
   } else {
-    // Bicubic B-spline over the 4x4 cell neighbourhood — a genuinely wide blur,
-    // so even coarse model / satellite cells dissolve into a smooth field
-    // instead of staying visible as blocks. Weights folded with validity and
-    // renormalised so missing cells don't leak or darken the result.
-    float ic = fi - 0.5, jc = fj - 0.5;
-    float i0 = floor(ic), j0 = floor(jc);
-    vec4 wx = cubicW(ic - i0);
-    vec4 wy = cubicW(jc - j0);
+    // Gaussian low-pass over a 7x7 cell neighbourhood. Cell centres sit at
+    // integer indices in (fi-0.5, fj-0.5) space; each tap is weighted by a
+    // Gaussian of its distance from the sample point AND by the cell's validity,
+    // then renormalised so missing cells neither leak nor darken the result.
+    float sigma = smoothSigma(u_smooth);
+    float pc = fi - 0.5, pr = fj - 0.5;
+    float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
     float st = 0.0, sw = 0.0;
-    for (int m = 0; m < 4; m++) {
-      for (int n = 0; n < 4; n++) {
-        vec2 cv = cellValue(i0 + float(n) - 1.0, j0 + float(m) - 1.0);
-        float w = pick(wx, n) * pick(wy, m) * cv.y;
+    for (int m = -3; m <= 3; m++) {
+      for (int n = -3; n <= 3; n++) {
+        float ci = cn + float(n), cj = rn + float(m);
+        vec2 cv = cellValue(ci, cj);
+        float dx = ci - pc, dy = cj - pr;
+        float w = exp(-(dx * dx + dy * dy) * inv2s2) * cv.y;
         st += cv.x * w;
         sw += w;
       }
@@ -199,11 +165,8 @@ export function createGridLayer(id = 'mrms') {
 
     map: null, gl: null, program: null, quad: null, dataTex: null, lutTex: null,
     has: false, pending: null, uni: null, quadVerts: null, steps: 1024, opacity: 0.9,
-    smooth: false,
-    // Smoothing kernel when `smooth` is on: 2 = bicubic for the coarse model
-    // grids (their ~3 km cells stay visible under mere bilinear), 1 = hermite-
-    // bilinear for the fine, max-pooled MRMS grid (already smooth at level 1).
-    smoothLevel: id === 'models' ? 2 : 1,
+    // Smoothing level: 0 none, 1 low, 2 medium, 3 high (Gaussian sigma in shader).
+    smooth: 0,
 
     onAdd(map, gl) {
       this.map = map;
@@ -269,7 +232,7 @@ export function createGridLayer(id = 'mrms') {
 
     setOpacity(o) { this.opacity = o; if (this.map) this.map.triggerRepaint(); },
 
-    setSmooth(on) { this.smooth = !!on; if (this.map) this.map.triggerRepaint(); },
+    setSmooth(level) { this.smooth = +level || 0; if (this.map) this.map.triggerRepaint(); },
 
     clear() { this.has = false; this.pending = null; if (this.map) this.map.triggerRepaint(); },
 
@@ -297,7 +260,7 @@ export function createGridLayer(id = 'mrms') {
       gl.uniform1f(this.u.u_dj, U.dj);
       gl.uniform1f(this.u.u_steps, this.steps);
       gl.uniform1f(this.u.u_opacity, this.opacity);
-      gl.uniform1f(this.u.u_smooth, this.smooth ? this.smoothLevel : 0.0);
+      gl.uniform1f(this.u.u_smooth, this.smooth);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.disable(gl.DEPTH_TEST);
