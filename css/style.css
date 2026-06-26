@@ -899,7 +899,7 @@ input[type='range']::-moz-range-thumb {
 /* ---------------- Alert briefing (full-screen) ---------------- */
 .app.alert-mode .topbar,
 .app.alert-mode .rail,
-.app.alert-mode .legend,
+.app.alert-mode .stage > .legend,
 .app.alert-mode .footer {
   display: none;
 }
@@ -1186,6 +1186,18 @@ input[type='range']::-moz-range-thumb {
   color: var(--warn);
 }
 
+/* In split view the briefing must not swallow the first pane — keep it to about
+   half a pane so the panel below it (and the whole second pane) stay visible,
+   which is the entire point of the split. */
+.app.alert-split-mode .alert-detail-panel {
+  width: clamp(232px, 26vw, 320px) !important;
+  max-width: calc(50vw - 24px) !important;
+}
+.app.alert-split-mode .alert-close {
+  left: calc(clamp(232px, 26vw, 320px) + 12px) !important;
+  right: auto !important;
+}
+
 .alert-sec {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -1278,6 +1290,67 @@ input[type='range']::-moz-range-thumb {
   letter-spacing: 1px;
   color: var(--accent);
   margin-bottom: 10px;
+}
+
+/* SPC Mesoscale Discussion briefing/popup extras (reuse the alert chrome). */
+.md-peak-title {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 8px 0 5px;
+}
+.md-scale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px 0 14px;
+  font-size: 10px;
+  color: var(--ink-dim);
+}
+.md-scale-bar {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #f4e7c1, #e8b04e, #e2772e, #d8392a, #a3174a, #e600e6);
+}
+.md-concern {
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-edge);
+  border-left: 3px solid #b32fe0;
+  background: rgba(179, 47, 224, 0.1);
+}
+.md-concern-line {
+  font-weight: 700;
+  color: #fff;
+}
+.md-watchprob {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 6px;
+}
+.md-watchprob span {
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.md-watchprob b {
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+}
+.md-source {
+  margin-top: 8px;
+}
+.md-source a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12px;
+}
+.md-source a:hover {
+  text-decoration: underline;
 }
 .alert-issued {
   font-family: 'JetBrains Mono', monospace;
@@ -1421,8 +1494,10 @@ input[type='range']::-moz-range-thumb {
   .legend {
     position: absolute;
     top: 8px;
-    left: 8px;
-    right: 8px;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    width: min(440px, calc(100vw - 16px));
     z-index: 650;
     margin: 0;
     transition: opacity 0.2s ease;
@@ -1497,6 +1572,11 @@ input[type='range']::-moz-range-thumb {
     max-width: 880px;
     margin: 0 auto;
     padding: 14px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+    /* The upward fade only reads as a soft vignette on a phone's short viewport;
+       on iPad/desktop it becomes a conspicuous dark band across the map, so drop
+       it here. Each dock control carries its own background, so legibility over
+       the map is unaffected. */
+    background: none;
   }
   .dock-status {
     padding: 12px 18px;
@@ -1595,11 +1675,13 @@ input[type='range']::-moz-range-thumb {
     width: 460px;
     max-width: 60vw;
   }
-  /* Keep the floating legend a compact, left-anchored card rather than a
-     full-bleed bar across a wide monitor. */
+  /* Keep the floating legend a compact, centered card rather than a full-bleed
+     bar across a wide monitor. */
   .legend {
     font-size: 12px;
+    left: 50%;
     right: auto;
+    transform: translateX(-50%);
     width: min(440px, 60vw);
   }
 }
@@ -1643,6 +1725,19 @@ input[type='range']::-moz-range-thumb {
 .mobile-dock[hidden],
 .playback-bar[hidden] {
   display: flex !important;
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
+}
+/* When the expanded controls (settings sheet) slide up over the bottom of the
+   screen, the dock would otherwise sit right behind/below them. Fade it out with
+   the sheet so the expanded controls own the bottom UI, then bring it back on
+   close — the same fade the [hidden] state uses. */
+.app.sheet-open .mobile-dock {
   opacity: 0;
   transform: translateY(10px);
   pointer-events: none;
@@ -1996,6 +2091,54 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
   min-width: 96px;
   text-align: right;
+}
+
+/* ---- Loop scrubber docked into the bottom dock ----
+   The playback bar lives inside the dock (moved there in JS). While a loop runs
+   it stands in for just the product chip + the dock's own play button; the
+   inspect and tools buttons stay put beside it, so the slider "only takes up the
+   part of the bottom UI that shows the current product and the play button". */
+.mobile-dock > .playback-bar {
+  position: static;
+  flex: 1 1 auto;
+  min-width: 0;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  z-index: auto;
+}
+/* When idle the docked bar must reserve no row space. The shared [hidden] rule
+   keeps it laid out (display:flex) for its fade; inside the dock that would shove
+   the buttons around, so collapse it outright instead. */
+.mobile-dock > .playback-bar[hidden] {
+  display: none !important;
+}
+/* The product chip and the dock's play button yield their slot to the scrubber. */
+.app.playing .dock-status,
+.app.playing #playBtn {
+  display: none !important;
+}
+/* The frame label would crowd out the scrub track on a phone — show it only once
+   there's room (it duplicates info the scrubber already conveys visually). */
+.mobile-dock > .playback-bar .pb-label {
+  display: none;
+}
+@media (min-width: 520px) {
+  .mobile-dock > .playback-bar .pb-label {
+    display: block;
+    min-width: 0;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 /* ---------------- Settings sheet ---------------- */
@@ -2595,12 +2738,63 @@ body.storm-active .playback-bar {
 .map-wrap.split #map2 {
   left: 50%;
 }
+.map-wrap.split + .legend:not(.weather-card) {
+  display: none;
+}
+/* The single screen-centre picker belongs to the whole-stage (non-split) view.
+   In split, each pane gets its own picker (appended inside #map / #map2), so hide
+   this one and let the per-pane crosshairs below stand in. */
+.map-wrap.split > .weather-center-picker {
+  display: none !important;
+}
+/* Per-pane local-weather crosshair: centred within its own pane (its offset
+   parent is #map / #map2, both position:absolute), giving one marker per panel
+   instead of a single one floating over the seam. */
+.split-weather-picker {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 641;
+}
+/* In split the conditions card can't sit top-centre — it lands on top of the
+   second pane's legend. Drop it to the bottom centre, clear of both pane legends
+   (top of each pane) and above the dock. */
+.map-wrap.split + .legend.weather-card {
+  top: auto;
+  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  z-index: 660;
+}
+.split-pane-legend {
+  top: 10px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: min(330px, calc(100% - 24px));
+  padding: 8px 10px;
+  z-index: 620;
+  pointer-events: none;
+}
+.split-pane-legend .legend-title {
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  margin-bottom: 6px;
+}
+.split-pane-legend .legend-bar {
+  height: 10px;
+}
+.split-pane-legend .legend-ticks {
+  font-size: 9px;
+  margin-top: 3px;
+}
 /* Each pane carries a badge naming it, showing its current product, and whether
    it's the pane the bottom UI is driving. Click a panel (or its badge) to aim
    the controls at it. */
 .split-badge {
   position: absolute;
-  top: 10px;
+  top: 72px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 610;
@@ -2695,7 +2889,7 @@ body.storm-active .playback-bar {
   }
   /* Pane badges drop to the inner edge of each stacked pane so they don't
      collide with the nav control / toolbar at the top. */
-  .map-wrap.split #map .split-badge { top: 8px; }
+  .map-wrap.split #map .split-badge { top: 70px; }
   .map-wrap.split #map2 .split-badge { top: auto; bottom: 8px; }
 }
 
@@ -2716,7 +2910,11 @@ body.storm-active .playback-bar {
   }
   .map-wrap.split #map .split-badge,
   .map-wrap.split #map2 .split-badge {
+<<<<<<< HEAD
+    top: 72px;
+=======
     top: 10px;
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
     bottom: auto;
   }
 
