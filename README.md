@@ -23,6 +23,14 @@ the radar imagery — entirely client-side.
 - **WSR-88D Level II decoding** of Message 31 (`js/level2.js`): base reflectivity
   (REF), velocity (VEL), spectrum width (SW), correlation coefficient (ρHV),
   differential reflectivity (ZDR) and differential phase (φDP).
+- **NEXRAD Level III products** (`js/level3.js`): the same single-site picker also
+  offers four RPG-derived products from the open `unidata-nexrad-level3` bucket —
+  **Echo Tops** (EET) and the dual-pol QPE accumulations **1-hr** (DAA), **3-hr**
+  (DU3) and **Storm-Total** (DTA). They're "Digital Radial Data Array" products
+  (one byte per bin, bzip2-compressed symbology); the byte→value transform is the
+  RPG's own per-frame scale/offset, which lines up exactly with the radar shader's
+  `(code − offset) / scale`, so each decodes into a synthetic one-tilt sweep and
+  draws through the existing GPU polar layer with no new renderer.
 - **GPU polar rendering** (`js/radarLayer.js`): a custom Mapbox WebGL layer
   samples the polar gate data per screen pixel with a nearest-neighbour lookup,
   every frame, over an **interactive Mapbox GL JS map**. Because nothing is
@@ -45,6 +53,33 @@ the radar imagery — entirely client-side.
   second, cross-radial pass then snaps any mis-folded single-radial "beam" back
   into azimuthal continuity, so a stuck radial no longer paints a coloured spoke
   across the sweep.
+<<<<<<< HEAD
+- **Forecast outlooks** (optional, `js/outlooks.js`): a single overlay that draws
+  any of several official outlooks — pick the **product** then a **detail**:
+  - **SPC Convective** — days 1–8, drawn straight from SPC's GeoJSON with the
+    official risk colours. Days 1 & 2 offer **Categorical** plus probabilistic
+    **Tornado / Wind / Hail**; day 3 **Categorical** + combined **Probability**;
+    days 4–8 the extended **Probability**.
+  - **SPC Fire Weather** — day 1 & 2 critical fire-weather areas and dry-thunderstorm
+    areas.
+  - **SPC Mesoscale Discussions** — the active MD polygons, labelled by number.
+    Click one for a warning-style popup (the discussion's *Concerning* line, watch
+    probability, and Most Probable Peak Tornado/Wind/Hail intensities with a
+    Min→Max scale bar); "View full briefing" opens the same full-screen layout the
+    NWS alerts use, with that probabilistic header in place of the alert tags and
+    the parsed discussion text in place of the alert text (fetched and parsed from
+    the SPC product page, `parseMdText` in `js/outlooks.js`).
+  - **WPC Excessive Rainfall** — the day 1–5 Excessive Rainfall Outlook
+    (Marginal / Slight / Moderate / High).
+  - **CPC Temperature / Precipitation** — the 6–10 and 8–14 day probability outlooks.
+
+  The SPC convective feed ships its own colours/labels; the others come from NOAA's
+  ArcGIS map service as GeoJSON and carry only a code (a `dn` level, or a CPC
+  `cat`+`prob`), which `outlooks.js` maps to the official colour/label before the
+  shared fill/line layers read it. A legend is built from the areas in view; the
+  translucent fill sits beneath the radar (live warnings still read on top) while
+  the outline stays above it.
+=======
 - **SPC convective outlook** (optional): an overlay of the Storm Prediction
   Center's outlooks for **days 1–8**, drawn straight from SPC's GeoJSON with the
   official risk colours and a legend built from the areas in view. Days 1 & 2
@@ -52,6 +87,7 @@ the radar imagery — entirely client-side.
   day 3 offers **Categorical** and combined severe **Probability**; days 4–8 show
   the extended **Probability** outlook. The translucent risk fill sits beneath the
   radar (live warnings still read on top) while the outline stays above it.
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
 - **Data smoothing** (optional, off by default): a **Smoothing** slider with four
   stops — **None · Low · Medium · High** — that controls an in-shader Gaussian
   low-pass on the per-pixel lookup in the radar, satellite and model/MRMS shaders.
@@ -95,6 +131,13 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   for the IR bands), and resample every band onto the common 2 km fixed grid so
   RGB recipes line up. The visible AHI bands are renumbered to the matching GOES
   ABI channels (AHI has no 1.37 µm cirrus band).
+- **Off-thread decode** (`js/satellite.worker.js`, driven by `js/satClient.js`):
+  the whole GOES/Himawari fetch + decompress + resample runs in a Web Worker and
+  transfers the finished channel buffers back, so loading a frame never freezes
+  the page — the pure-JS bzip2 of a Himawari full disk's ten segments would
+  otherwise stall the UI for seconds. The worker keeps the few most-recent scenes
+  (with their decode source) so a product switch adds a band without re-downloading,
+  and a Himawari scene reconstructs its metadata straight from the frame key.
 - **A from-scratch HDF5 / NetCDF-4 reader** (`js/hdf5.js`): superblock v2/v3,
   object-header v2 with continuation blocks, dense link/attribute storage via
   **fractal heaps**, chunked data indexed by a v1 B-tree, and the **shuffle +
@@ -110,8 +153,10 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   temperature). A colour enhancement (on by default, toggleable) gives the
   infrared window channels the classic rainbow cloud-top scale and the
   water-vapour channels a dedicated WV enhancement. Plus **RGB composites**:
-  True Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and
-  Night Microphysics.
+  GeoColor (daytime true colour crossfaded with a night-time IR cloud rendering
+  across the solar terminator, shaded per pixel from the scene's scan time), True
+  Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and Night
+  Microphysics.
 - **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
   inverts web-mercator to lon/lat and runs the geostationary fixed-grid navigation
   *backwards* per pixel, so the imagery stays crisp at any zoom.
@@ -124,15 +169,19 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   grayscale 8/16-bit *and* the RGB-packed 24-bit fields (e.g. lightning
   probability). Super-res products (AzShear, rotation tracks) on the 0.005° grid
   are coloured in their native 10⁻³ s⁻¹ units.
-- **Products**: Composite Reflectivity, AzShear (instant rotation), 1/6/24-hr
-  rotation tracks, MESH (max hail size), POSH (severe-hail probability), 30-min
-  CG-lightning probability, and 1/6/24-hr precip totals.
+- **Products**: Composite / low-level / lowest-altitude reflectivity and
+  reflectivity at the 0 °C and −20 °C isotherms; enhanced & 18/50 dBZ echo tops;
+  vertically integrated liquid, VIL density and vertically integrated ice; AzShear
+  (0-2 km instant rotation and 3-6 km mid-level), 1/6/24-hr rotation tracks; MESH
+  (instant and 24-hr max hail size), POSH (severe-hail probability), Severe Hail
+  Index; 30/60-min CG-lightning probability; precip rate and 1/3/6/12/24/48/72-hr
+  and storm-total (since 12Z) precip accumulations.
 - **GPU plate-carrée layer** (`js/gridLayer.js`) draws the 7000×3500 CONUS grid
   (max-pooled to a GPU-friendly texture) with per-product colour tables.
 
-### Weather models — HRRR, NAM, NAM Nest, RAP, GFS
+### Weather models — HRRR, NAM, NAM Nest, RAP, GFS, AI GFS, HRRRCast
 
-- **Five models** read straight from their NODD GRIB2 buckets on S3 and picked
+- **Seven models** read straight from their NODD GRIB2 buckets on S3 and picked
   from the **Model** dropdown:
   - **HRRR** (3 km CONUS, `noaa-hrrr-bdp-pds`) — hourly cycles.
   - **NAM** (12 km CONUS, `noaa-nam-pds`) — 00/06/12/18z, hourly to F36 then
@@ -143,6 +192,14 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   - **GFS** (0.25° global, `noaa-gfs-bdp-pds`) — 00/06/12/18z, hourly to F120
     then 3-hourly to F384; a true lat/lon grid, recentered to −180…180 for the
     CONUS-focused map.
+  - **AI GFS / GraphCast** (0.25° global, `noaa-nws-graphcastgfs-pds`) —
+    00/06/12/18z, 6-hourly to F384. NOAA's GraphCast run posts pressure-level
+    mass/wind fields only, so it offers just the upper-air winds and
+    temperatures (and no point sounding).
+  - **HRRRCast** (3 km CONUS, AI, `noaa-gsl-experimental-pds`) — GSL's
+    experimental ML model on the HRRR grid; hourly cycles to F48. Carries the
+    surface staples, upper-air winds/temps and a surface-based severe subset
+    (no point sounding).
 - **Per-model product menus**: each model advertises only the fields its GRIB2
   output actually carries (`MODEL_PRODUCT_SUPPORT` in `js/models.js`), so the
   picker hides products a model can't supply — e.g. NAM drops the 90/255 mb-layer
@@ -162,14 +219,21 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     0-1/0-3 km storm-relative helicity, 0-1/0-6 km bulk shear, storm motion,
     significant-tornado / supercell / 0-1 & 0-3 km energy-helicity composites,
     and lightning flash density.
+  - *Winter* — 6/12/24-hr and total snowfall at a fixed 10:1 ratio and at the
+    temperature-dependent Kuchera ratio (from accumulated snow water equivalent
+    and the column's warmest low/mid-level temperature), plus total frozen-precip
+    ("ice") and total freezing-rain accretion. HRRR and RAP carry the full set;
+    NAM has the snow products only (no frozen-precip / freezing-rain fields).
   - Rather than pull the ~150–400 MB cycle file, the viewer reads the tiny
     sidecar `.idx` byte index, finds the requested record(s), and issues a single
     HTTP **Range** request for just that message (a few hundred KB).
 - **Derived fields** (`js/models.js`): one product can combine several GRIB
   messages after decoding — wind speed/shear/storm-motion from U/V magnitudes,
   6/24-hr precip from run-total differences, 700-500 mb lapse rate from layer
-  temperatures and thicknesses, LCL height AGL, and the STP/SCP/EHI composites
-  from CAPE, helicity, shear, LCL and CIN (standard SPC fixed-layer formulas).
+  temperatures and thicknesses, LCL height AGL, the STP/SCP/EHI composites
+  from CAPE, helicity, shear, LCL and CIN (standard SPC fixed-layer formulas),
+  and 10:1 / Kuchera snowfall from accumulated snow water equivalent times a fixed
+  or temperature-dependent snow-to-liquid ratio.
 - **Wind-barb + height overlays** (`js/modelOverlays.js`): upper-air charts add a
   Mapbox symbol layer of canvas-rendered wind barbs (rotated to the wind, kept at
   a constant screen size and decluttered as you zoom) and geopotential-height
@@ -332,13 +396,18 @@ js/app.js                         controller: UI, state, interaction
 
 ## Running it
 
-It is a static site — serve the folder over HTTP (ES modules and module workers
-require `http(s)://`, not `file://`):
+Serve the folder over HTTP (ES modules and module workers require `http(s)://`,
+not `file://`). Use the included Node server when you want RRFS, because it also
+provides the Range-capable `/proxy?url=...` endpoint that RRFS needs:
 
 ```bash
-python3 -m http.server 8080
+node server.js
 # then open http://localhost:8080/
 ```
+
+If you keep serving the app from another local static server such as
+`http://localhost:8000/`, leave `node server.js` running too; RRFS requests will
+use `http://localhost:8080/proxy?url=...` for the byte-range proxy.
 
 Pick a radar site, choose a product, and scrub through the day's volume scans.
 Toggle **LIVE** to auto-load the newest scan as it arrives. Scroll to zoom, drag
