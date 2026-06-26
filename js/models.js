@@ -14,6 +14,31 @@
 import { decodeGrib2 } from './grib2.js';
 import { makeScale } from './products.js';
 
+// Optional CORS proxy for buckets that don't advertise CORS (RRFS — see
+// `needsProxy` below). Left empty, those models talk to AWS directly, which a
+// browser will block; set a Range-capable proxy prefix here to enable them. The
+// proxy must forward the `Range` request header and return 206 Partial Content,
+// since model loads fetch single GRIB messages by byte range.
+function defaultModelProxy() {
+  const loc = window.location;
+  const local = /^(localhost|127\.0\.0\.1|::1)$/.test(loc.hostname);
+  if (local && loc.port && loc.port !== '8080') {
+    const host = loc.hostname === '::1' ? '[::1]' : loc.hostname;
+    return `${loc.protocol}//${host}:8080/proxy?url=`;
+  }
+  return `${loc.origin}/proxy?url=`;
+}
+let modelProxy = defaultModelProxy();
+export function setModelProxy(p) {
+  modelProxy = p || '';
+}
+// The fetch URL for a bucket key, routed through the proxy for `needsProxy`
+// models when one is configured (otherwise the bare bucket URL).
+function modelUrl(model, key) {
+  const full = `${model.bucket}/${key}`;
+  return model.needsProxy && modelProxy ? modelProxy + encodeURIComponent(full) : full;
+}
+
 // Available models, each backed by a CORS-enabled NODD AWS bucket (listing, GET
 // and Range requests). Per-model fields:
 //   keysFor(day, cycle, fhour, file) → { grib, idx } object keys.
@@ -111,6 +136,59 @@ export const MODELS = {
       return steppedList(120, 384, 3);
     },
   },
+  aigfs: {
+    id: 'aigfs',
+    label: 'AI GFS / GraphCast (0.25° Global)',
+    bucket: 'https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 330,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `aigfs.${dayStr}/${pad(cycle)}/model/atmos/grib2/aigfs.t${pad(cycle)}z.pres.f${pad(fhour, 3)}.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // GraphCast posts pressure-level fields only, 6-hourly out to F384.
+    forecastHoursList() {
+      const out = [];
+      for (let f = 0; f <= 384; f += 6) out.push(f);
+      return out;
+    },
+  },
+  hrrrcast: {
+    id: 'hrrrcast',
+    label: 'HRRRCast (3 km CONUS, AI)',
+    bucket: 'https://noaa-gsl-experimental-pds.s3.amazonaws.com',
+    cycleStep: 1,
+    latencyMin: 120,
+    // The ensemble-mean (avg) member, on the same Lambert 3 km grid as HRRR.
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `HRRRCast/${dayStr}/${pad(cycle)}/hrrrcast.avg.t${pad(cycle)}z.pgrb2.f${pad(fhour)}`;
+      return { grib, idx: grib + '.idx' };
+    },
+    maxForecastHour() {
+      return 48;
+    },
+  },
+  rrfs: {
+    id: 'rrfs',
+    label: 'RRFS (3 km CONUS)',
+    bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
+    // The AWS RRFS bucket isn't CORS-enabled and has no CORS mirror (unlike the
+    // RAP/Azure case), so browser fetches need a Range-capable proxy via
+    // setModelProxy(); without one this model can't load in the browser.
+    needsProxy: true,
+    cycleStep: 1,
+    latencyMin: 90,
+    // Surface fields live in the 2dfld file, pressure levels in prslev.
+    keysFor(dayStr, cycle, fhour, file = 'sfc') {
+      const kind = file === 'prs' ? 'prslev' : '2dfld';
+      const grib = `rrfs_a/rrfs.${dayStr}/${pad(cycle)}/rrfs.t${pad(cycle)}z.${kind}.3km.f${pad(fhour, 3)}.conus.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // Synoptic cycles (00/06/12/18z) run out to F84; the rest to F18.
+    maxForecastHour(cycle) {
+      return cycle % 6 === 0 ? 84 : 18;
+    },
+  },
 };
 
 // Build a forecast-hour list: hourly out to `hourlyMax`, then every `step` hours
@@ -192,6 +270,26 @@ const PRECIP_STOPS = [
   [1.00, [150, 40, 130]],
 ];
 const precipScale = (hiMM) => rampScale(PRECIP_STOPS.map(([f, c]) => [f * hiMM, c]));
+
+// Snowfall accumulation (depth), as fractions of the product's full-scale value.
+// Light dustings in pale blue, deepening through blue → purple → pink for the big
+// totals, following the familiar NWS snowfall look.
+const SNOW_STOPS = [
+  [0.00, [219, 237, 255]], [0.04, [150, 200, 245]], [0.08, [80, 150, 230]],
+  [0.16, [40, 80, 205]], [0.28, [90, 60, 200]], [0.42, [150, 50, 190]],
+  [0.58, [185, 35, 150]], [0.72, [140, 20, 95]], [0.86, [205, 130, 165]],
+  [1.00, [240, 225, 240]],
+];
+const snowScale = (hiMM) => rampScale(SNOW_STOPS.map(([f, c]) => [f * hiMM, c]));
+
+// Ice / freezing-rain accretion (mm liquid equivalent). Pink → magenta → purple,
+// distinct from the snow palette so a wintry mix reads clearly.
+const ICE_STOPS = [
+  [0.00, [255, 215, 235]], [0.10, [255, 160, 210]], [0.25, [235, 90, 175]],
+  [0.45, [195, 40, 150]], [0.65, [145, 20, 120]], [0.85, [95, 10, 95]],
+  [1.00, [60, 0, 70]],
+];
+const iceScale = (hiMM) => rampScale(ICE_STOPS.map(([f, c]) => [f * hiMM, c]));
 
 // Upper-air temperature (K) — broad ramp covering values from 850 mb down to
 // 500 mb. Same family of colors as the surface temperature scale.
@@ -316,6 +414,69 @@ function precipWindow(hours) {
 const prs = (varName, mb) => ({ varName, level: `${mb} mb`, file: 'prs' });
 // Surface-file source descriptor.
 const sfc = (varName, level) => ({ varName, level, file: 'sfc' });
+
+// ---- Winter precipitation (snow / ice / freezing rain) ----
+// WEASD ("water equivalent of accumulated snow depth") is the liquid-equivalent
+// of snow that has fallen, posted as a run total ("0-N hour acc") just like APCP.
+// Snow *depth* is that liquid times a snow-to-liquid ratio (SLR): a fixed 10:1, or
+// the temperature-dependent Kuchera ratio. FROZR (total frozen precip) and FRZR
+// (freezing rain) are likewise run-total accumulations.
+const weasdTotal = { varName: 'WEASD', level: 'surface', acc: /^0-/ };
+const frozrTotal = { varName: 'FROZR', level: 'surface', acc: /^0-/ };
+const frzrTotal = { varName: 'FRZR', level: 'surface', acc: /^0-/ };
+// Low/mid-level temperatures (K) that bracket the warmest layer the snow falls
+// through — the input to the Kuchera ratio.
+const SNOW_TEMPS = [sfc('TMP', '2 m above ground'), prs('TMP', 925), prs('TMP', 850), prs('TMP', 700)];
+
+// Kuchera & Bentley snow-to-liquid ratio from the column's max temperature (K):
+// 12:1 at −2°C, rising steeply in the cold, falling toward 0 as the warm layer
+// approaches freezing (wet, heavy snow).
+function kucheraRatio(tmaxK) {
+  const d = 271.16 - tmaxK;
+  return tmaxK <= 271.16 ? 12 + 2 * d : Math.max(0, 12 + d);
+}
+// Liquid-equivalent (mm) over the window: the run total now, minus `hours` earlier
+// when that earlier total is present (longer lead times); floored at zero. NaN at
+// `now` propagates so gaps stay gaps. `then` is undefined at short lead times.
+const weasdDelta = (now, then) => {
+  if (Number.isNaN(now)) return NaN;
+  const w = then === undefined ? now : now - then;
+  return w > 0 ? w : 0;
+};
+// 10:1 snow depth (mm) — arrays = [weasdNow, weasdThen?].
+const tenToOneSnow = (a, i) => weasdDelta(a[0][i], a.length > 1 ? a[1][i] : undefined) * 10;
+// Kuchera snow depth (mm) — arrays = [T2m, T925, T850, T700, weasdNow, weasdThen?].
+const kucheraSnow = (a, i) => {
+  let tmax = -Infinity;
+  for (let k = 0; k < 4; k++) { const t = a[k][i]; if (Number.isFinite(t) && t > tmax) tmax = t; }
+  const w = weasdDelta(a[4][i], a.length > 5 ? a[5][i] : undefined);
+  if (Number.isNaN(w)) return NaN;
+  return w * (tmax > -Infinity ? kucheraRatio(tmax) : 10);
+};
+// Source builders: run total alone before the window opens, else now minus then.
+const snowWindow = (hours) => (fhour) =>
+  fhour > hours ? [weasdTotal, { ...weasdTotal, fhourDelta: -hours }] : [weasdTotal];
+const kucheraWindow = (hours) => (fhour) =>
+  fhour > hours ? [...SNOW_TEMPS, weasdTotal, { ...weasdTotal, fhourDelta: -hours }]
+    : [...SNOW_TEMPS, weasdTotal];
+
+// A snowfall product (depth stored in mm of snow, shown in inches). 10:1 or
+// Kuchera, over a fixed window (`hours`) or the whole run (`hours` omitted).
+function snowProduct(id, name, hiMM, ratio, hours) {
+  const isKuchera = ratio === 'kuchera';
+  const combine = isKuchera ? kucheraSnow : tenToOneSnow;
+  const sources = hours == null
+    ? () => (isKuchera ? [...SNOW_TEMPS, weasdTotal] : [weasdTotal])
+    : (isKuchera ? kucheraWindow(hours) : snowWindow(hours));
+  return {
+    ...gridProduct(id, name, snowScale(hiMM), 2.5, 'mm', { unit: 'in', factor: MM_TO_IN }),
+    combine, sources,
+  };
+}
+// An ice / freezing-rain run-total product (mm liquid equiv, shown in inches).
+function iceProduct(id, name, src, hiMM) {
+  return { ...gridProduct(id, name, iceScale(hiMM), 0.25, 'mm', { unit: 'in', factor: MM_TO_IN }), sources: () => [src] };
+}
 
 // Wind speed at a pressure level (magnitude of U/V), with wind + height overlays
 // at the same level. `hi` is the layout/contour interval for the height field.
@@ -503,6 +664,18 @@ export const MODEL_PRODUCTS = {
     combine: ehi, sources: () => [sfc('CAPE', '90-0 mb above ground'), sfc('HLCY', '3000-0 m above ground')],
   },
   LTNG: { ...gridProduct('LTNG', 'Lightning', LTNG_SCALE, 0.1, 'flash/km²'), varName: 'LTNG', level: 'entire atmosphere' },
+
+  // ---- Winter (snow / ice) ----
+  SNOW6: snowProduct('SNOW6', '6 hr Snow (10:1)', 300, '10:1', 6),
+  SNOW12: snowProduct('SNOW12', '12 hr Snow (10:1)', 460, '10:1', 12),
+  SNOW24: snowProduct('SNOW24', '24 hr Snow (10:1)', 760, '10:1', 24),
+  SNOWT: snowProduct('SNOWT', 'Total Snow (10:1)', 1000, '10:1'),
+  KUCH6: snowProduct('KUCH6', '6 hr Snow (Kuchera)', 300, 'kuchera', 6),
+  KUCH12: snowProduct('KUCH12', '12 hr Snow (Kuchera)', 460, 'kuchera', 12),
+  KUCH24: snowProduct('KUCH24', '24 hr Snow (Kuchera)', 760, 'kuchera', 24),
+  KUCHT: snowProduct('KUCHT', 'Total Snow (Kuchera)', 1000, 'kuchera'),
+  ICET: iceProduct('ICET', 'Total Ice (Frozen Precip)', frozrTotal, 50),
+  FZRA: iceProduct('FZRA', 'Total Freezing Rain', frzrTotal, 25),
 };
 
 // Categories shown as labelled groups in the product picker.
@@ -521,6 +694,10 @@ export const MODEL_CATEGORIES = [
     products: ['SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
       'SRH1', 'SRH3', 'SHEAR1', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG'],
   },
+  {
+    id: 'winter', name: 'Winter',
+    products: ['SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT', 'ICET', 'FZRA'],
+  },
 ];
 
 export const MODEL_ORDER = MODEL_CATEGORIES.flatMap((c) => c.products);
@@ -538,6 +715,9 @@ const MODEL_PRODUCT_SUPPORT = {
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH3', 'SHEAR6', 'LTNG',
+    // NAM carries WEASD accumulation + pressure-level temps (snow only; no
+    // FROZR/FRZR fields for the ice products).
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   namnest: [
     'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
@@ -552,12 +732,46 @@ const MODEL_PRODUCT_SUPPORT = {
     'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE',
     'SRH1', 'SRH3', 'SHEAR6', 'STORM', 'SCP', 'EHI1', 'EHI3', 'LTNG',
+    // RAP carries WEASD + FROZR + FRZR accumulations and pressure-level temps.
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT', 'ICET', 'FZRA',
   ],
   gfs: [
     'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'SRH3', 'STORM', 'EHI3',
+  ],
+  // GraphCast posts only pressure-level mass/wind fields (HGT/TMP/UGRD/VGRD/
+  // SPFH/VVEL) — no surface, precip, CAPE or absolute vorticity — so it can
+  // supply just the isotachs and upper-air temperatures.
+  aigfs: [
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+  ],
+  // HRRRCast carries the HRRR surface staples plus pressure-level winds/temps,
+  // but no absolute vorticity (drops VORT), no layer-parcel CAPE (only surface
+  // → no ML/MU/3 km parcels or the composites built on them), no run-total
+  // precip accumulation, lightning or winter fields. Its bulk-shear (VUCSH/
+  // VVCSH) fields decode to ~0 here, so the shear products are dropped too;
+  // storm motion (USTM/VSTM) is fine.
+  hrrrcast: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'SBCIN', 'LAPSE', 'SRH1', 'SRH3', 'STORM',
+  ],
+  // RRFS carries nearly the full HRRR set across its 2dfld (surface) and prslev
+  // (pressure) files — REFC, the layer-parcel CAPE/CIN suite, composites,
+  // run-total QPF, lightning and the frozen-precip/freezing-rain accretions.
+  // Its WEASD field isn't a run-total accumulation here, so the snow-depth
+  // products (which difference run totals) are dropped.
+  rrfs: [
+    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
+    'SRH1', 'SRH3', 'SHEAR1', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG',
+    'ICET', 'FZRA',
   ],
 };
 for (const [key, model] of Object.entries(MODELS)) {
@@ -595,6 +809,49 @@ function forecastHoursFor(model, cycle) {
   return out;
 }
 
+const RUN_PROBE_TIMEOUT_MS = 5000;
+const runProbeCache = new Map();
+
+async function headOrTinyGet(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RUN_PROBE_TIMEOUT_MS);
+  try {
+    try {
+      const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+      if (res.ok) return true;
+      if (res.status !== 405 && res.status !== 403) return false;
+    } catch (_) {
+      // Some buckets/proxies do not support or expose HEAD; a tiny ranged GET is
+      // the real browser path anyway, so fall through to that probe.
+    }
+    const res = await fetch(url, { headers: { Range: 'bytes=0-255' }, signal: ctrl.signal });
+    return res.ok || res.status === 206;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runExists(model, run, productId) {
+  const product = MODEL_PRODUCTS[productId] || MODEL_PRODUCTS[defaultProductFor(model.id)];
+  const fhours = forecastHours(run);
+  const probeHour = fhours.includes(0) ? 0 : (fhours[0] || 0);
+  const sourceHour = Math.max(probeHour, product.minFhour || 0);
+  const sources = sourcesFor(product, sourceHour);
+  const files = new Set(sources.map((src) => (src && src.file) || 'sfc'));
+  const checks = [...files].map((file) => {
+    const { idx } = model.keysFor(run.dayStr, run.cycle, sourceHour, file);
+    const url = modelUrl(model, idx);
+    if (!runProbeCache.has(url)) {
+      runProbeCache.set(url, headOrTinyGet(url).catch((err) => {
+        runProbeCache.delete(url);
+        throw err;
+      }));
+    }
+    return runProbeCache.get(url);
+  });
+  return (await Promise.all(checks)).some(Boolean);
+}
+
 // List the available model runs (cycles) for a UTC day, newest last. Cycles step
 // by `model.cycleStep` (hourly for HRRR/RAP, 6-hourly for NAM/GFS). For the
 // current day we drop any cycle that shouldn't have posted yet (its nominal time
@@ -608,11 +865,12 @@ export async function listModels(modelKey, productId, date) {
   const step = model.cycleStep || 1;
   const latencyMs = (model.latencyMin || 55) * 60000;
   const runs = [];
+  const candidates = [];
   for (let h = 0; h <= 23; h += step) {
     const time = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h));
     if (isToday && now.getTime() < time.getTime() + latencyMs) continue; // not posted yet
     const fhours = forecastHoursFor(model, h);
-    runs.push({
+    candidates.push({
       key: `${dayStr}t${pad(h)}`,
       dayStr,
       cycle: h,
@@ -621,6 +879,11 @@ export async function listModels(modelKey, productId, date) {
       maxFhour: fhours[fhours.length - 1] || 0,
       fhours,
     });
+  }
+  for (let i = 0; i < candidates.length; i += 6) {
+    const batch = candidates.slice(i, i + 6);
+    const ok = await Promise.all(batch.map((run) => runExists(model, run, productId)));
+    for (let j = 0; j < batch.length; j++) if (ok[j]) runs.push(batch[j]);
   }
   return runs;
 }
@@ -829,7 +1092,7 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
     // validate the response and drop the entry on failure so a transient error
     // doesn't poison the cache with a permanently-rejected promise.
     idxCache.set(grib, (async () => {
-      const res = await fetch(`${model.bucket}/${idx}`);
+      const res = await fetch(modelUrl(model, idx));
       if (!res.ok) throw new Error(`index fetch failed: ${res.status}`);
       return res.text();
     })());
@@ -842,7 +1105,11 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
     throw e;
   }
   const range = rangeFromIdx(idxText, src);
+<<<<<<< HEAD
+  const bytes = await fetchRange(modelUrl(model, grib), range, onProgress);
+=======
   const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
   return decodeGrib2(bytes, range.sub);
 }
 
