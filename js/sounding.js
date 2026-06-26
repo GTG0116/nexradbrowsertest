@@ -35,7 +35,6 @@ const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
 // pressure-level column (`id` is the Open-Meteo model); the regional models use
 // their own GRIB2 (`native: true`). `label` names the model shown in the panel —
 // now always the model actually used, since nothing borrows HRRR anymore.
-<<<<<<< HEAD
 // `unavailable: true` marks models that publish no usable column for a sounding
 // (the AI models carry no per-level humidity, GraphCast no surface at all), so
 // the panel shows a short notice instead of a misleading profile.
@@ -48,14 +47,6 @@ const SOUNDING_SOURCE = {
   rrfs:     { label: 'RRFS',     native: true },
   aigfs:    { label: 'AI GFS',   unavailable: true },
   hrrrcast: { label: 'HRRRCast', unavailable: true },
-=======
-const SOUNDING_SOURCE = {
-  hrrr:    { id: 'gfs_hrrr',   label: 'HRRR',     native: false },
-  gfs:     { id: 'gfs_global', label: 'GFS',      native: false },
-  nam:     { label: 'NAM',      native: true },
-  namnest: { label: 'NAM Nest', native: true },
-  rap:     { label: 'RAP',      native: true },
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
 };
 
 // The sounding source descriptor for an in-app model key (defaults to HRRR).

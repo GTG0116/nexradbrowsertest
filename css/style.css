@@ -2910,11 +2910,7 @@ body.storm-active .playback-bar {
   }
   .map-wrap.split #map .split-badge,
   .map-wrap.split #map2 .split-badge {
-<<<<<<< HEAD
     top: 72px;
-=======
-    top: 10px;
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
     bottom: auto;
   }
 

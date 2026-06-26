@@ -1105,11 +1105,7 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
     throw e;
   }
   const range = rangeFromIdx(idxText, src);
-<<<<<<< HEAD
   const bytes = await fetchRange(modelUrl(model, grib), range, onProgress);
-=======
-  const bytes = await fetchRange(`${model.bucket}/${grib}`, range, onProgress);
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
   return decodeGrib2(bytes, range.sub);
 }
 

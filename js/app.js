@@ -2469,7 +2469,6 @@ function currentModelFhour() {
   return state.models.fhour;
 }
 
-<<<<<<< HEAD
 // Keep the selected forecast hour in lock-step with whatever frame is on screen
 // while a model loop scrubs/plays. Without this, the picker highlight, the dock
 // label and a sounding opened mid-loop all stay pinned to the hour the loop
@@ -2493,8 +2492,6 @@ function modelValidTime(fhour = currentModelFhour()) {
   return new Date();
 }
 
-=======
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
 // Open a sounding for a map point. `loc` is a {lat, lng} (e.g. an event lngLat);
 // it defaults to the map centre. Only meaningful in models mode.
 async function openSounding(loc) {
@@ -2502,12 +2499,8 @@ async function openSounding(loc) {
   const ctr = state.map.getCenter();
   const c = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)
     ? { lat: loc.lat, lng: loc.lng } : { lat: ctr.lat, lng: ctr.lng };
-<<<<<<< HEAD
   const fhour = currentModelFhour();
   const validTime = modelValidTime(fhour);
-=======
-  const validTime = modelValidTime();
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
   const seq = ++soundingSeq;
 
   // Follow the model selected for the active forecast hour — state.models.modelKey
@@ -2544,11 +2537,7 @@ async function openSounding(loc) {
       const run = currentModelRun();
       if (!run) throw new Error('No model run is loaded for this sounding.');
       profile = await fetchSoundingNative(
-<<<<<<< HEAD
         modelKey, run, fhour, c.lat, c.lng, validTime,
-=======
-        modelKey, run, state.models.fhour, c.lat, c.lng, validTime,
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
         (frac) => {
           if (seq === soundingSeq)
             el.sndStatus.textContent = `Loading ${label} sounding… ${Math.round(frac * 100)}%`;
@@ -3503,12 +3492,9 @@ function createPlayback() {
       const f = this.frames[this.idx];
       if (!f || !f.loaded || !this.provider) return;
       this.provider.render(f.payload);
-<<<<<<< HEAD
       // Models: the displayed forecast hour is now the source of truth for the
       // picker, dock and any sounding opened mid-loop.
       if (state.mode === 'models') setDisplayedFhour(f.fhour);
-=======
->>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
       const suffix = this.loadedCount < this.frames.length
         ? ` · ${this.loadedCount}/${this.frames.length} loaded` : '';
       el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}${suffix}`;
