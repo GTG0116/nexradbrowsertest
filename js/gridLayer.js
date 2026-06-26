@@ -62,6 +62,17 @@ void main() {
     // integer indices in (fi-0.5, fj-0.5) space; each tap is weighted by a
     // Gaussian of its distance from the sample point AND by the cell's validity,
     // then renormalised so missing cells neither leak nor darken the result.
+<<<<<<< HEAD
+    // Confine the smoothed echo to the cells that actually hold data. Without
+    // this guard the validity-renormalised blur lets a lone valid cell spread its
+    // value across every missing neighbour, so sparse MRMS echoes balloon into
+    // huge blobs. Drawing only where the cell under the sample point is valid
+    // keeps the footprint identical to NEAREST while still smoothing the interior.
+    // Dense fields (the resampled model grids) have no missing cells, so they are
+    // unaffected — only MRMS, which is full of gaps, needs this.
+    if (cellValue(floor(fi), floor(fj)).y < 0.5) discard;
+=======
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
     float sigma = smoothSigma(u_smooth);
     float pc = fi - 0.5, pr = fj - 0.5;
     float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
