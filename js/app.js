@@ -17,7 +17,7 @@ import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, foreca
   modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
-import { fetchSounding, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
+import { fetchSounding, fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
 import { SplitView } from './splitview.js';
@@ -39,8 +39,23 @@ const M_PER_DEG_LAT = 111320;
 // own layer stack, beneath its town-name and boundary layers, so place names
 // and borders always draw on top of the radar — natively, no second label set.
 // ---------------------------------------------------------------------------
-const MAPBOX_TOKEN =
-  'pk.eyJ1IjoiZ3RnMDExNiIsImEiOiJjbWxsODV6NXAwNThmM2ZwdWlkYm0xNjFlIn0.vI186twXYzY45nnuV5FucQ';
+// The Mapbox public token is supplied by the end user (not baked into the build),
+// so a public deployment carries no shared/billable key. It is stored per-browser
+// in localStorage and prompted for on first run by the setup gate (see init()).
+const MAPBOX_TOKEN_KEY = 'aether.mapboxToken';
+let MAPBOX_TOKEN = '';
+function getStoredMapboxToken() {
+  try {
+    return (localStorage.getItem(MAPBOX_TOKEN_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+function clearStoredMapboxToken() {
+  try {
+    localStorage.removeItem(MAPBOX_TOKEN_KEY);
+  } catch {}
+}
 
 // key → { url: mapbox style url, label }. "Dark" keeps the original console look.
 const BASEMAPS = {
@@ -257,6 +272,23 @@ function sitesGeoJSON() {
   };
 }
 
+// Diagonal-hatch tile for an SPC Conditional Intensity Group (CIG) level, drawn
+// black on transparent so it reads over the radar like the official "significant"
+// hatching. Density rises with the level to match the intensity legend: a sparse
+// forward "/" (1), a tighter "/" (2), and a full crosshatch "XX" (3).
+function cigHatchImage(level, ratio = 2) {
+  const tile = (level === 1 ? 13 : 8) * ratio; // CSS px → device px
+  const c = document.createElement('canvas');
+  c.width = c.height = tile;
+  const ctx = c.getContext('2d');
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.lineWidth = ratio;
+  // Corner-to-corner lines so the tile repeats seamlessly when wrapped.
+  ctx.beginPath(); ctx.moveTo(0, tile); ctx.lineTo(tile, 0); ctx.stroke();
+  if (level >= 3) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(tile, tile); ctx.stroke(); }
+  return { data: ctx.getImageData(0, 0, tile, tile), pixelRatio: ratio };
+}
+
 // (Re)create all overlay sources and layers in the correct order. Called on
 // every style load — including after a basemap switch, which wipes custom
 // layers — and then repopulated with whatever data we currently hold.
@@ -275,15 +307,46 @@ function setupOverlays(map) {
   if (!map.getSource('sites'))
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
 
+  // Register the CIG hatch tiles. Style loads wipe added images, so (re)add them
+  // each time before the layer that references them by name.
+  for (const lvl of [1, 2, 3]) {
+    const id = `cig-hatch-${lvl}`;
+    if (!map.hasImage(id)) {
+      const img = cigHatchImage(lvl);
+      map.addImage(id, img.data, { pixelRatio: img.pixelRatio });
+    }
+  }
+
   // SPC outlook fill — translucent risk-area shading, beneath the alert fill (and
   // the radar) so live warnings always read on top. Each feature carries its
   // official `fill`/`stroke` risk colours, so the layers just read them through.
+  // Conditional Intensity Group (CIG) areas are excluded here and drawn as a
+  // hatch overlay below instead of the flat grey their `fill` would give.
+  const isCig = ['==', ['slice', ['coalesce', ['get', 'LABEL'], ''], 0, 3], 'CIG'];
   map.addLayer(
     {
       id: 'spc-outlook-fill',
       type: 'fill',
       source: 'spc-outlook',
+      filter: ['!', isCig],
       paint: { 'fill-color': ['get', 'fill'], 'fill-opacity': 0.3 },
+    },
+    dataAnchor
+  );
+  // CIG hatch — density keyed to the level, matching the intensity legend.
+  map.addLayer(
+    {
+      id: 'spc-outlook-cig',
+      type: 'fill',
+      source: 'spc-outlook',
+      filter: isCig,
+      paint: {
+        'fill-pattern': ['match', ['get', 'LABEL'],
+          'CIG2', 'cig-hatch-2',
+          'CIG3', 'cig-hatch-3',
+          'cig-hatch-1'],
+        'fill-opacity': 0.85,
+      },
     },
     dataAnchor
   );
@@ -445,9 +508,9 @@ const state = {
   selectedElevation: 0.5,
   productId: 'REF',
   opacity: 0.85,
-  // Bilinear-smooth the plotted data (radar / satellite / model / MRMS) instead
-  // of the crisp native-resolution default. Opt-in: off so nothing auto-smooths.
-  smooth: false,
+  // Smoothing level for the plotted data (radar / satellite / model / MRMS):
+  // 0 none (crisp native pixels), 1 low, 2 medium, 3 high. Opt-in; defaults off.
+  smooth: 0,
   // Unfold aliased velocities by default: without this, gates beyond the Nyquist
   // co-interval fold back to small/wrong-signed values, so VEL reads much lower
   // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
@@ -542,7 +605,8 @@ function cacheEls() {
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
-  el.smoothToggle = $('#smoothToggle');
+  el.smooth = $('#smooth');
+  el.smoothVal = $('#smoothVal');
   el.ringsToggle = $('#ringsToggle');
   el.persistToggle = $('#persistToggle');
   el.dealiasToggle = $('#dealiasToggle');
@@ -641,18 +705,17 @@ function cacheEls() {
   el.weatherUseCenter = $('#weatherUseCenter');
   el.weatherPickerStatus = $('#weatherPickerStatus');
   el.toolSplit = $('#toolSplit');
-  // (toolSounding cached above with the sounding block)
   el.toolExport = $('#toolExport');
   el.toolClear = $('#toolClear');
   el.playbackBar = $('#playbackBar');
   el.playToggle = $('#playToggle');
   el.playScrub = $('#playScrub');
+  el.playScrubProg = $('#playScrubProg');
   el.playLabel = $('#playLabel');
   el.playClose = $('#playClose');
 
-  // HRRR sounding (Skew-T / hodograph / severe parameters). The launcher now
-  // lives in the map-tools toolbar / dock tool slot (models mode only).
-  el.toolSounding = $('#toolSounding');
+  // Model sounding (Skew-T / hodograph / severe parameters). Launched in models
+  // mode by right-clicking (desktop) or long-pressing (mobile) a map point.
   el.sounding = $('#sounding');
   el.sndClose = $('#sndClose');
   el.sndTitle = $('#sndTitle');
@@ -699,6 +762,16 @@ function initMap() {
   map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-left');
   state.map = map;
 
+  // If the supplied token is invalid/revoked, Mapbox emits a 401. Clear the bad
+  // token and re-open the setup gate rather than leaving the user a blank map.
+  map.on('error', (e) => {
+    const status = e && e.error && e.error.status;
+    if (status === 401 || status === 403) {
+      clearStoredMapboxToken();
+      showMapboxGate('That token was rejected by Mapbox (401/403). Paste a valid public token.');
+    }
+  });
+
   // (Re)build overlays on every style load — the initial load and after any
   // basemap switch (setStyle drops custom layers).
   map.on('style.load', () => {
@@ -711,12 +784,17 @@ function initMap() {
   // hovering feel sticky.
   let readoutRaf = null;
   let lastLatLng = null;
+  let lastPoint = null;
   map.on('mousemove', (e) => {
     lastLatLng = e.lngLat;
+    lastPoint = e.point;
+    // The cursor-following readout is the desktop inspector: only update it while
+    // inspect is armed. (Touch layouts use the centre crosshair instead.)
+    if (!state.inspect) return;
     if (readoutRaf) return;
     readoutRaf = requestAnimationFrame(() => {
       readoutRaf = null;
-      updateReadout(lastLatLng);
+      updateReadout(lastLatLng, lastPoint);
     });
   });
   map.on('mouseout', () => {
@@ -1347,10 +1425,7 @@ function applyModePanels() {
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
-  // The sounding launcher (a map tool now) follows the selected model, so it's
-  // only offered in models mode.
-  if (el.toolSounding) el.toolSounding.hidden = state.mode !== 'models';
-  // Keep the dock tool slot in sync — drop the sounding tool when leaving models.
+  // Keep the dock tool slot in sync with the active source.
   if (state._refreshDockTools) state._refreshDockTools();
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   // The single-site radar overlay control only makes sense outside radar mode.
@@ -2077,15 +2152,21 @@ function modelValidTime() {
   return new Date(run.time.getTime() + state.models.fhour * 3600 * 1000);
 }
 
-async function openSounding() {
-  const c = state.map.getCenter();
+// Open a sounding for a map point. `loc` is a {lat, lng} (e.g. an event lngLat);
+// it defaults to the map centre. Only meaningful in models mode.
+async function openSounding(loc) {
+  if (state.mode !== 'models') return;
+  const ctr = state.map.getCenter();
+  const c = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)
+    ? { lat: loc.lat, lng: loc.lng } : { lat: ctr.lat, lng: ctr.lng };
   const validTime = modelValidTime();
   const seq = ++soundingSeq;
 
-  // Follow the model selected for the active forecast hour. The sounding tool is
-  // only offered in models mode, so state.models.modelKey is the live selection.
+  // Follow the model selected for the active forecast hour — state.models.modelKey
+  // is the live selection (a sounding is only offered in models mode).
   const modelKey = state.models.modelKey;
-  const label = soundingModel(modelKey).label;
+  const src = soundingModel(modelKey);
+  const label = src.label;
 
   el.sounding.hidden = false;
   document.body.classList.add('snd-open');
@@ -2098,7 +2179,21 @@ async function openSounding() {
   el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
 
   try {
-    const profile = await fetchSounding(c.lat, c.lng, validTime, modelKey);
+    let profile;
+    if (src.native) {
+      // Pull the column straight from the model's own GRIB2 (no Open-Meteo
+      // coverage). This is many small Range requests, so report progress.
+      const run = currentModelRun();
+      if (!run) throw new Error('No model run is loaded for this sounding.');
+      profile = await fetchSoundingNative(
+        modelKey, run, state.models.fhour, c.lat, c.lng, validTime,
+        (frac) => {
+          if (seq === soundingSeq)
+            el.sndStatus.textContent = `Loading ${label} sounding… ${Math.round(frac * 100)}%`;
+        });
+    } else {
+      profile = await fetchSounding(c.lat, c.lng, validTime, modelKey);
+    }
     if (seq !== soundingSeq) return; // a newer request superseded this one
     state.soundingProfile = profile;
     el.sndStatus.hidden = true;
@@ -2146,6 +2241,18 @@ function closeSounding() {
   soundingSeq++; // cancel any in-flight render
 }
 
+// Desktop gesture for the model sounding: a right-click opens it at the cursor.
+// (Touch uses the long-press handled in enableLongPress, which branches by mode.)
+// A no-op outside models mode — openSounding guards too.
+function setupSoundingGestures() {
+  const map = state.map;
+  if (!map) return;
+  map.on('contextmenu', (e) => {
+    if (state.mode !== 'models') return;
+    openSounding(e.lngLat);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // All-radar dots + nearest-site
 //
@@ -2191,6 +2298,13 @@ function enableLongPress() {
         timer = null;
         const rect = container.getBoundingClientRect();
         const ll = state.map.unproject([start.x - rect.left, start.y - rect.top]);
+        // In models mode a long-press opens a sounding at the touched point;
+        // elsewhere it jumps to the nearest radar site (the original behaviour).
+        if (state.mode === 'models') {
+          if (navigator.vibrate) navigator.vibrate(25);
+          openSounding(ll);
+          return;
+        }
         const r = nearestSite(ll.lat, ll.lng);
         if (!r) return;
         if (navigator.vibrate) navigator.vibrate(25);
@@ -2214,13 +2328,71 @@ function enableLongPress() {
 }
 
 // ---------------------------------------------------------------------------
-// Inspect tool — a fixed crosshair at screen centre reading the gate under it.
+// Inspect tool — on touch devices a fixed crosshair at screen centre reads the
+// gate under it; on a desktop (fine pointer) inspect instead arms a readout that
+// follows the mouse, and there is no centre picker.
 // ---------------------------------------------------------------------------
+// "PC" = a precise hovering pointer (mouse/trackpad). On such devices inspect
+// drives a cursor-following readout rather than the centre crosshair, and the
+// readout is only shown while inspect is armed.
+const mqDesktopPointer = window.matchMedia('(hover: hover) and (pointer: fine)');
+function isDesktopPointer() {
+  return mqDesktopPointer.matches;
+}
+
 function toggleInspect(on) {
   state.inspect = on == null ? !state.inspect : on;
+  if (state.inspect) clearOtherTools('inspect');
   el.inspectBtn.classList.toggle('active', state.inspect);
-  el.crosshair.hidden = !state.inspect;
+  const desktop = isDesktopPointer();
+  // Desktop: no centre picker — the mouse readout is the inspector. Touch: the
+  // fixed centre crosshair reads the value beneath it as you pan.
+  el.crosshair.hidden = desktop || !state.inspect;
+  if (!state.inspect && el.readout) el.readout.classList.remove('show');
   updateInspect();
+}
+
+// ---------------------------------------------------------------------------
+// Single active "modal" map tool at a time. Draw / measure / storm, METARs, the
+// local-weather picker and inspect are mutually exclusive: arming one disarms
+// whatever was running, so a tool is never left enabled after another is picked.
+// ---------------------------------------------------------------------------
+function activeModalTool() {
+  if (state.mapTools && state.mapTools.tool) return state.mapTools.tool;
+  if (state.metars && state.metars.enabled) return 'metars';
+  if (state.weather && state.weather.active) return 'weather';
+  if (state.inspect) return 'inspect';
+  return null;
+}
+
+function deactivateModalTool(id) {
+  switch (id) {
+    case 'draw':
+    case 'measure':
+    case 'storm':
+      if (state.mapTools) state.mapTools.setTool(null);
+      if (state._syncToolButtons) state._syncToolButtons();
+      break;
+    case 'metars':
+      if (state.metars && state.metars.enabled) {
+        state.metars.setEnabled(false);
+        if (el.toolMetars) el.toolMetars.classList.remove('active');
+      }
+      break;
+    case 'weather':
+      if (state.weather && state.weather.active) stopWeatherTool();
+      break;
+    case 'inspect':
+      if (state.inspect) toggleInspect(false);
+      break;
+  }
+}
+
+// Disarm whatever modal tool is currently active, unless it is `except` (the one
+// about to be armed). Call this just before turning a tool on.
+function clearOtherTools(except) {
+  const cur = activeModalTool();
+  if (cur && cur !== except) deactivateModalTool(cur);
 }
 
 // Sample whichever data layer is active at a geographic point. Returns null
@@ -2276,7 +2448,9 @@ function sampleMrmsAt(lat, lon) {
 }
 
 function updateInspect() {
-  if (!state.inspect) return;
+  // On desktop the readout follows the mouse (handled by the mousemove handler),
+  // so the centre-crosshair sampler only runs on touch layouts.
+  if (!state.inspect || isDesktopPointer()) return;
   const c = state.map.getCenter();
   const r = sampleActive(c.lat, c.lng);
   if (!r) { el.crosshairRead.textContent = 'no data'; return; }
@@ -2671,10 +2845,15 @@ async function buildPlaybackProvider() {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Loop the first N forecast hours of the selected run; the picker still
-    // reaches every hour out to F48.
-    const hours = forecastHours(run).slice(0, n);
+    // Span the *entire* selected run: the scrubber reaches every forecast hour
+    // out to the run's max lead time, not just the first N. Frames stream in
+    // progressively (see createPlayback), so a long run is usable immediately.
+    const hours = forecastHours(run);
     return {
+      // Model frames are independent network fetches (a separate GRIB per hour),
+      // so a wider lane count hides more round-trip latency and fills the run
+      // faster than the radar default.
+      concurrency: 10,
       frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
@@ -2691,8 +2870,11 @@ function createPlayback() {
   return {
     active: false,
     playing: false,
-    frames: [],
+    frames: [],       // { label, ck, payload, loaded, … provider fields }
+    segEls: [],       // one progress segment per frame (turns green on load)
     idx: 0,
+    loadedCount: 0,
+    loadSeq: 0,       // invalidates an in-flight background loader on restart
     fps: 3,
     timer: null,
     cache: new Map(),
@@ -2717,28 +2899,55 @@ function createPlayback() {
       el.playbackBar.hidden = false;
       el.sheetPlayback.hidden = false;
       document.querySelector('.app').classList.add('playing');
-      el.playLabel.textContent = 'loading…';
       if (state.live) toggleLive(); // freeze auto-refresh during playback
 
       // Drop any cache held for a different context (mode/product/run/…).
       const ctx = playbackContextKey();
       if (ctx !== this.cacheCtx) { this.cache.clear(); this.cacheCtx = ctx; }
 
+      // Show the whole timeline immediately: every frame gets a slot and a grey
+      // progress segment up front; the scrubber works as soon as a frame loads.
+      this.frames = provider.frames.map((f) => ({ ...f, payload: null, loaded: false }));
+      this.idx = 0;
+      this.loadedCount = 0;
+      this.buildProgress();
+      el.playScrub.max = String(this.frames.length - 1);
+      el.playScrub.value = '0';
+      el.playLabel.textContent = `loading 0/${this.frames.length}…`;
+      el.dockTime.textContent = this.frames[0].label;
       setStatus('loading playback…', true);
-      // Load frames with bounded concurrency instead of one-at-a-time. The old
-      // sequential await chained every frame's fetch+decode end to end; building
-      // a loop now overlaps the network round-trips (and, via the worker pool,
-      // the decodes), which is the bulk of the wait. Results are stitched back
-      // into frame order afterwards so playback stays oldest→newest.
-      const total = provider.frames.length;
-      const results = new Array(total);
-      let done = 0;
+
+      this.loadInBackground();
+    },
+
+    // Build the per-frame progress segments (grey now, green as frames arrive).
+    buildProgress() {
+      this.segEls = [];
+      if (!el.playScrubProg) return;
+      el.playScrubProg.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < this.frames.length; i++) {
+        const seg = document.createElement('div');
+        seg.className = 'seg';
+        frag.appendChild(seg);
+        this.segEls.push(seg);
+      }
+      el.playScrubProg.appendChild(frag);
+    },
+
+    // Stream every frame in with bounded concurrency. Frames render/play the
+    // moment they're available rather than blocking the whole loop on the last
+    // one, and each finished frame paints its segment green.
+    loadInBackground() {
+      const provider = this.provider;
+      const total = this.frames.length;
+      const seq = ++this.loadSeq;
       let next = 0;
       const runWorker = async () => {
-        while (this.active) {
-          const idx = next++;
-          if (idx >= total) return;
-          const fr = provider.frames[idx];
+        while (this.active && this.loadSeq === seq) {
+          const i = next++;
+          if (i >= total) return;
+          const fr = this.frames[i];
           let payload = this.cache.get(fr.ck);
           if (!payload) {
             try {
@@ -2746,35 +2955,60 @@ function createPlayback() {
               this.cache.set(fr.ck, payload);
             } catch (e) {
               console.error(e);
-              done++;
               continue;
             }
           }
-          if (!this.active) return; // user bailed mid-load
-          results[idx] = { label: fr.label, ck: fr.ck, payload };
-          el.playLabel.textContent = `loading ${++done}/${total}…`;
+          if (!this.active || this.loadSeq !== seq) return; // bailed / restarted
+          fr.payload = payload;
+          fr.loaded = true;
+          this.loadedCount++;
+          if (this.segEls[i]) this.segEls[i].classList.add('loaded');
+          this.onFrameLoaded(i);
         }
       };
-      const lanes = Math.min(PLAYBACK_CONCURRENCY, total);
-      await Promise.all(Array.from({ length: lanes }, runWorker));
-      if (!this.active) return; // user bailed mid-load
-      const frames = results.filter(Boolean);
-      if (!frames.length) {
-        setStatus('playback unavailable');
-        this.stop();
-        return;
-      }
-      // Bound the cache to this loop so it can't grow without limit.
-      const keep = new Set(frames.map((f) => f.ck));
-      for (const k of [...this.cache.keys()]) if (!keep.has(k)) this.cache.delete(k);
+      const lanes = Math.min(provider.concurrency || PLAYBACK_CONCURRENCY, total);
+      Promise.all(Array.from({ length: lanes }, runWorker)).then(() => {
+        if (!this.active || this.loadSeq !== seq) return;
+        if (!this.loadedCount) { setStatus('playback unavailable'); this.stop(); return; }
+        setStatus(`playback · ${this.loadedCount}/${total} frames`);
+      });
+    },
 
-      this.frames = frames;
-      this.idx = frames.length - 1;
-      el.playScrub.max = String(frames.length - 1);
-      el.playScrub.value = String(this.idx);
-      setStatus(`playback · ${frames.length} frames`);
-      this.renderFrame();
-      this.play();
+    // React to a frame finishing: display the first one and start looping; for
+    // later frames, just refresh the "still loading" count when paused.
+    onFrameLoaded(i) {
+      if (this.loadedCount === 1) {
+        // First frame available — display it and begin looping the loaded set.
+        this.idx = i;
+        el.playScrub.value = String(i);
+        this.renderFrame();
+        this.play();
+      } else if (i === this.idx) {
+        this.renderFrame();
+      } else if (!this.playing) {
+        el.playLabel.textContent = `loading ${this.loadedCount}/${this.frames.length}…`;
+      }
+    },
+
+    // The next loaded frame index after `from` (circular); -1 if none loaded.
+    nextLoaded(from) {
+      const n = this.frames.length;
+      for (let step = 1; step <= n; step++) {
+        const j = (from + step) % n;
+        if (this.frames[j].loaded) return j;
+      }
+      return -1;
+    },
+
+    // The loaded frame nearest to index `i` (searching outward); -1 if none.
+    nearestLoaded(i) {
+      const n = this.frames.length;
+      if (this.frames[i] && this.frames[i].loaded) return i;
+      for (let d = 1; d < n; d++) {
+        if (i - d >= 0 && this.frames[i - d].loaded) return i - d;
+        if (i + d < n && this.frames[i + d].loaded) return i + d;
+      }
+      return -1;
     },
 
     play() {
@@ -2783,7 +3017,9 @@ function createPlayback() {
       el.playToggle.textContent = '⏸';
       clearInterval(this.timer);
       this.timer = setInterval(() => {
-        this.idx = (this.idx + 1) % this.frames.length;
+        const j = this.nextLoaded(this.idx);
+        if (j < 0) return; // nothing loaded yet — wait
+        this.idx = j;
         el.playScrub.value = String(this.idx);
         this.renderFrame();
       }, 1000 / this.fps);
@@ -2800,10 +3036,16 @@ function createPlayback() {
       this.playing ? this.pause() : this.play();
     },
 
+    // Scrub to a frame. Unloaded frames aren't renderable yet, so snap to the
+    // nearest loaded one (and reflect that on the slider).
     seek(i) {
       if (!this.frames.length) return;
       this.pause();
-      this.idx = Math.max(0, Math.min(this.frames.length - 1, i | 0));
+      i = Math.max(0, Math.min(this.frames.length - 1, i | 0));
+      const j = this.nearestLoaded(i);
+      if (j < 0) return;
+      this.idx = j;
+      if (j !== i) el.playScrub.value = String(j);
       this.renderFrame();
     },
 
@@ -2814,17 +3056,23 @@ function createPlayback() {
 
     renderFrame() {
       const f = this.frames[this.idx];
-      if (!f || !this.provider) return;
+      if (!f || !f.loaded || !this.provider) return;
       this.provider.render(f.payload);
-      el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}`;
+      const suffix = this.loadedCount < this.frames.length
+        ? ` · ${this.loadedCount}/${this.frames.length} loaded` : '';
+      el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}${suffix}`;
       el.dockTime.textContent = f.label;
     },
 
     stop() {
       this.pause();
       this.active = false;
+      this.loadSeq++; // cancel any in-flight background loader
       const provider = this.provider;
       this.frames = [];
+      this.segEls = [];
+      this.loadedCount = 0;
+      if (el.playScrubProg) el.playScrubProg.innerHTML = '';
       el.playBtn.classList.remove('active');
       if (el.loopBtn) el.loopBtn.classList.remove('active');
       el.playbackBar.hidden = true;
@@ -2868,13 +3116,24 @@ function updateMeta() {
 // ---------------------------------------------------------------------------
 // Cursor readout
 // ---------------------------------------------------------------------------
-function updateReadout(latlng) {
+function updateReadout(latlng, point) {
   const r = sampleActive(latlng.lat, latlng.lng);
   if (!r || r.out) {
     el.readout.classList.remove('show');
     return;
   }
   el.readout.innerHTML = `<b>${r.main}</b><span>${r.sub}</span>`;
+  // Anchor the readout just above-right of the cursor when we have a pixel point
+  // (desktop inspect); otherwise fall back to the fixed top-centre banner.
+  if (point) {
+    el.readout.classList.add('at-cursor');
+    el.readout.style.left = `${point.x + 14}px`;
+    el.readout.style.top = `${point.y + 16}px`;
+  } else {
+    el.readout.classList.remove('at-cursor');
+    el.readout.style.left = '';
+    el.readout.style.top = '';
+  }
   el.readout.classList.add('show');
 }
 
@@ -2930,6 +3189,8 @@ function setupMapTools() {
   state.metars = new MetarController(state.map);
   state.metars.onStatus = (msg) => setStatus(msg);
   el.toolMetars.addEventListener('click', () => {
+    const willEnable = !state.metars.enabled;
+    if (willEnable) clearOtherTools('metars');
     const on = state.metars.setEnabled(!state.metars.enabled);
     el.toolMetars.classList.toggle('active', on);
     if (!on) setStatus('METARs off');
@@ -2952,9 +3213,18 @@ function setupMapTools() {
   function syncToolButtons() {
     for (const [btn, name] of toolButtons)
       btn.classList.toggle('active', state.mapTools.tool === name);
+    // Storm track takes over the screen: hide the bottom UI (dock, legend,
+    // footer) so the track + town list own the view (CSS keys off this class).
+    document.body.classList.toggle('storm-active', state.mapTools.tool === 'storm');
   }
+  // Expose so the tool coordinator can refresh button state when it disarms a
+  // draw/measure/storm tool on behalf of another tool.
+  state._syncToolButtons = syncToolButtons;
   for (const [btn, name] of toolButtons) {
     btn.addEventListener('click', () => {
+      // Arming this tool? Disarm any other modal tool (METARs, weather, inspect)
+      // first so only one is ever active.
+      if (state.mapTools.tool !== name) clearOtherTools(name);
       state.mapTools.setTool(name);
       syncToolButtons();
     });
@@ -3003,7 +3273,7 @@ function setupWeatherTool() {
   if (!el.toolWeather) return;
   el.toolWeather.addEventListener('click', () => {
     if (state.weather.active) stopWeatherTool();
-    else startWeatherTool();
+    else { clearOtherTools('weather'); startWeatherTool(); }
   });
   if (el.weatherPickerClose) el.weatherPickerClose.addEventListener('click', () => closeWeatherPicker());
   if (el.weatherUseCenter) el.weatherUseCenter.addEventListener('click', () => updateWeatherFromCenter(true));
@@ -3373,17 +3643,17 @@ const DOCK_TOOLS = [
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
-  // The sounding follows the selected model, so it only appears when models is active.
-  { id: 'sounding', icon: '⊙', label: 'Model sounding', btn: () => el.toolSounding, modelsOnly: true },
+  // The model sounding isn't a slot tool anymore — in models mode you long-press
+  // the map (or right-click on desktop) to open a sounding at that point.
   { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
   { id: 'export', icon: '⤓', label: 'Export image', btn: () => el.toolExport },
   { id: 'clear', icon: '✕', label: 'Clear drawings', btn: () => el.toolClear },
 ];
 
-// The tools offered in the dock slot depend on the active source: the sounding
-// tool is only meaningful in HRRR/models mode.
+// The tools offered in the mobile dock slot. Kept as a function (rather than the
+// constant list) so source-specific filtering can be reintroduced if needed.
 function dockToolsForMode() {
-  return DOCK_TOOLS.filter((t) => !t.modelsOnly || state.mode === 'models');
+  return DOCK_TOOLS;
 }
 
 function setupDockTools() {
@@ -3615,7 +3885,9 @@ function applyStoredSettings(s) {
   if (typeof s.site === 'string') state.site = s.site;
   if (typeof s.productId === 'string') state.productId = s.productId;
   if (typeof s.opacity === 'number') state.opacity = s.opacity;
-  if (typeof s.smooth === 'boolean') state.smooth = s.smooth;
+  // Migrate the old boolean smooth toggle (true ≈ medium) to the 0–3 level.
+  if (typeof s.smooth === 'number') state.smooth = Math.max(0, Math.min(3, s.smooth | 0));
+  else if (typeof s.smooth === 'boolean') state.smooth = s.smooth ? 2 : 0;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
@@ -3659,6 +3931,21 @@ function setToggleBtn(btn, on) {
 
 // Push restored settings onto their UI controls (run once, after the controls
 // exist but before the first data load). state already holds the restored values.
+// Smoothing slider stops, indexed by level (0 = none … 3 = high).
+const SMOOTH_LABELS = ['None', 'Low', 'Medium', 'High'];
+
+// Apply a smoothing level (0–3) to every live data layer + the slider label.
+function applySmooth(level) {
+  state.smooth = Math.max(0, Math.min(3, level | 0));
+  if (el.smooth) el.smooth.value = String(state.smooth);
+  if (el.smoothVal) el.smoothVal.textContent = SMOOTH_LABELS[state.smooth];
+  if (state.radarLayer) state.radarLayer.setSmooth(state.smooth);
+  if (state.sat.layer) state.sat.layer.setSmooth(state.smooth);
+  if (state.mrms.layer) state.mrms.layer.setSmooth(state.smooth);
+  if (state.models.layer) state.models.layer.setSmooth(state.smooth);
+  if (state.splitView) state.splitView.setSmooth(state.smooth);
+}
+
 function reflectStoredControls() {
   if (el.opacity) {
     el.opacity.value = String(Math.round(state.opacity * 100));
@@ -3666,7 +3953,7 @@ function reflectStoredControls() {
   }
   setToggleBtn(el.ringsToggle, state.showRings);
   setToggleBtn(el.dealiasToggle, state.dealias);
-  setToggleBtn(el.smoothToggle, state.smooth);
+  if (el.smooth) { el.smooth.value = String(state.smooth); el.smoothVal.textContent = SMOOTH_LABELS[state.smooth]; }
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
   if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
   if (el.basemapSelect) el.basemapSelect.value = state.basemap;
@@ -3675,8 +3962,47 @@ function reflectStoredControls() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// First-run setup gate: the map needs a Mapbox public token the user supplies
+// themselves. If none is stored, show the gate and stop boot here; the rest of
+// init runs after the user saves a token (which reloads the page).
+function showMapboxGate(message) {
+  const gate = document.getElementById('mbxGate');
+  if (!gate) return;
+  const input = document.getElementById('mbxGateInput');
+  const btn = document.getElementById('mbxGateSave');
+  const err = document.getElementById('mbxGateError');
+  gate.hidden = false;
+  if (message && err) err.textContent = message;
+  const prior = getStoredMapboxToken();
+  if (prior && input) input.value = prior;
+  const submit = () => {
+    const tok = (input.value || '').trim();
+    if (!/^pk\.[A-Za-z0-9._-]+$/.test(tok)) {
+      err.textContent = 'That doesn’t look like a Mapbox public token — it should start with “pk.”.';
+      return;
+    }
+    try {
+      localStorage.setItem(MAPBOX_TOKEN_KEY, tok);
+    } catch {
+      err.textContent = 'Could not save the token (storage blocked). Enable site storage and retry.';
+      return;
+    }
+    location.reload();
+  };
+  btn.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submit();
+  });
+  input.focus();
+}
+
 function init() {
   cacheEls();
+  MAPBOX_TOKEN = getStoredMapboxToken();
+  if (!MAPBOX_TOKEN) {
+    showMapboxGate();
+    return;
+  }
   applyStoredSettings(loadSettings()); // restore last session before building UI
   initMap();
   enableLongPress();
@@ -3767,20 +4093,13 @@ function init() {
     saveSettings();
   });
 
-  // Data smoothing — bilinear-interpolate the plotted radar / satellite / model /
-  // MRMS field instead of the crisp native default. It only flips a shader
-  // uniform on the live layers, so there's nothing to recompute or reload.
-  if (el.smoothToggle) {
-    el.smoothToggle.addEventListener('click', () => {
-      const on = !el.smoothToggle.classList.contains('active');
-      setToggleBtn(el.smoothToggle, on);
-      state.smooth = on;
-      if (state.radarLayer) state.radarLayer.setSmooth(on);
-      if (state.sat.layer) state.sat.layer.setSmooth(on);
-      if (state.mrms.layer) state.mrms.layer.setSmooth(on);
-      if (state.models.layer) state.models.layer.setSmooth(on);
-      if (state.splitView) state.splitView.setSmooth(on);
-      setStatus(on ? 'data smoothing on' : 'data smoothing off');
+  // Data smoothing — a Gaussian low-pass on the plotted radar / satellite /
+  // model / MRMS field, none → high. It only changes a shader uniform on the
+  // live layers, so there's nothing to recompute or reload.
+  if (el.smooth) {
+    el.smooth.addEventListener('input', () => {
+      applySmooth(Number(el.smooth.value));
+      setStatus(`smoothing: ${SMOOTH_LABELS[state.smooth].toLowerCase()}`);
       saveSettings();
     });
   }
@@ -3827,6 +4146,9 @@ function init() {
     close: el.alertClose,
     preview: el.alertPreview,
     previewCard: el.alertPreviewCard,
+    // Suppress alert briefings while a click-consuming map tool is active, so
+    // placing storm-track points / measure vertices doesn't also pop an alert.
+    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
   });
   state.alerts.start();
   // Apply the restored alerts on/off preference (default on).
@@ -3862,8 +4184,12 @@ function init() {
   );
   el.inspectBtn.addEventListener('click', () => toggleInspect());
 
-  // ---- HRRR sounding launcher (map tool, models mode only) + sheet ----
-  el.toolSounding.addEventListener('click', openSounding);
+  // ---- Model sounding launcher: right-click (desktop) / long-press (mobile) ----
+  // In models mode, opening a sounding is a map gesture on the point of interest
+  // rather than a toolbar button. Right-click maps straight to contextmenu;
+  // touch uses a ~500 ms press that cancels if the finger moves (a drag/pan) so
+  // it never fights panning.
+  setupSoundingGestures();
   el.sndClose.addEventListener('click', closeSounding);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !el.sounding.hidden) closeSounding();
