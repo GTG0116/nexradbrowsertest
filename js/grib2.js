@@ -216,14 +216,20 @@ function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values
 //   { proj:'lambert', ni, nj, la1, lo1, lov, lad, latin1, latin2, dx, dy,
 //     shape, scanMode, values }
 // `values` is a Float32Array in scan order, NaN where data is missing.
-export async function decodeGrib2(input) {
+//
+// A single GRIB2 message can pack several fields (submessages) that share one
+// grid definition — NCEP does this for paired components like UGRD/VGRD. Pass
+// `sub` (0-based) to choose which field to decode; it defaults to the first.
+export async function decodeGrib2(input, sub = 0) {
   const b = await gunzip(input instanceof Uint8Array ? input : new Uint8Array(input));
   const dv = new DataView(b.buffer, b.byteOffset, b.length);
   if (String.fromCharCode(b[0], b[1], b[2], b[3]) !== 'GRIB') throw new Error('not GRIB2');
 
   let grid = null;
+  // Each completed data section (section 7) closes one field; we collect the
+  // packing parameters of every field so the requested submessage can be picked.
+  const fields = [];
   let R = 0, E = 0, D = 0, bits = 0, drt = -1, npts = 0, p5 = 0;
-  let dataSection = null;
 
   let p = 16; // after section 0
   while (p < b.length - 4) {
@@ -274,11 +280,18 @@ export async function decodeGrib2(input) {
       D = readSignMag(dv, p + 17, 2);
       bits = b[p + 19];
     } else if (sec === 7) {
-      dataSection = b.subarray(p + 5, p + len);
+      // Close this field with the packing parameters seen since the last one.
+      fields.push({ p5, npts, drt, R, E, D, bits, dataSection: b.subarray(p + 5, p + len) });
     }
     p += len;
   }
   if (!grid) throw new Error('GRIB2: no grid definition section');
+  if (!fields.length) throw new Error('GRIB2: no data section');
+
+  // Pick the requested submessage (clamped), then decode just that field.
+  const f = fields[Math.min(sub, fields.length - 1)];
+  ({ p5, npts, drt, R, E, D, bits } = f);
+  const dataSection = f.dataSection;
 
   const scaleE = Math.pow(2, E);
   // Guard against a pathological decimal-scale exponent underflowing to 0, which
