@@ -2,14 +2,16 @@
 // the UI. Everything runs in the browser; the only network calls are the public
 // S3 list/download requests in s3.js and the Mapbox GL basemap tiles.
 
-import { listVolumes, fetchVolume, RADARS, nearestSite, isTDWR } from './s3.js';
+import { listVolumes, fetchVolume, RADARS, nearestSite, isTDWR, latestScanTime } from './s3.js';
+import { L3_PRODUCTS, L3_ORDER, isL3Product, listLevel3, loadLevel3 } from './level3.js';
 import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispValue, dispUnitOf, unitDecimals, reflectivityProduct, displayFactorFor } from './products.js';
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
 import { AlertsController } from './alerts.js';
-import { SpcOutlookController, SPC_TYPE_LABELS, spcTypesForDay } from './spcOutlook.js';
-import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, loadScene as loadGoesScene, ensureBands, sceneBBox, lonLatToColRow } from './goes.js';
+import { OutlookController, OUTLOOKS, OUTLOOK_ORDER } from './outlooks.js';
+import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
+import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
@@ -32,6 +34,9 @@ function resolveGridProduct(p) {
 }
 
 const M_PER_DEG_LAT = 111320;
+
+const MODEL_CITY_VALUE_SOURCE = 'model-city-values';
+const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
 
 // ---------------------------------------------------------------------------
 // Basemap — Mapbox GL JS vector styles. Rendering with GL (rather than raster
@@ -267,7 +272,12 @@ function sitesGeoJSON() {
     features: RADARS.map(([icao, name, lat, lon]) => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [lon, lat] },
-      properties: { icao, name, current: icao === state.site ? 1 : 0, tdwr: isTDWR(icao) ? 1 : 0 },
+      properties: {
+        icao, name,
+        current: icao === state.site ? 1 : 0,
+        tdwr: isTDWR(icao) ? 1 : 0,
+        down: state.downSites && state.downSites.has(icao) ? 1 : 0,
+      },
     })),
   };
 }
@@ -404,16 +414,19 @@ function setupOverlays(map) {
       source: 'sites',
       paint: {
         'circle-radius': ['case', ['==', ['get', 'current'], 1], 6, 3.5],
-        // Active site → accent; TDWR terminal radars → yellow; NEXRAD → blue.
+        // Active site → accent; down (no scan in the past hour) → red; TDWR
+        // terminal radars → yellow; NEXRAD → blue.
         'circle-color': [
           'case',
           ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
           ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
           'rgba(80,140,220,0.85)',
         ],
         'circle-stroke-color': [
           'case',
           ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
           ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
           'rgba(150,205,255,0.85)',
         ],
@@ -435,7 +448,7 @@ function setupOverlays(map) {
 
   // Repaint the active source's layer into its place between fill and line.
   if (state.mode === 'radar' && state.shownSweep && state.shownSite)
-    setRadarSource(map, state.shownSweep, PRODUCTS[state.productId], state.shownSite);
+    setRadarSource(map, state.shownSweep, radarProduct(state.productId), state.shownSite);
   else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
   else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
   else if (state.mode === 'models' && state.models.grid) renderModels();
@@ -506,6 +519,9 @@ const state = {
   volume: null,
   sweeps: [],
   selectedElevation: 0.5,
+  // Level III single-site products (echo tops / QPE) decode to a synthetic
+  // one-tilt sweep held here, separate from the Level II volume above.
+  l3: { decoded: null },
   productId: 'REF',
   opacity: 0.85,
   // Smoothing level for the plotted data (radar / satellite / model / MRMS):
@@ -527,13 +543,19 @@ const state = {
   // In satellite / MRMS / model modes the single-site radar is hidden unless
   // this overlay toggle is switched on.
   radarOverlay: false,
+  modelCityValues: true,
   styleReady: false,
   geo: null,
   alerts: null,
-  // SPC convective outlook overlay (days 1–8). `_spc` holds the restored prefs
-  // applied when the controller is built at init.
+  // ICAO codes of radars judged "down" (no scan in the past hour, or none found)
+  // by the background scan kicked off on load; their map dots are drawn red.
+  downSites: new Set(),
+  _downScanSeq: 0,
+  // Forecast outlook overlay (SPC convective / fire wx / mesoscale disc., CPC
+  // temp / precip). `_spc` holds the restored prefs applied when the controller
+  // is built at init. (`spc`/`_spc` names kept for settings back-compat.)
   spc: null,
-  _spc: { on: false, day: 1, type: 'cat' },
+  _spc: { on: false, product: 'spc_conv', detail: '1:cat' },
   shownSweep: null,
   shownSite: null,
   inspect: false,
@@ -579,6 +601,7 @@ const state = {
     runKey: null,
     fhour: 0,
     grid: null,
+    displayGrid: null,
     layer: null,
   },
 };
@@ -613,6 +636,8 @@ function cacheEls() {
   el.dealiasField = $('#dealiasField');
   el.radarOverlayField = $('#radarOverlayField');
   el.radarOverlayToggle = $('#radarOverlayToggle');
+  el.modelCityValuesField = $('#modelCityValuesField');
+  el.modelCityValuesToggle = $('#modelCityValuesToggle');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
   el.playFrames = $('#playFrames');
@@ -629,8 +654,8 @@ function cacheEls() {
   el.alertPreviewCard = $('#alertPreviewCard');
   el.spcPanel = $('#spcPanel');
   el.spcToggle = $('#spcToggle');
-  el.spcDaySelect = $('#spcDaySelect');
-  el.spcTypeSelect = $('#spcTypeSelect');
+  el.outlookSelect = $('#outlookSelect');
+  el.outlookDetail = $('#outlookDetail');
   el.spcStatus = $('#spcStatus');
   el.spcLegend = $('#spcLegend');
 
@@ -713,6 +738,10 @@ function cacheEls() {
   el.playScrubProg = $('#playScrubProg');
   el.playLabel = $('#playLabel');
   el.playClose = $('#playClose');
+  // Dock the playback scrubber inside the bottom dock so that, while a loop runs,
+  // it only takes the product + play slot and the inspect + tools buttons stay
+  // reachable beside it (CSS hides the product chip + dock play button instead).
+  el.mobileDock.insertBefore(el.playbackBar, el.inspectBtn);
 
   // Model sounding (Skew-T / hodograph / severe parameters). Launched in models
   // mode by right-clicking (desktop) or long-pressing (mobile) a map point.
@@ -777,7 +806,15 @@ function initMap() {
   map.on('style.load', () => {
     state.styleReady = true;
     setupOverlays(map);
+    // Once the map is up, sweep every site for a recent scan so down radars show
+    // red. Kicked off a single time (style.load also fires on basemap switches).
+    if (!state._downScanStarted) {
+      state._downScanStarted = true;
+      scanDownRadars();
+    }
   });
+  map.on('moveend', () => scheduleModelCityValuesRender());
+  map.on('zoomend', () => scheduleModelCityValuesRender());
 
   // Throttle the gate-sampling readout to one update per frame; sampleAt scans
   // every radial, so firing it on every raw mousemove event made panning while
@@ -874,7 +911,9 @@ function onSiteSwitch(icao) {
   // TDWR is Doppler-only: drop a dual-pol selection and rebuild the product row
   // so its dual-pol buttons disappear (and reappear when leaving a TDWR site).
   if (state.mode === 'radar') {
-    if (isTDWR(icao) && DUAL_POL.has(state.productId)) {
+    // TDWR towers carry neither dual-pol nor the WSR-88D Level III products, so
+    // fall back to reflectivity when switching to one with such a product active.
+    if (isTDWR(icao) && (DUAL_POL.has(state.productId) || isL3Product(state.productId))) {
       state.productId = 'REF';
       buildTiltList();
       buildLegend();
@@ -895,8 +934,9 @@ function onSiteSwitch(icao) {
 // chosen product we render whichever sweep actually carries that moment closest
 // to the selected tilt — that is what makes ρHV / ZDR / φDP display.
 function sweepsForProduct(productId = state.productId) {
-  const moment = PRODUCTS[productId].moment;
-  return state.sweeps.filter((sw) => sw.moments.includes(moment));
+  const p = PRODUCTS[productId];
+  if (!p) return []; // a Level III product has no Level II sweeps
+  return state.sweeps.filter((sw) => sw.moments.includes(p.moment));
 }
 
 // Sweeps at (effectively) the same tilt — a SAILS VCP scans the lowest
@@ -909,8 +949,9 @@ const TILT_EPS = 0.1;
 // a VCP revisits that tilt (SAILS), the most recently collected sweep wins, so
 // the low-level products show the freshest scan rather than the volume's first.
 function pickSweep(sweeps, productId = state.productId, elev = state.selectedElevation) {
-  const moment = PRODUCTS[productId].moment;
-  const list = sweeps.filter((sw) => sw.moments.includes(moment));
+  const p = PRODUCTS[productId];
+  if (!p) return null; // Level III products aren't drawn from Level II sweeps
+  const list = sweeps.filter((sw) => sw.moments.includes(p.moment));
   if (!list.length) return null;
   let bestDiff = Infinity;
   for (const sw of list) bestDiff = Math.min(bestDiff, Math.abs(sw.elevation - elev));
@@ -938,6 +979,7 @@ function dedupeTilts(list) {
 }
 
 function currentSweep() {
+  if (isL3Product(state.productId)) return state.l3.decoded ? state.l3.decoded.sweep : null;
   return pickSweep(state.sweeps);
 }
 
@@ -986,8 +1028,16 @@ const DUAL_POL = new Set(['RHO', 'ZDR', 'PHI']);
 // Product ids offered for the current radar site — the full set, minus dual-pol
 // for TDWR towers.
 function availableProductOrder() {
+  // TDWR terminal radars scan to Doppler only and don't carry the WSR-88D Level
+  // III QPE/echo-top products, so they get neither dual-pol nor the L3 set.
   if (isTDWR(state.site)) return PRODUCT_ORDER.filter((id) => !DUAL_POL.has(id));
-  return PRODUCT_ORDER;
+  return [...PRODUCT_ORDER, ...L3_ORDER];
+}
+
+// The product object for a radar product id — a Level II moment (PRODUCTS) or a
+// Level III product (L3_PRODUCTS); both expose name/scale/unit/moment/disp*.
+function radarProduct(id = state.productId) {
+  return isL3Product(id) ? L3_PRODUCTS[id] : PRODUCTS[id];
 }
 
 function buildProductButtons() {
@@ -997,7 +1047,7 @@ function buildProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-grid';
   for (const id of availableProductOrder()) {
-    const p = PRODUCTS[id];
+    const p = radarProduct(id);
     const btn = document.createElement('button');
     btn.className = 'product-btn';
     btn.dataset.id = id;
@@ -1005,6 +1055,7 @@ function buildProductButtons() {
     if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', () => {
       if (routeProductToPane(id)) return;
+      const wasL3 = isL3Product(state.productId);
       state.productId = id;
       document
         .querySelectorAll('.product-btn')
@@ -1013,8 +1064,13 @@ function buildProductButtons() {
       el.palName.textContent = p.customPal ? `${p.customPal} → ${id}` : '';
       buildTiltList();
       buildLegend();
-      renderRadar();
       updateMeta();
+      // Level III products and Level II moments come from different sources (a
+      // per-product L3 file vs. the shared volume), so a switch across that
+      // boundary — or between two L3 products — reloads the frame list; switching
+      // between moments of the same volume just re-renders.
+      if (isL3Product(id) || wasL3) loadVolumeList();
+      else renderRadar();
       saveSettings();
     });
     el.productButtons.appendChild(btn);
@@ -1023,6 +1079,11 @@ function buildProductButtons() {
 
 function buildTiltList() {
   el.tiltList.innerHTML = '';
+  // Level III products are pre-derived single grids — no elevation tilts.
+  if (isL3Product(state.productId)) {
+    el.tiltList.innerHTML = '<div class="empty">Single derived product — no tilts.</div>';
+    return;
+  }
   const list = dedupeTilts(sweepsForProduct());
   if (!list.length) {
     el.tiltList.innerHTML = '<div class="empty">No tilts for this product.</div>';
@@ -1067,8 +1128,9 @@ function buildLegend() {
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   if (state.mode === 'models') return buildModelLegend();
-  const p = PRODUCTS[state.productId];
+  const p = radarProduct(state.productId);
   el.legend.innerHTML = legendHTML(p, p.scale);
+  updateSplitPaneChrome();
 }
 
 // Build the legend markup for a product/scale, with imperial tick labels.
@@ -1089,6 +1151,34 @@ function legendHTML(p, scale) {
     <div class="legend-title">${p.name} <span>(${u})</span></div>
     <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
     <div class="legend-ticks"><span>${tick(lo)}</span><span>${tick((lo + hi) / 2)}</span><span>${tick(hi)}</span></div>`;
+}
+
+function splitPaneProduct(id) {
+  if (state.mode === 'radar') return PRODUCTS[id];
+  if (state.mode === 'mrms') return MRMS_PRODUCTS[id] && resolveGridProduct(MRMS_PRODUCTS[id]);
+  if (state.mode === 'models') return MODEL_PRODUCTS[id] && resolveGridProduct(MODEL_PRODUCTS[id]);
+  return null;
+}
+
+function splitPaneLegendHTML(id) {
+  const p = splitPaneProduct(id);
+  return p && p.scale ? legendHTML(p, p.scale) : '';
+}
+
+function updateSplitPaneChrome() {
+  const sv = state.splitView;
+  if (!sv) return;
+  if (!sv.active) {
+    if (sv.setPaneLegends) sv.setPaneLegends('', '');
+    if (sv.setWeatherPickers) sv.setWeatherPickers(false);
+    return;
+  }
+  const canCompareLegend = state.mode === 'radar' || state.mode === 'mrms' || state.mode === 'models';
+  sv.setPaneLegends(
+    canCompareLegend ? splitPaneLegendHTML(sv._mainProduct ? sv._mainProduct() : state.productId) : '',
+    canCompareLegend ? splitPaneLegendHTML(sv.productId) : ''
+  );
+  if (sv.setWeatherPickers) sv.setWeatherPickers(!!(state.weather && state.weather.active));
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,6 +1314,7 @@ function refreshGridReflectivity() {
 // Data loading
 // ---------------------------------------------------------------------------
 async function loadVolumeList() {
+  if (isL3Product(state.productId)) return loadL3List();
   setStatus(`listing ${state.site}…`, true);
   buildVolumeList();
   try {
@@ -1260,8 +1351,83 @@ async function loadVolumeList() {
   }
 }
 
+// List the Level III frames for the active product at this site/day (reusing the
+// volume-list UI), then auto-load the latest, mirroring loadVolumeList for L2.
+async function loadL3List() {
+  const prod = radarProduct();
+  setStatus(`listing ${state.site} ${prod.name}…`, true);
+  buildVolumeList();
+  try {
+    let frames = await listLevel3(state.site, state.productId, state.date);
+    if (!frames.length) {
+      const probe = new Date(state.date);
+      for (let i = 0; i < 7 && !frames.length; i++) {
+        probe.setUTCDate(probe.getUTCDate() - 1);
+        const back = await listLevel3(state.site, state.productId, probe);
+        if (back.length) {
+          state.date = new Date(probe);
+          el.dateInput.value = isoDate(state.date);
+          frames = back;
+          setStatus(`no frames for that day — showing ${isoDate(state.date)}`);
+        }
+      }
+    }
+    state.volumes = frames;
+    buildVolumeList();
+    setStatus(`${frames.length} frames available`);
+    if (!frames.length) { clearRadarSource(state.map); drawRings(null, 0); state.l3.decoded = null; return; }
+    // Load the newest frame on an explicit refresh, in LIVE, or whenever the
+    // current key isn't in this list (a product switch leaves volumeKey on the
+    // previous product's frame).
+    const latest = frames[frames.length - 1].key;
+    if (state._forceLatest || state.live || !frames.some((f) => f.key === state.volumeKey)) {
+      state._forceLatest = false;
+      loadVolume(latest);
+    }
+  } catch (e) {
+    setStatus(`list error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+// Download + decode one Level III frame and draw it as a single-tilt sweep.
+async function loadL3Frame(key) {
+  state.volumeKey = key;
+  buildVolumeList();
+  const seq = ++volumeLoadSeq;
+  setStatus('downloading…', true);
+  el.progress.style.width = '0%';
+  el.progress.classList.add('show');
+  el.decoding.classList.remove('show');
+  try {
+    const { decoded } = await loadLevel3(state.site, state.productId, key, (p) => {
+      el.progress.style.width = Math.round(p * 100) + '%';
+    });
+    if (seq !== volumeLoadSeq) return;
+    state.l3.decoded = decoded;
+    const site = { lat: decoded.lat, lon: decoded.lon };
+    if (state._recenterRadar) {
+      state.map.jumpTo({ center: [site.lon, site.lat], zoom: 8 });
+      state._recenterRadar = false;
+    }
+    buildTiltList();
+    updateMeta();
+    displaySweep(decoded.sweep, site);
+    setStatus(`loaded · ${decoded.sweep.radials.length} radials`);
+  } catch (e) {
+    if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
+    console.error(e);
+  } finally {
+    if (seq === volumeLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
+  }
+}
+
 let volumeLoadSeq = 0;
 async function loadVolume(key) {
+  if (isL3Product(state.productId)) return loadL3Frame(key);
   state.volumeKey = key;
   buildVolumeList();
   const seq = ++volumeLoadSeq;
@@ -1319,6 +1485,11 @@ function renderRadar() {
     state.playback.renderFrame();
     return;
   }
+  if (isL3Product(state.productId)) {
+    const d = state.l3.decoded;
+    displaySweep(d ? d.sweep : null, d ? { lat: d.lat, lon: d.lon } : null);
+    return;
+  }
   displaySweep(currentSweep(), state.volume && state.volume.site);
 }
 
@@ -1340,7 +1511,10 @@ function radarSweepFor(productId) {
 
 // Mirror the current view into the second split-screen pane (no-op when off).
 function syncSplit() {
-  if (state.splitView && state.splitView.active) state.splitView.render();
+  if (state.splitView && state.splitView.active) {
+    state.splitView.render();
+    updateSplitPaneChrome();
+  }
 }
 
 // Format a native physical value in the product's imperial display units.
@@ -1352,7 +1526,7 @@ function fmtValue(product, v) {
 // Draw one sweep (from any volume) onto the map and remember it so the inspect
 // readout and dock can reflect what is actually on screen.
 function displaySweep(sweep, site) {
-  const product = PRODUCTS[state.productId];
+  const product = radarProduct(state.productId);
   sweep = resolveSweep(sweep);
   state.shownSweep = sweep;
   state.shownSite = site;
@@ -1430,6 +1604,7 @@ function applyModePanels() {
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar';
+  if (el.modelCityValuesField) el.modelCityValuesField.hidden = state.mode !== 'models';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
     state.mode === 'radar' ? 'Volume scans'
@@ -1561,7 +1736,7 @@ function buildSatProductButtons() {
       // Decode any extra bands this product needs from the cached file first.
       if (state.sat.scene) {
         setStatus(`rendering ${satProviderName()}…`, true);
-        await ensureBands(state.sat.scene, bandsFor(id));
+        await ensureBandsAsync(state.sat.scene, state.sat.satKey, state.sat.sectorKey, bandsFor(id));
         renderSatellite();
         setStatus(`${satProviderName()} ready`);
       }
@@ -1621,7 +1796,7 @@ async function loadSatScene(key) {
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
-    const scene = await loadGoesScene(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
+    const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
     if (seq !== satLoadSeq) return; // a newer selection superseded this one
@@ -1865,6 +2040,7 @@ function drawMrmsPayload(payload) {
 function buildMrmsLegend() {
   const p = resolveGridProduct(MRMS_PRODUCTS[state.mrms.productId]);
   el.legend.innerHTML = legendHTML(p, p.scale);
+  updateSplitPaneChrome();
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,8 +2265,140 @@ function setModelSource(map) {
 }
 
 function clearModels() {
+  state.models.displayGrid = null;
   if (state.models.layer) state.models.layer.clear();
   if (state.map && state.styleReady) clearModelOverlays(state.map);
+  clearModelCityValues();
+}
+
+function setupModelCityValueLayer(map) {
+  if (!map.getSource(MODEL_CITY_VALUE_SOURCE))
+    map.addSource(MODEL_CITY_VALUE_SOURCE, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getLayer(MODEL_CITY_VALUE_LAYER)) {
+    map.addLayer({
+      id: MODEL_CITY_VALUE_LAYER,
+      type: 'symbol',
+      source: MODEL_CITY_VALUE_SOURCE,
+      minzoom: 4,
+      layout: {
+        visibility: 'none',
+        'text-field': ['get', 'label'],
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-size': ['interpolate', ['linear'], ['zoom'], 4, 16, 8, 20, 12, 24],
+        'text-offset': [0, -1.2],
+        'text-anchor': 'bottom',
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': 'rgba(4,10,18,0.92)',
+        'text-halo-width': 2.4,
+      },
+    });
+  }
+}
+
+function modelGridForReadouts() {
+  return (state.playback && state.playback.active && state.models.displayGrid) || state.models.grid;
+}
+
+function sampleGridRaw(grid, lat, lon) {
+  const i = Math.floor((lon - grid.lon1) / grid.di);
+  const j = Math.floor((grid.lat1 - lat) / grid.dj);
+  if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return undefined;
+  return grid.values[j * grid.ni + i];
+}
+
+function placeLabelLayers(map) {
+  const layers = (map.getStyle() && map.getStyle().layers) || [];
+  return layers
+    .filter((ly) =>
+      ly.type === 'symbol' &&
+      ly['source-layer'] === 'place_label' &&
+      ly.layout &&
+      ly.layout['text-field'] &&
+      ly.id !== MODEL_CITY_VALUE_LAYER &&
+      (!map.getLayoutProperty || map.getLayoutProperty(ly.id, 'visibility') !== 'none'))
+    .map((ly) => ly.id);
+}
+
+function visibleTownPoints(map) {
+  const layers = placeLabelLayers(map);
+  if (!layers.length) return [];
+  let rendered = [];
+  try {
+    rendered = map.queryRenderedFeatures({ layers });
+  } catch (_) {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const f of rendered) {
+    const coords = f && f.geometry && f.geometry.type === 'Point' && f.geometry.coordinates;
+    if (!coords || coords.length < 2) continue;
+    const p = f.properties || {};
+    const name = p.name_en || p.name || p.name_script || '';
+    const lon = Number(coords[0]);
+    const lat = Number(coords[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const key = `${name}:${lon.toFixed(3)}:${lat.toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, lat, lon });
+  }
+  return out;
+}
+
+function modelCityValueGeoJSON(grid) {
+  const p = resolveGridProduct(grid.product);
+  const features = [];
+  for (const { name, lat, lon } of visibleTownPoints(state.map)) {
+    const v = sampleGridRaw(grid, lat, lon);
+    if (v == null || Number.isNaN(v) || !(v >= p.floor)) continue;
+    features.push({
+      type: 'Feature',
+      properties: { name, label: String(Math.round(dispValue(p, v))) },
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function clearModelCityValues() {
+  const map = state.map;
+  if (!map || !map.getSource || !map.getSource(MODEL_CITY_VALUE_SOURCE)) return;
+  map.getSource(MODEL_CITY_VALUE_SOURCE).setData({ type: 'FeatureCollection', features: [] });
+  if (map.getLayer(MODEL_CITY_VALUE_LAYER))
+    map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'visibility', 'none');
+}
+
+function scheduleModelCityValuesRender() {
+  const map = state.map;
+  if (!map || state._modelCityValuesScheduled) return;
+  state._modelCityValuesScheduled = true;
+  let done = false;
+  let timer = null;
+  const run = () => {
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    state._modelCityValuesScheduled = false;
+    requestAnimationFrame(() => renderModelCityValues());
+  };
+  timer = setTimeout(run, 700);
+  if (map.once) map.once('idle', run);
+}
+
+function renderModelCityValues() {
+  const map = state.map;
+  const grid = modelGridForReadouts();
+  if (!map || !state.styleReady || !grid) return;
+  setupModelCityValueLayer(map);
+  const on = state.mode === 'models' && state.modelCityValues;
+  if (!on) { clearModelCityValues(); return; }
+  map.getSource(MODEL_CITY_VALUE_SOURCE).setData(modelCityValueGeoJSON(grid));
+  map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'visibility', 'visible');
 }
 
 function renderModels() {
@@ -2098,12 +2406,14 @@ function renderModels() {
   if (!map || !state.styleReady) return;
   const grid = state.models.grid;
   if (!grid) { clearModels(); return; }
+  state.models.displayGrid = grid;
   setModelSource(map);
   state.models.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
   // Upper-air products carry wind + height overlays; others clear them.
   renderModelOverlays(map, grid);
+  renderModelCityValues();
   syncSplit();
   updateDock();
 }
@@ -2113,26 +2423,27 @@ function renderModels() {
 function drawModelPayload(payload) {
   const map = state.map;
   if (!map || !state.styleReady) return;
+  if (payload && payload.grid) state.models.displayGrid = payload.grid;
   setModelSource(map);
   clearModelOverlays(map);
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
+  renderModelCityValues();
 }
 
 function buildModelLegend() {
   const p = resolveGridProduct(MODEL_PRODUCTS[state.models.productId]);
   el.legend.innerHTML = legendHTML(p, p.scale);
+  updateSplitPaneChrome();
 }
 
 function sampleModelAt(lat, lon) {
-  const grid = state.models.grid;
+  const grid = modelGridForReadouts();
   if (!grid) return null;
   const p = resolveGridProduct(grid.product);
-  const i = Math.floor((lon - grid.lon1) / grid.di);
-  const j = Math.floor((grid.lat1 - lat) / grid.dj);
-  if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
-  const v = grid.values[j * grid.ni + i];
+  const v = sampleGridRaw(grid, lat, lon);
+  if (v == null) return { out: true };
   if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no echo', sub: p.id };
   return { main: fmtValue(p, v), sub: p.id };
 }
@@ -2145,13 +2456,45 @@ function sampleModelAt(lat, lon) {
 // ---------------------------------------------------------------------------
 let soundingSeq = 0;
 
-function modelValidTime() {
-  if (state.models.grid && state.models.grid.time) return state.models.grid.time;
-  const run = currentModelRun();
-  if (!run) return new Date();
-  return new Date(run.time.getTime() + state.models.fhour * 3600 * 1000);
+// The forecast hour actually shown on screen. While a loop is scrubbing/playing
+// the displayed hour is the playback frame's, which is independent of the picker
+// selection (state.models.fhour) — so a sounding must follow the frame, not the
+// picker, or it would always read the picker's hour (F00 by default).
+function currentModelFhour() {
+  const pb = state.playback;
+  if (pb && pb.active && state.mode === 'models') {
+    const f = pb.frames[pb.idx];
+    if (f && Number.isFinite(f.fhour)) return f.fhour;
+  }
+  return state.models.fhour;
 }
 
+<<<<<<< HEAD
+// Keep the selected forecast hour in lock-step with whatever frame is on screen
+// while a model loop scrubs/plays. Without this, the picker highlight, the dock
+// label and a sounding opened mid-loop all stay pinned to the hour the loop
+// started on (F00 by default) even though the map shows a later frame. Updates
+// the picker highlight in place rather than rebuilding the whole list.
+function setDisplayedFhour(f) {
+  if (!Number.isFinite(f) || state.models.fhour === f) return;
+  state.models.fhour = f;
+  if (el.fhourList) {
+    const want = 'F' + p2(f);
+    el.fhourList.querySelectorAll('.tilt-btn').forEach((b) =>
+      b.classList.toggle('active', b.textContent === want));
+  }
+}
+
+function modelValidTime(fhour = currentModelFhour()) {
+  const run = currentModelRun();
+  if (run) return new Date(run.time.getTime() + fhour * 3600 * 1000);
+  const grid = (state.playback && state.playback.active && state.models.displayGrid) || state.models.grid;
+  if (grid && grid.time) return grid.time;
+  return new Date();
+}
+
+=======
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
 // Open a sounding for a map point. `loc` is a {lat, lng} (e.g. an event lngLat);
 // it defaults to the map centre. Only meaningful in models mode.
 async function openSounding(loc) {
@@ -2159,7 +2502,12 @@ async function openSounding(loc) {
   const ctr = state.map.getCenter();
   const c = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)
     ? { lat: loc.lat, lng: loc.lng } : { lat: ctr.lat, lng: ctr.lng };
+<<<<<<< HEAD
+  const fhour = currentModelFhour();
+  const validTime = modelValidTime(fhour);
+=======
   const validTime = modelValidTime();
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
   const seq = ++soundingSeq;
 
   // Follow the model selected for the active forecast hour — state.models.modelKey
@@ -2174,6 +2522,16 @@ async function openSounding(loc) {
   el.sndCharts.hidden = true;
   el.sndParams.hidden = true;
   el.sndStatus.hidden = false;
+
+  // Some models (the AI ones) publish no column we can build a sounding from —
+  // show a short notice rather than a misleading or empty profile.
+  if (src.unavailable) {
+    el.sndStatus.textContent = `Soundings aren't available for ${label}.`;
+    el.sndMeta.textContent = '';
+    state.soundingProfile = null;
+    return;
+  }
+
   el.sndStatus.textContent = `Loading ${label} sounding…`;
   const utc = `${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
   el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
@@ -2186,7 +2544,11 @@ async function openSounding(loc) {
       const run = currentModelRun();
       if (!run) throw new Error('No model run is loaded for this sounding.');
       profile = await fetchSoundingNative(
+<<<<<<< HEAD
+        modelKey, run, fhour, c.lat, c.lng, validTime,
+=======
         modelKey, run, state.models.fhour, c.lat, c.lng, validTime,
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
         (frac) => {
           if (seq === soundingSeq)
             el.sndStatus.textContent = `Loading ${label} sounding… ${Math.round(frac * 100)}%`;
@@ -2275,6 +2637,48 @@ function refreshSiteDots() {
     mobile ? 9 : 6,
     mobile ? 7 : 3.5,
   ]);
+}
+
+// Scan every radar site's most recent scan time and flag the ones that look
+// down — no volume in the past hour, or none findable at all — so their dots can
+// draw red. Runs in the background with bounded concurrency (one small list
+// request per site) and recolors the dots progressively as results arrive, so a
+// ~160-site sweep never blocks the UI. A fresh call supersedes any in-flight one.
+const DOWN_SCAN_CONCURRENCY = 8;
+const DOWN_STALE_MS = 60 * 60 * 1000; // "down" = no scan in the past hour
+async function scanDownRadars() {
+  const seq = ++state._downScanSeq;
+  const codes = RADARS.map((r) => r[0]);
+  let next = 0, dirty = false;
+  // Repaint at most a few times a second while results stream in.
+  let flushTimer = null;
+  const scheduleFlush = () => {
+    if (flushTimer || !dirty) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      if (seq === state._downScanSeq && dirty) { dirty = false; refreshSiteDots(); }
+    }, 400);
+  };
+  const worker = async () => {
+    for (;;) {
+      if (seq !== state._downScanSeq) return; // superseded
+      const i = next++;
+      if (i >= codes.length) return;
+      const icao = codes[i];
+      let down = true;
+      try {
+        const t = await latestScanTime(icao);
+        down = !t || (Date.now() - t.getTime() > DOWN_STALE_MS);
+      } catch (_) { down = true; }
+      if (seq !== state._downScanSeq) return;
+      const was = state.downSites.has(icao);
+      if (down) state.downSites.add(icao); else state.downSites.delete(icao);
+      if (down !== was) { dirty = true; scheduleFlush(); }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(DOWN_SCAN_CONCURRENCY, codes.length) }, worker));
+  if (seq === state._downScanSeq && dirty) refreshSiteDots();
 }
 
 // Long-press anywhere on the map (touch) jumps to the nearest WSR-88D site —
@@ -2405,7 +2809,7 @@ function sampleActive(lat, lon) {
 }
 
 function sampleRadarAt(lat, lon) {
-  const product = PRODUCTS[state.productId];
+  const product = radarProduct(state.productId);
   const sweep = state.shownSweep;
   const site = state.shownSite;
   if (!sweep || !site) return null;
@@ -2505,16 +2909,16 @@ function dockInfo() {
       prod: state.models.productId,
       name: p ? p.name : state.models.productId,
       source: m ? m.label.split(' ')[0] : 'MODEL',
-      time: `F${String(state.models.fhour).padStart(2, '0')}`,
+      time: `F${String(currentModelFhour()).padStart(2, '0')}`,
     };
   }
-  // Radar (default).
-  const p = PRODUCTS[state.productId];
+  // Radar (default) — Level II moment or Level III product.
+  const p = radarProduct(state.productId);
   const t = state.volumes.find((x) => x.key === state.volumeKey);
   return {
     prod: state.productId,
     name: p ? p.name : state.productId,
-    source: (state.volume && state.volume.icao) || state.site,
+    source: (!isL3Product(state.productId) && state.volume && state.volume.icao) || state.site,
     time: t ? t.label : '—',
   };
 }
@@ -2611,36 +3015,56 @@ function enableSheetSwipe() {
   handle.addEventListener('touchcancel', end, { passive: true });
 }
 
-// Fill the SPC type picker with the hazard types valid for the current day,
-// keeping the controller's selected type (it falls back to the first valid type
-// when the previous one doesn't exist for the new day).
-function populateSpcTypes() {
-  const sel = el.spcTypeSelect;
+// Fill the detail picker with the sub-options the current outlook product offers
+// (e.g. the day+hazard for SPC convective, the lead window for CPC), keeping the
+// controller's selection or falling back to the product's first detail.
+function populateOutlookDetails() {
+  const sel = el.outlookDetail;
   if (!sel) return;
   sel.innerHTML = '';
-  for (const t of spcTypesForDay(state.spc.day)) {
+  for (const d of state.spc.detailsForProduct(state.spc.product)) {
     const o = document.createElement('option');
-    o.value = t;
-    o.textContent = SPC_TYPE_LABELS[t];
+    o.value = d.id;
+    o.textContent = d.label;
     sel.appendChild(o);
   }
-  sel.value = state.spc.type;
+  sel.value = state.spc.detail;
 }
 
-// Wire the SPC outlook controller to its panel: ON/OFF toggle, day + type
+// Wire the outlook controller to its panel: ON/OFF toggle, product + detail
 // pickers, and persistence of all three across sessions.
 function setupSpcOutlook() {
-  state.spc = new SpcOutlookController(state.map, {
-    daySelect: el.spcDaySelect,
-    typeSelect: el.spcTypeSelect,
+  state.spc = new OutlookController(state.map, {
+    productSelect: el.outlookSelect,
+    detailSelect: el.outlookDetail,
     legend: el.spcLegend,
     status: el.spcStatus,
+    // Mesoscale-discussion click-through reuses the alert popup/briefing chrome.
+    previewWrap: el.alertPreview,
+    previewCard: el.alertPreviewCard,
+    detailWrap: el.alertDetail,
+    detailPanel: el.alertDetailPanel,
+    closeBtn: el.alertClose,
+    // Keep MD and alert views mutually exclusive (they share the same chrome).
+    closeAlerts: () => { if (state.alerts) { state.alerts.closePreview(); state.alerts.closeDetail(); } },
+    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
   });
-  // Restore saved day/type before building the type list and applying enablement.
-  state.spc.day = state._spc.day;
-  state.spc.type = state._spc.type;
-  if (el.spcDaySelect) el.spcDaySelect.value = String(state.spc.day);
-  populateSpcTypes();
+  state.spc.wireMap();
+  // Restore saved product/detail before building the pickers and applying state.
+  state.spc.product = OUTLOOKS[state._spc.product] ? state._spc.product : 'spc_conv';
+  const dets = state.spc.detailsForProduct(state.spc.product);
+  state.spc.detail = dets.some((d) => d.id === state._spc.detail) ? state._spc.detail : dets[0].id;
+  if (el.outlookSelect) {
+    el.outlookSelect.innerHTML = '';
+    for (const id of OUTLOOK_ORDER) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = OUTLOOKS[id].label;
+      el.outlookSelect.appendChild(o);
+    }
+    el.outlookSelect.value = state.spc.product;
+  }
+  populateOutlookDetails();
   setToggleBtn(el.spcToggle, state._spc.on);
   if (state._spc.on) state.spc.setEnabled(true);
 
@@ -2649,20 +3073,20 @@ function setupSpcOutlook() {
       const on = !el.spcToggle.classList.contains('active');
       setToggleBtn(el.spcToggle, on);
       state.spc.setEnabled(on);
-      setStatus(on ? `SPC outlook on (day ${state.spc.day})` : 'SPC outlook off');
+      setStatus(on ? `${OUTLOOKS[state.spc.product].label} outlook on` : 'Outlook off');
       saveSettings();
     });
   }
-  if (el.spcDaySelect) {
-    el.spcDaySelect.addEventListener('change', () => {
-      state.spc.setDay(Number(el.spcDaySelect.value));
-      populateSpcTypes(); // day change may swap the valid type set
+  if (el.outlookSelect) {
+    el.outlookSelect.addEventListener('change', () => {
+      state.spc.setProduct(el.outlookSelect.value);
+      populateOutlookDetails(); // product change swaps the detail set
       saveSettings();
     });
   }
-  if (el.spcTypeSelect) {
-    el.spcTypeSelect.addEventListener('change', () => {
-      state.spc.setType(el.spcTypeSelect.value);
+  if (el.outlookDetail) {
+    el.outlookDetail.addEventListener('change', () => {
+      state.spc.setDetail(el.outlookDetail.value);
       saveSettings();
     });
   }
@@ -2733,11 +3157,10 @@ const mqMobile = window.matchMedia('(min-width: 0px)');
 function applyResponsiveLayout() {
   const mobile = mqMobile.matches;
   document.querySelector('.app').classList.toggle('mobile', mobile);
-  // While a loop is running its UI owns the dock's space, so keep the dock
-  // hidden until playback stops.
-  const playing = state.playback && state.playback.active;
-  el.mobileDock.hidden = !mobile || playing;
-  if ((!mobile || playing) && state._closeDockMenu) state._closeDockMenu();
+  // The dock stays visible during playback now — the scrubber lives inside it and
+  // only replaces the product + play slot (see `.app.playing` CSS).
+  el.mobileDock.hidden = !mobile;
+  if (!mobile && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
     if (el.productPanel.parentElement !== el.pageControls) {
@@ -2811,6 +3234,15 @@ async function buildRadarPlaybackFrames(n) {
 async function buildPlaybackProvider() {
   const n = state.playbackFrames;
   if (state.mode === 'radar') {
+    // Level III products loop their own per-frame files (already in state.volumes).
+    if (isL3Product(state.productId)) {
+      return {
+        frames: state.volumes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+        async load(f) { return (await loadLevel3(state.site, state.productId, f.key)).decoded; },
+        render(d) { displaySweep(d.sweep, { lat: d.lat, lon: d.lon }); },
+        idle() { renderRadar(); },
+      };
+    }
     const frames = await buildRadarPlaybackFrames(n);
     return {
       frames: frames.map((v) => ({ label: v.label, ck: v.key, key: v.key })),
@@ -2834,9 +3266,13 @@ async function buildPlaybackProvider() {
     return {
       frames: state.sat.scenes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
       async load(f) {
-        const scene = await loadGoesScene(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
+        const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
         const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
-        return { meta: satSceneMeta(scene), rgba, bbox: sceneBBox(scene) };
+        const payload = { meta: satSceneMeta(scene), rgba, bbox: sceneBBox(scene) };
+        // Playback only needs the prebuilt RGBA per frame, not the channels — drop
+        // the worker's cached decode so a long loop can't pin many full-disk files.
+        if (f.key !== state.sat.sceneKey) evictScene(f.key);
+        return payload;
       },
       render(payload) { drawSatScene(payload.meta, payload.rgba, payload.bbox); },
       idle() { renderSatellite(); },
@@ -2857,10 +3293,20 @@ async function buildPlaybackProvider() {
       frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
-        return prepareGridTexture(grid, resolveGridProduct(grid.product));
+        const payload = prepareGridTexture(grid, resolveGridProduct(grid.product));
+        payload.grid = grid;
+        return payload;
       },
       render(payload) { drawModelPayload(payload); },
-      idle() { renderModels(); },
+      // Stopping the loop keeps the hour the user scrubbed to (already reflected
+      // in state.models.fhour): promote that frame's grid to the live grid so
+      // renderModels redraws it with its full barb/contour overlays, rather than
+      // snapping back to the grid the loop started on. No refetch — the frame is
+      // already decoded — and it stays synchronous like the previous behaviour.
+      idle() {
+        if (state.models.displayGrid) state.models.grid = state.models.displayGrid;
+        renderModels();
+      },
     };
   }
   return { frames: [] };
@@ -2892,10 +3338,9 @@ function createPlayback() {
       this.active = true;
       el.playBtn.classList.add('active');
       if (el.loopBtn) el.loopBtn.classList.add('active');
-      // The loop UI takes over the dock's space: hide the dock while playing
-      // and reveal it again on stop (the ✕ on the bar).
+      // The loop UI slots into the dock's product + play area (CSS hides those
+      // while `.playing`); inspect + tools stay put beside the scrubber.
       if (state._closeDockMenu) state._closeDockMenu();
-      el.mobileDock.hidden = true;
       el.playbackBar.hidden = false;
       el.sheetPlayback.hidden = false;
       document.querySelector('.app').classList.add('playing');
@@ -3058,6 +3503,12 @@ function createPlayback() {
       const f = this.frames[this.idx];
       if (!f || !f.loaded || !this.provider) return;
       this.provider.render(f.payload);
+<<<<<<< HEAD
+      // Models: the displayed forecast hour is now the source of truth for the
+      // picker, dock and any sounding opened mid-loop.
+      if (state.mode === 'models') setDisplayedFhour(f.fhour);
+=======
+>>>>>>> ca3f0acc6be7b611ddbc74e544102aeb485b9545
       const suffix = this.loadedCount < this.frames.length
         ? ` · ${this.loadedCount}/${this.frames.length} loaded` : '';
       el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}${suffix}`;
@@ -3077,9 +3528,9 @@ function createPlayback() {
       if (el.loopBtn) el.loopBtn.classList.remove('active');
       el.playbackBar.hidden = true;
       el.sheetPlayback.hidden = true;
+      // Dropping `.playing` re-shows the product chip + dock play button that the
+      // scrubber stood in for; the dock itself stayed visible throughout.
       document.querySelector('.app').classList.remove('playing');
-      // Restore the normal bottom dock that the loop UI replaced.
-      if (mqMobile.matches) el.mobileDock.hidden = false;
       // Release the frame cache on phones so playback memory is freed at once.
       if (mqMobile.matches) { this.cache.clear(); this.cacheCtx = null; }
       // Restore the live view for the active source.
@@ -3093,6 +3544,18 @@ function createPlayback() {
 
 function updateMeta() {
   updateDock();
+  if (isL3Product(state.productId)) {
+    const d = state.l3.decoded;
+    const t = state.volumes.find((x) => x.key === state.volumeKey);
+    el.meta.innerHTML = d
+      ? `<div class="meta-row"><span>Radar</span><b>${state.site}</b></div>
+         <div class="meta-row"><span>Product</span><b>${radarProduct().name}</b></div>
+         <div class="meta-row"><span>Frame time</span><b>${t ? t.label : '—'}</b></div>
+         <div class="meta-row"><span>Radials</span><b>${d.sweep.radials.length}</b></div>
+         <div class="meta-row"><span>Site lat/lon</span><b>${d.lat.toFixed(3)}, ${d.lon.toFixed(3)}</b></div>`
+      : '<div class="empty">No frame loaded.</div>';
+    return;
+  }
   const v = state.volume;
   const sw = currentSweep();
   if (!v) {
@@ -3245,11 +3708,13 @@ function setupMapTools() {
     // When the user clicks a pane to select it, repaint the product buttons so
     // they highlight — and drive — the newly active pane.
     onActivePaneChange: () => buildProductButtons(),
+    onSplitProductsChange: () => updateSplitPaneChrome(),
   });
   el.toolSplit.addEventListener('click', () => {
     const on = state.splitView.toggle();
     el.toolSplit.classList.toggle('active', on);
     if (on) state.splitView.setDrawings(state.mapTools.getFeatureCollection());
+    updateSplitPaneChrome();
   });
 
   // Export / share — snapshot the live map(s) to a PNG with a caption banner.
@@ -3291,6 +3756,7 @@ function startWeatherTool() {
   state.weather.view = 'current';
   if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
+  updateSplitPaneChrome();
   el.toolWeather.classList.add('active');
   updateWeatherFromCenter(true);
 }
@@ -3306,6 +3772,7 @@ function stopWeatherTool() {
   state.weather.abort = null;
   if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
+  updateSplitPaneChrome();
   el.toolWeather.classList.remove('active');
   buildLegend();
   setStatus('local weather off');
@@ -3799,11 +4266,12 @@ function buildExportCaption() {
     cap.time = run ? `${run.label} run` : '';
   } else {
     // Radar.
-    const site = (state.volume && state.volume.icao) || state.site;
+    const l3 = isL3Product(state.productId);
+    const site = (!l3 && state.volume && state.volume.icao) || state.site;
     const meta = RADARS.find((r) => r[0] === site);
-    const p = PRODUCTS[state.productId];
+    const p = radarProduct(state.productId);
     cap.title = meta ? `${site} · ${meta[1]}` : site;
-    cap.sub = `${p.name} (${dispUnitOf(p)}) · NEXRAD Level II`;
+    cap.sub = `${p.name} (${dispUnitOf(p)}) · NEXRAD Level ${l3 ? 'III' : 'II'}`;
     const t = state.volumes.find((x) => x.key === state.volumeKey);
     cap.time = t ? t.label : '';
   }
@@ -3854,9 +4322,10 @@ function saveSettings() {
         showRings: state.showRings,
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
+        modelCityValues: state.modelCityValues,
         alertsOn: state.alerts ? state.alerts.enabled : true,
         spc: state.spc
-          ? { on: state.spc.enabled, day: state.spc.day, type: state.spc.type }
+          ? { on: state.spc.enabled, product: state.spc.product, detail: state.spc.detail }
           : state._spc,
         playbackFrames: state.playbackFrames,
         dockTool: state.dockTool,
@@ -3892,16 +4361,18 @@ function applyStoredSettings(s) {
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
+  if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
   if (typeof s.playbackFrames === 'number') state.playbackFrames = s.playbackFrames;
   if (typeof s.dockTool === 'string') state.dockTool = s.dockTool;
   if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
   if (s.spc && typeof s.spc === 'object') {
     if (typeof s.spc.on === 'boolean') state._spc.on = s.spc.on;
-    if (Number.isInteger(s.spc.day) && s.spc.day >= 1 && s.spc.day <= 8) state._spc.day = s.spc.day;
-    if (typeof s.spc.type === 'string') state._spc.type = s.spc.type;
-    // Guard: a restored type must be valid for the restored day.
-    if (!spcTypesForDay(state._spc.day).includes(state._spc.type))
-      state._spc.type = spcTypesForDay(state._spc.day)[0];
+    // New shape: product + detail. Restore only if the product still exists; the
+    // controller re-validates the detail against that product when it builds.
+    if (typeof s.spc.product === 'string' && OUTLOOKS[s.spc.product]) {
+      state._spc.product = s.spc.product;
+      if (typeof s.spc.detail === 'string') state._spc.detail = s.spc.detail;
+    }
   }
   if (s.sat && typeof s.sat === 'object') {
     if (typeof s.sat.satKey === 'string') state.sat.satKey = s.sat.satKey;
@@ -3955,6 +4426,7 @@ function reflectStoredControls() {
   setToggleBtn(el.dealiasToggle, state.dealias);
   if (el.smooth) { el.smooth.value = String(state.smooth); el.smoothVal.textContent = SMOOTH_LABELS[state.smooth]; }
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
+  setToggleBtn(el.modelCityValuesToggle, state.modelCityValues);
   if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
   if (el.basemapSelect) el.basemapSelect.value = state.basemap;
 }
@@ -4113,6 +4585,18 @@ function init() {
       state.radarOverlay = on;
       applyRadarOverlay();
       setStatus(on ? `radar overlay on (${state.site})` : 'radar overlay off');
+      saveSettings();
+    });
+  }
+
+  if (el.modelCityValuesToggle) {
+    el.modelCityValuesToggle.addEventListener('click', () => {
+      const on = !el.modelCityValuesToggle.classList.contains('active');
+      setToggleBtn(el.modelCityValuesToggle, on);
+      state.modelCityValues = on;
+      if (on) renderModelCityValues();
+      else clearModelCityValues();
+      setStatus(on ? 'model city values on' : 'model city values off');
       saveSettings();
     });
   }
