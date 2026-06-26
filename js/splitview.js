@@ -131,6 +131,8 @@ export class SplitView {
     this.syncing = false;
     this.drawings = { type: 'FeatureCollection', features: [] };
     this._gridCache = new Map();
+    this._paneLegends = [null, null];
+    this._weatherPickers = [null, null];
     // Which pane the shared bottom UI currently drives: 1 = main map, 2 = this
     // pane. Click a panel to switch. Starts on the main map so behaviour is
     // unchanged until the user picks the second pane.
@@ -171,9 +173,11 @@ export class SplitView {
     });
     this._bindSync();
     this._buildBadges();
+    this._buildPaneChrome();
     this._bindPaneSelect();
     this.activePane = 1;
     this._updatePaneUI();
+    if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     setTimeout(() => { main.resize(); map.resize(); }, 60);
   }
 
@@ -185,6 +189,7 @@ export class SplitView {
     document.getElementById('map2').hidden = true;
     if (this._badge1) { this._badge1.remove(); this._badge1 = null; }
     if (this._badge2) { this._badge2.remove(); this._badge2 = null; }
+    this._removePaneChrome();
     this._unbindPaneSelect();
     const mapEl = document.getElementById('map');
     const map2El = document.getElementById('map2');
@@ -200,6 +205,7 @@ export class SplitView {
     this.layers = { radar: null, mrms: null, models: null, sat: null };
     // Repaint the bottom UI to reflect the main map again.
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
+    if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     setTimeout(() => this.ctx.state.map && this.ctx.state.map.resize(), 60);
   }
 
@@ -352,6 +358,7 @@ export class SplitView {
     if (!this.active) return;
     this.productId = this._defaultProduct();
     this._updateBadges();
+    if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     this.render();
   }
 
@@ -373,6 +380,7 @@ export class SplitView {
   setProduct(id) {
     this.productId = id;
     this._updateBadges();
+    if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     this.render();
   }
 
@@ -411,6 +419,57 @@ export class SplitView {
     if (a) a.classList.toggle('pane-active', this.activePane === 1);
     if (b) b.classList.toggle('pane-active', this.activePane === 2);
     this._updateBadges();
+  }
+
+  _buildPaneChrome() {
+    this._removePaneChrome();
+    const makeLegend = (host) => {
+      if (!host) return null;
+      const d = document.createElement('div');
+      d.className = 'legend split-pane-legend';
+      host.appendChild(d);
+      return d;
+    };
+    const makePicker = (host) => {
+      if (!host) return null;
+      const d = document.createElement('div');
+      d.className = 'weather-center-picker split-weather-picker';
+      d.hidden = true;
+      d.innerHTML = `
+        <div class="wxp-line wxp-v"></div>
+        <div class="wxp-line wxp-h"></div>
+        <div class="wxp-ring"></div>
+        <div class="wxp-label">Weather center</div>`;
+      host.appendChild(d);
+      return d;
+    };
+    const a = document.getElementById('map');
+    const b = document.getElementById('map2');
+    this._paneLegends = [makeLegend(a), makeLegend(b)];
+    this._weatherPickers = [makePicker(a), makePicker(b)];
+  }
+
+  _removePaneChrome() {
+    for (const node of [...this._paneLegends, ...this._weatherPickers]) {
+      if (node) node.remove();
+    }
+    this._paneLegends = [null, null];
+    this._weatherPickers = [null, null];
+  }
+
+  setPaneLegends(mainHTML, splitHTML) {
+    const vals = [mainHTML, splitHTML];
+    this._paneLegends.forEach((node, i) => {
+      if (!node) return;
+      node.innerHTML = vals[i] || '';
+      node.hidden = !vals[i];
+    });
+  }
+
+  setWeatherPickers(on) {
+    this._weatherPickers.forEach((node) => {
+      if (node) node.hidden = !on;
+    });
   }
 
   // A small badge on each pane: which pane it is, its current product, and
