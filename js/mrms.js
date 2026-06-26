@@ -41,8 +41,24 @@ const QPE = [
   s(30, [230, 220, 0]), s(60, [255, 120, 0]), s(100, [220, 0, 0]),
   s(150, [180, 0, 90]), s(250, [255, 0, 255]),
 ];
+// Echo-top height (km) ramp — short/warm storms blue, tall (severe) tops red→magenta.
+const ETOP = [
+  s(2, [40, 60, 120]), s(5, [0, 150, 210]), s(8, [0, 200, 120]),
+  s(10, [230, 220, 0]), s(12, [255, 150, 0]), s(15, [220, 0, 0]), s(18, [255, 0, 255]),
+];
+// Vertically Integrated Liquid (kg/m²) ramp — high VIL flags hail cores.
+const VILR = [
+  s(1, [40, 60, 120]), s(5, [0, 150, 210]), s(10, [0, 200, 120]),
+  s(20, [230, 220, 0]), s(35, [255, 150, 0]), s(50, [220, 0, 0]), s(70, [255, 0, 255]),
+];
+// Instantaneous precipitation rate (mm/hr) ramp.
+const PRATE = [
+  s(0.5, [120, 200, 255]), s(2, [0, 120, 240]), s(5, [0, 200, 120]),
+  s(10, [230, 220, 0]), s(25, [255, 120, 0]), s(50, [220, 0, 0]), s(100, [255, 0, 255]),
+];
 
 const MM_TO_IN = 0.0393700787;
+const KM_TO_KFT = 3.2808399; // km → thousands of feet
 
 // `disp` { unit, factor } gives an imperial display conversion for legend ticks
 // and the inspect readout, leaving the native values/colors untouched.
@@ -62,9 +78,33 @@ export const MRMS_PRODUCTS = {
   MESH: product('MESH', 'MESH_00.50', 'Max Estimated Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
   POSH: product('POSH', 'POSH_00.50', 'Prob. of Severe Hail', '%', 0, 100, 1, PROB),
   LTG30: product('LTG30', 'LightningProbabilityNext30minGrid_scale_1', '30-min CG Lightning Prob.', '%', 0, 100, 1, PROB),
+  // ---- Storm structure (echo tops / integrated liquid & ice) ----
+  HREET: product('HREET', 'LVL3_HREET_00.50', 'Enhanced Echo Top (18 dBZ)', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET18: product('ET18', 'EchoTop_18_00.50', 'Echo Top (18 dBZ)', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET50: product('ET50', 'EchoTop_50_00.50', 'Echo Top (50 dBZ)', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  VIL: product('VIL', 'VIL_00.50', 'Vert. Integrated Liquid', 'kg/m²', 0, 70, 0.5, VILR),
+  VILD: product('VILD', 'VIL_Density_00.50', 'VIL Density', 'g/m³', 0, 6, 0.1, VILR.map((k) => ({ ...k, v: k.v / 11.7 }))),
+  VII: product('VII', 'VII_00.50', 'Vert. Integrated Ice', 'kg/m²', 0, 40, 0.5, VILR.map((k) => ({ ...k, v: k.v * 0.57 }))),
+  // ---- Reflectivity variants ----
+  LLREF: product('LLREF', 'LowLevelCompositeReflectivity_00.50', 'Low-Level Composite Refl.', 'dBZ', 5, 75, 5, REFL),
+  RALA: product('RALA', 'MergedReflectivityAtLowestAltitude_00.50', 'Refl. at Lowest Altitude', 'dBZ', 5, 75, 5, REFL),
+  REF0C: product('REF0C', 'Reflectivity_0C_00.50', 'Reflectivity at 0°C', 'dBZ', 5, 75, 5, REFL),
+  REFM20C: product('REFM20C', 'Reflectivity_-20C_00.50', 'Reflectivity at −20°C', 'dBZ', 5, 75, 5, REFL),
+  // ---- Rotation / hail extras ----
+  AZSHEAR36: product('AZSHEAR36', 'MergedAzShear_3-6kmAGL_00.50', 'AzShear 3–6 km (Mid-Level)', '10⁻³ s⁻¹', 2, 40, 2, ROT),
+  SHI: product('SHI', 'SHI_00.50', 'Severe Hail Index', '', 0, 200, 1, HAIL.map((k) => ({ ...k, v: k.v * 2 }))),
+  MESH24H: product('MESH24H', 'MESH_Max_1440min_00.50', '24-hr Max Hail Size', 'mm', 0, 100, 0.5, HAIL, { unit: 'in', factor: MM_TO_IN }),
+  LTG60: product('LTG60', 'LightningProbabilityNext60minGrid_scale_1', '60-min CG Lightning Prob.', '%', 0, 100, 1, PROB),
+  // ---- Precipitation (rate + multi-sensor QPE accumulations) ----
+  PRATE: product('PRATE', 'PrecipRate_00.00', 'Precip Rate', 'mm/hr', 0, 100, 0.2, PRATE, { unit: 'in/hr', factor: MM_TO_IN }),
   QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 50, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', 0, 75, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 100, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE12H: product('QPE12H', 'MultiSensor_QPE_12H_Pass2_00.00', '12-hr Precip Total', 'mm', 0, 150, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 200, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', 0, 250, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', 0, 300, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 250, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
 };
 
 // Composite reflectivity shares the single-site radar reflectivity color table
@@ -73,8 +113,11 @@ export const MRMS_PRODUCTS = {
 MRMS_PRODUCTS.REFC.reflectivity = true;
 
 export const MRMS_ORDER = [
-  'REFC', 'AZSHEAR', 'ROT1H', 'ROT6H', 'ROT24H',
-  'MESH', 'POSH', 'LTG30', 'QPE1H', 'QPE6H', 'QPE24H',
+  'REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C',
+  'HREET', 'ET18', 'ET50', 'VIL', 'VILD', 'VII',
+  'AZSHEAR', 'AZSHEAR36', 'ROT1H', 'ROT6H', 'ROT24H',
+  'MESH', 'MESH24H', 'POSH', 'SHI', 'LTG30', 'LTG60',
+  'PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST',
 ];
 
 const pad = (n, w = 2) => String(n).padStart(w, '0');
