@@ -4377,7 +4377,13 @@ function buildExportCaption() {
     cap.title = m ? m.label : 'Model';
     cap.sub = `${p ? p.name : state.models.productId} · F${String(state.models.fhour).padStart(2, '0')}`;
     const run = state.models.runs.find((x) => x.key === state.models.runKey);
-    cap.time = run ? `${run.label} run` : '';
+    // Stamp the frame's valid time beside the run, in whichever zone the upper-left
+    // clock is currently showing (UTC or the viewer's local time, per state.tzLocal).
+    const valid = modelValidTime();
+    const validStr = Number.isFinite(valid.getTime()) ? fmtClock(valid, false) : '';
+    cap.time = run
+      ? (validStr ? `${run.label} run · ${validStr}` : `${run.label} run`)
+      : validStr;
   } else {
     // Radar.
     const l3 = isL3Product(state.productId);
