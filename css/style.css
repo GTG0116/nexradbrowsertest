@@ -211,6 +211,9 @@ body {
   flex-direction: column;
   gap: 5px;
   margin-bottom: 12px;
+  /* Let the field shrink inside grid/flex tracks so its select/input can't force
+     horizontal overflow of the panel (see the select min-width note). */
+  min-width: 0;
 }
 .field span {
   font-size: 11px;
@@ -230,6 +233,12 @@ input[type='date'] {
      the "weird zoom" on iPad when tapping the site/date pickers. */
   font-size: 16px;
   outline: none;
+  /* Fill the field and never impose the longest option's intrinsic width on the
+     layout. Without min-width:0 a <select> inside a grid track (e.g. the two-up
+     Outlook/Detail pickers) pushes the track past the container, forcing the
+     whole sheet page to scroll sideways. */
+  width: 100%;
+  min-width: 0;
 }
 select:focus,
 input:focus {
@@ -862,11 +871,17 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
   letter-spacing: 1px;
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .alerts-toggle.active {
   color: var(--warn);
   border-color: var(--warn);
   background: rgba(255, 120, 40, 0.14);
+  box-shadow: 0 0 14px rgba(255, 120, 40, 0.22);
 }
 
 /* ---------------- SPC outlook panel ---------------- */
@@ -1195,6 +1210,12 @@ input[type='range']::-moz-range-thumb {
   max-width: 90vw;
   height: 100%;
   overflow-y: auto;
+  /* Pad the scroll container past the device status bar / notch. Sticky
+     positioning respects the padding box, so the cycle bar (.alert-nav, sticky
+     top:0) sticks just below the inset and the first briefing header isn't hidden
+     under the notch — fixing the "all the close/switch UI is in the top safe
+     space" report on full-screen mobile. Desktop's inset is 0, so it's a no-op. */
+  padding-top: env(safe-area-inset-top, 0px);
   pointer-events: auto;
   background: linear-gradient(180deg, rgba(8, 14, 28, 0.97), rgba(6, 10, 22, 0.97));
   border-right: 1px solid var(--panel-edge);
@@ -1250,7 +1271,9 @@ input[type='range']::-moz-range-thumb {
 
 .alert-close {
   position: absolute;
-  top: 14px;
+  /* Clear the status bar / notch so the close button is tappable on full-screen
+     mobile (it floats over the briefing, outside the padded scroll container). */
+  top: calc(14px + env(safe-area-inset-top, 0px));
   left: 372px;
   z-index: 1300;
   pointer-events: auto;
@@ -1634,6 +1657,11 @@ input[type='range']::-moz-range-thumb {
     right: 12px;
     width: 40px;
     height: 40px;
+  }
+  /* On full-screen mobile the close button floats over the (full-width) cycle
+     bar; keep the next-alert arrow clear of it so both stay tappable. */
+  .alert-nav {
+    padding-right: 60px;
   }
 }
 
@@ -2323,8 +2351,12 @@ input[type='range']::-moz-range-thumb {
 .sheet-page {
   flex: 0 0 100%;
   width: 100%;
+  min-width: 0;
   scroll-snap-align: start;
   overflow-y: auto;
+  /* Never let a page scroll sideways — each carousel page is exactly one screen
+     wide; any control that would overflow is clipped/constrained instead. */
+  overflow-x: hidden;
   overscroll-behavior-y: contain;
   display: flex;
   flex-direction: column;
@@ -2851,7 +2883,7 @@ body.storm-active .playback-bar {
   bottom: calc(96px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   right: auto;
-  transform: translateX(-50%);
+  transform: translateX(-50%) translateY(var(--wx-swipe-y, 0));
   z-index: 660;
 }
 .split-pane-legend {
@@ -3176,6 +3208,91 @@ body.storm-active .playback-bar {
 }
 
 /* ---------------------------------------------------------------------------
+   Micro-interactions — a consistent, subtle press response across the touch UI
+   so every control feels alive and "buttery". Placed last so it reliably wins on
+   the transform for any control that is simultaneously selected (.active) and
+   pressed (:active). Each control's existing transition animates the scale;
+   prefers-reduced-motion (below) neutralises all of it.
+   --------------------------------------------------------------------------- */
+.product-btn:active,
+.tilt-btn:active,
+.vol-btn:active,
+.alert-row:active,
+.pal-btn:active,
+.mode-btn:active,
+.alerts-toggle:active,
+.sheet-tab:active,
+.ghost-btn:active,
+.weather-action:active,
+.map-tool:active,
+.apv-nav-btn:active,
+.apv-details:active,
+.apv-close:active,
+.alert-nav-btn:active,
+.alert-close:active,
+.snd-close:active,
+.weather-picker-close:active {
+  transform: scale(0.95);
+}
+/* Controls whose base rule has no `transition` still need one for the press to
+   animate rather than snap. */
+.product-btn,
+.tilt-btn,
+.vol-btn,
+.alert-row,
+.pal-btn,
+.mode-btn,
+.sheet-tab,
+.ghost-btn,
+.map-tool,
+.apv-nav-btn,
+.apv-details,
+.apv-close,
+.alert-nav-btn,
+.alert-close,
+.snd-close,
+.weather-picker-close {
+  transition: transform var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* The dock's active tool glow should fade in/out, not snap. */
+.dock-tool {
+  transition: transform var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+/* Local-weather centre marker: a gentle pulsing ring + soft entrance so the
+   Open-Meteo lookup point reads as a live, breathing target as you pan/zoom,
+   instead of a static crosshair. */
+.weather-center-picker:not([hidden]) {
+  animation: wxPickerIn 360ms var(--ease-out);
+}
+.weather-center-picker .wxp-ring {
+  animation: wxPickerPulse 2.4s var(--ease-in-out) infinite;
+}
+.weather-center-picker .wxp-label {
+  animation: wxPickerLabelIn 420ms var(--ease-out) both;
+}
+@keyframes wxPickerIn {
+  from { opacity: 0; transform: scale(0.82); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes wxPickerPulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.16); opacity: 0.55; }
+}
+@keyframes wxPickerLabelIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ---------------------------------------------------------------------------
    Reduced motion — honour the OS accessibility preference. Animations and
    transitions collapse to ~instant (durations can't be 0 or transitionend /
    the visibility-delay trick on overlays would never fire), and the spinning
@@ -3454,20 +3571,30 @@ body.storm-active .playback-bar {
   margin-top: 4px;
 }
 
+/* The weather card is the floating #legend, which centres itself with
+   `left:50%; transform: translateX(-50%)`. This rule must KEEP that horizontal
+   centring while it adds the vertical swipe offset — otherwise the card's left
+   edge snaps to screen centre and the card runs off the right edge (the
+   "half on the far right, rest off-screen" bug). Compose both translates. */
 .weather-card {
-  transform: translateY(var(--wx-swipe-y, 0));
-  transition: transform 180ms ease, opacity 180ms ease;
-  will-change: transform;
+  transform: translateX(-50%) translateY(var(--wx-swipe-y, 0));
+  transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out),
+    box-shadow 220ms var(--ease-out);
+  will-change: transform, opacity;
 }
-.weather-card.wx-swipe-down { animation: wxSwipeDownIn 320ms cubic-bezier(.2,.8,.2,1); }
-.weather-card.wx-swipe-up { animation: wxSwipeUpIn 320ms cubic-bezier(.2,.8,.2,1); }
+.weather-card.wx-swipe-down { animation: wxSwipeDownIn 360ms var(--ease-out); }
+.weather-card.wx-swipe-up { animation: wxSwipeUpIn 360ms var(--ease-out); }
+/* Keyframes override `transform`, so they too must carry translateX(-50%) or the
+   card would jump off-centre for the duration of the swipe animation. */
 @keyframes wxSwipeDownIn {
-  from { opacity: 0; transform: translateY(-18px) scale(.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateX(-50%) translateY(-22px) scale(.97); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 @keyframes wxSwipeUpIn {
-  from { opacity: 0; transform: translateY(18px) scale(.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateX(-50%) translateY(22px) scale(.97); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 .weather-card .wx-current-strip {
   display: grid;
