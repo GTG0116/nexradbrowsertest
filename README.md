@@ -43,6 +43,17 @@ the radar imagery — entirely client-side.
   are redrawn from the basemap's own `admin` vector source (levels 0/1/2) with one
   high-contrast style, so they read the same above the radar on every basemap (not
   just Dark/Light, and including counties the stock styles never draw).
+- **Map-layer customisation** (`js/mapStyle.js`, under *Map settings → Customize
+  map layers*): the basemap's own town-label font and thickness, the colour and
+  thickness of roads, highways and rivers, and the colour and thickness of the
+  country/state/county borders are all user-adjustable. Because a basemap switch
+  resets every layer to its stock paint, the customisation is re-applied on every
+  style load (and mirrored into the split-view pane), so it persists across map
+  styles and reloads.
+- **Per-alert-kind appearance** (*Map settings → Customize alert appearance*):
+  each watch/warning type's fill colour, fill opacity, outline colour and outline
+  thickness can be tuned individually; the overrides feed the GL alert layers via
+  per-feature properties and are remembered between visits.
 - A distinctive **radar-operations-console UI** over a dark basemap: range rings,
   a live cursor readout, opacity control, elevation-tilt selection, and a UTC
   clock. Pan/zoom the map freely. An **inspect** crosshair reads the value under
@@ -357,11 +368,12 @@ and right between (or jump with the tabs at the top):
    first page shown).
 2. **Settings** — the source selection bar (single-site radar / SAT / MRMS /
    models) plus that source's selectors, scan list and active alerts.
-3. **Map** — basemap style, range rings, and the *Remember view & settings*
-   toggle.
+3. **Map** — basemap style, range rings, the map-layer and alert-appearance
+   customisers, and the *Remember view & settings* toggle.
 
 **Everything is remembered between visits** (`localStorage`): the last source and
-product, the map position (center + zoom), the basemap, and every display toggle
+product, the map position (center + zoom), the basemap, the map-layer and
+alert-appearance customisations, and every display toggle
 — so a reload reopens exactly where you left off and reloads the last product's
 live data. If the requested **UTC day has no scans yet** (e.g. just after 00z),
 the viewer falls back a day at a time until it finds data, and LIVE snaps forward

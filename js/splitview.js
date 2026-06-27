@@ -18,6 +18,7 @@ import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel, modelSupports } from './models.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
 import { ensureBands, sceneBBox } from './goes.js';
+import { applyMapStyle } from './mapStyle.js';
 
 const p2 = (n) => String(n).padStart(2, '0');
 const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
@@ -47,78 +48,6 @@ function dataLayerAnchor(map) {
     if (ly.type === 'line' || ly.type === 'symbol') return ly.id;
   }
   return firstLabelLayerId(map);
-}
-
-function adminSource(map) {
-  const layers = map.getStyle().layers || [];
-  const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
-  return admin && admin.source;
-}
-
-// White country/state borders (plus county lines) on every basemap, matching
-// app.js. Rather than hide the basemap's native admin lines and redraw our own
-// beneath them (which left the faint native lines showing through on
-// Satellite/Streets/Outdoors), we restyle the basemap's OWN admin layers in place
-// — they already sit above the radar/roads and below the labels in every style.
-function styleBoundaries(map, anchor) {
-  const repaint = (id, paint) => {
-    if (!map.getLayer(id)) return;
-    for (const [k, v] of Object.entries(paint)) map.setPaintProperty(id, k, v);
-    map.setLayoutProperty(id, 'visibility', 'visible');
-  };
-  repaint('admin-0-boundary-bg', {
-    'line-color': 'rgba(8,14,24,0.5)',
-    'line-opacity': 1,
-    'line-blur': 0,
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.6, 7, 3.8, 11, 4.8],
-  });
-  repaint('admin-0-boundary', {
-    'line-color': '#ffffff',
-    'line-opacity': 1,
-    'line-dasharray': [1, 0],
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.1, 7, 1.9, 11, 2.5],
-  });
-  repaint('admin-0-boundary-disputed', {
-    'line-color': '#ffffff',
-    'line-opacity': 0.9,
-    'line-dasharray': [2, 2],
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.6, 11, 2.1],
-  });
-  repaint('admin-1-boundary-bg', {
-    'line-color': 'rgba(8,14,24,0.35)',
-    'line-opacity': 1,
-    'line-blur': 0,
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
-  });
-  repaint('admin-1-boundary', {
-    'line-color': '#ffffff',
-    'line-opacity': 0.85,
-    'line-dasharray': [3, 2],
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.5, 7, 1, 11, 1.5],
-  });
-  if (!map.getLayer('county-outline')) {
-    const source = adminSource(map);
-    if (!source) return;
-    map.addLayer(
-      {
-        id: 'county-outline', type: 'line', source, 'source-layer': 'admin',
-        filter: [
-          'all',
-          ['==', ['get', 'admin_level'], 2],
-          ['==', ['get', 'maritime'], 'false'],
-          ['==', ['get', 'disputed'], 'false'],
-          ['match', ['get', 'worldview'], ['all', 'US'], true, false],
-        ],
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        minzoom: 5,
-        paint: {
-          'line-color': 'rgba(255,255,255,0.35)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
-        },
-      },
-      anchor
-    );
-  }
 }
 
 export class SplitView {
@@ -233,9 +162,11 @@ export class SplitView {
   // ---- Overlay layers on the second pane (drawings mirror) ----
   _setupOverlays() {
     const map = this.map;
-    // White, consistent country/state borders (plus county lines) above the data,
-    // matching the main map.
-    styleBoundaries(map, firstLabelLayerId(map));
+    // Restyle the basemap's town labels, roads, rivers and borders to match the
+    // main map's user customisation. setStyle reset the stock paint, so capture
+    // fresh native widths (fresh: true).
+    const mapStyle = this.ctx.state && this.ctx.state.mapStyle;
+    applyMapStyle(map, mapStyle, firstLabelLayerId(map), { fresh: true });
 
     // Live NWS alert polygons, mirrored from the main map so the second pane
     // (the top panel in the stacked split) shows the same watches and
@@ -248,7 +179,14 @@ export class SplitView {
       map.addLayer(
         {
           id: 'alerts-fill', type: 'fill', source: 'alerts',
-          paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
+          paint: {
+            'fill-color': ['get', 'color'],
+            'fill-opacity': [
+              'case',
+              ['boolean', ['get', 'selected'], false], 0.34,
+              ['coalesce', ['get', 'fillOpacity'], 0.18],
+            ],
+          },
         },
         dataLayerAnchor(map)
       );
@@ -256,7 +194,15 @@ export class SplitView {
       map.addLayer(
         {
           id: 'alerts-line', type: 'line', source: 'alerts',
-          paint: { 'line-color': ['get', 'color'], 'line-width': 2.5, 'line-opacity': 0.95 },
+          paint: {
+            'line-color': ['coalesce', ['get', 'outlineColor'], ['get', 'color']],
+            'line-width': [
+              'case',
+              ['boolean', ['get', 'selected'], false], 4.5,
+              ['coalesce', ['get', 'outlineWidth'], 2.5],
+            ],
+            'line-opacity': 0.95,
+          },
         },
         firstLabelLayerId(map)
       );
@@ -314,6 +260,13 @@ export class SplitView {
   _setDrawSource() {
     const src = this.map && this.map.getSource && this.map.getSource('mt-shapes');
     if (src) src.setData(this.drawings);
+  }
+
+  // Re-apply the user's basemap-layer customisation (town labels, roads, rivers,
+  // borders) to this pane live, matching a change made on the main map.
+  setMapStyle(opts) {
+    if (this.active && this.map && this.map.getStyle)
+      applyMapStyle(this.map, opts, firstLabelLayerId(this.map), { fresh: false });
   }
 
   // React to a basemap change on the main map.

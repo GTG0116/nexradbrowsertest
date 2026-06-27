@@ -81,6 +81,32 @@ const EVENT_COLORS = {
 };
 const DEFAULT_COLOR = '#6f8aa8';
 
+// Default appearance of the alert polygons, and the registry of per-kind user
+// overrides applied on top. Each override is { color, fillOpacity, outlineColor,
+// outlineWidth }; any field left undefined falls back to these defaults (and the
+// per-kind classified colour). Keyed by the alert's display name.
+export const DEFAULT_ALERT_FILL_OPACITY = 0.18;
+export const DEFAULT_ALERT_OUTLINE_WIDTH = 2.5;
+let ALERT_STYLE = {};
+export function setAlertStyle(overrides) { ALERT_STYLE = overrides || {}; }
+
+// The "upgrade" display states get their own swatches; expose them (with the
+// styleable base events) so the settings UI can list every alert kind a user
+// might want to recolour.
+export const UPGRADE_COLORS = {
+  'Tornado Emergency': EMERGENCY_PURPLE,
+  'PDS Tornado Warning': PDS_PINK,
+  'Flash Flood Emergency': FLASH_FLOOD_EMERGENCY_GREEN,
+};
+
+// Ordered [displayName, defaultColor] for every alert kind the customiser lists.
+export function styleableAlertKinds() {
+  const out = [];
+  for (const name of MAP_ALERT_EVENTS) out.push([name, EVENT_COLORS[name] || DEFAULT_COLOR]);
+  for (const [name, c] of Object.entries(UPGRADE_COLORS)) out.push([name, c]);
+  return out;
+}
+
 // Keep the map/list focused to the alert types shown in the app legend
 // screenshot, plus tsunami products. Other NWS products remain intentionally
 // hidden to avoid cluttering the radar map.
@@ -177,7 +203,24 @@ export function classifyAlert(feature) {
     }
   }
 
+  // A user colour override (keyed by display name first, then raw event) wins
+  // over the classified colour so the customiser can recolour any alert kind.
+  const ov = ALERT_STYLE[display] || ALERT_STYLE[event];
+  if (ov && ov.color) color = ov.color;
+
   return { event, display, color };
+}
+
+// Per-feature paint props for one classified alert, folding in any user
+// override. Consumed by the GL `alerts-fill`/`alerts-line` layers via the
+// feature properties so each polygon carries its own fill opacity and outline.
+export function alertPaintProps(cls) {
+  const ov = ALERT_STYLE[cls.display] || ALERT_STYLE[cls.event] || {};
+  return {
+    fillOpacity: typeof ov.fillOpacity === 'number' ? ov.fillOpacity : DEFAULT_ALERT_FILL_OPACITY,
+    outlineColor: ov.outlineColor || cls.color,
+    outlineWidth: typeof ov.outlineWidth === 'number' ? ov.outlineWidth : DEFAULT_ALERT_OUTLINE_WIDTH,
+  };
 }
 
 function priorityOf(display) {
@@ -676,6 +719,13 @@ export class AlertsController {
       );
   }
 
+  // Re-classify every loaded alert (so colour overrides take effect) and repaint.
+  // Called when the user changes the per-kind alert appearance settings.
+  restyle() {
+    for (const a of this.alerts) a.cls = classifyAlert(a.feature);
+    this.refreshVisible();
+  }
+
   refreshVisible() {
     if (!this.enabled) return;
     const visible = this.visibleAlerts();
@@ -705,6 +755,7 @@ export class AlertsController {
               color: sel.cls.color,
               display: sel.cls.display,
               selected: true,
+              ...alertPaintProps(sel.cls),
             },
           },
         ]);
@@ -714,7 +765,7 @@ export class AlertsController {
     const features = [...this._visibleCache].reverse().map((a) => ({
       type: 'Feature',
       geometry: a.feature.geometry,
-      properties: { id: a.id, color: a.cls.color, display: a.cls.display },
+      properties: { id: a.id, color: a.cls.color, display: a.cls.display, ...alertPaintProps(a.cls) },
     }));
     this._setSourceData(features);
   }

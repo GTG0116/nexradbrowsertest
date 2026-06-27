@@ -3619,3 +3619,142 @@ body.storm-active .playback-bar {
 }
 .mbx-gate-save:hover { filter: brightness(1.08); }
 .mbx-gate-save:active { transform: translateY(1px); }
+
+/* ---------------------------------------------------------------------------
+   Map & alert customisation panels (town labels, roads, rivers, borders;
+   per-alert-kind colours/outlines). Collapsible <details> inside Map settings.
+   --------------------------------------------------------------------------- */
+.panel-details {
+  margin-top: 12px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  background: rgba(8, 18, 38, 0.4);
+}
+.panel-details > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 9px 11px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  user-select: none;
+}
+.panel-details > summary::-webkit-details-marker { display: none; }
+.panel-details > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--accent);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.panel-details[open] > summary::before { transform: rotate(90deg); }
+.panel-details[open] > summary { border-bottom: 1px solid var(--panel-edge); }
+.mapstyle-controls,
+.alertstyle-controls {
+  padding: 4px 11px 11px;
+}
+
+/* Line-style rows (roads / highways / rivers / borders) */
+.ms-line {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(29, 74, 147, 0.4);
+}
+.ms-line-name {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.ms-line-width { margin-top: 6px; }
+.ms-line-color {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ms-color-on {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+/* Native color inputs, styled to fit the dark UI */
+input[type='color'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 30px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--panel-edge);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='color']::-webkit-color-swatch-wrapper { padding: 2px; }
+input[type='color']::-webkit-color-swatch { border: none; border-radius: 3px; }
+input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
+
+/* Per-alert-kind appearance rows */
+.as-kind {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(29, 74, 147, 0.4);
+}
+.as-kind:first-child { border-top: none; }
+.as-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.as-sw {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25) inset;
+}
+.as-nm {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink);
+}
+.as-reset {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.as-reset:hover { color: var(--ink); }
+.as-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 12px;
+  margin-top: 8px;
+}
+.as-ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.as-ctl span {
+  display: flex;
+  justify-content: space-between;
+}
+.as-ctl b { color: var(--accent); }
+.as-ctl input[type='range'] { width: 100%; }
