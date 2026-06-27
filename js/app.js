@@ -471,6 +471,9 @@ const state = {
   geolocate: null,
   // Show the clock in the viewer's local time zone instead of UTC.
   tzLocal: false,
+  // What the time readout shows: 'product' (the selected frame's scan / valid
+  // time — the default) or 'now' (the live wall clock).
+  timeSource: 'product',
   basemap: 'dark',
   // User customisation of the basemap's own layers (town labels, roads,
   // rivers, borders). Re-applied on every style load so it survives a
@@ -565,6 +568,7 @@ function cacheEls() {
   el.clock = $('#clock');
   el.timeBar = $('#timeBar');
   el.tzToggle = $('#tzToggle');
+  el.timeSrcToggle = $('#timeSrcToggle');
   el.meta = $('#meta');
   el.readout = $('#mapReadout');
   el.liveBtn = $('#liveBtn');
@@ -736,7 +740,9 @@ function initMap() {
     // render frame. The cost is a small amount of GPU memory bandwidth.
     preserveDrawingBuffer: true,
   });
-  map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-left');
+  // The zoom control sits bottom-left: the top-left corner is now the floating
+  // time readout and the top-right is the map-tool rail.
+  map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-left');
   // Live user location: a Mapbox GeolocateControl handles the browser permission
   // prompt, the pulsing position dot, the accuracy circle and continuous
   // tracking. Its own control button is hidden (CSS) in favour of the map-tool
@@ -747,7 +753,7 @@ function initMap() {
     showUserHeading: true,
     showAccuracyCircle: true,
   });
-  map.addControl(state.geolocate, 'top-left');
+  map.addControl(state.geolocate, 'bottom-left');
   state.map = map;
 
   // If the supplied token is invalid/revoked, Mapbox emits a 401. Clear the bad
@@ -803,8 +809,12 @@ function initMap() {
   // No zoom handling needed: the custom radar layer re-samples the polar data
   // per pixel every frame, so it stays pixel-exact at any zoom on its own.
 
-  // Right-click anywhere to jump to the NEXRAD radar nearest that point.
+  // Right-click anywhere to jump to the NEXRAD radar nearest that point. In
+  // models mode a right-click instead opens a point sounding (setupSoundingGestures),
+  // so skip the radar jump there — otherwise the map also zooms to the nearest
+  // site, yanking the view away from where the sounding was requested.
   map.on('contextmenu', (e) => {
+    if (state.mode === 'models') return;
     const r = nearestSite(e.lngLat.lat, e.lngLat.lng);
     if (!r) return;
     selectSite(r[0], r[1]);
@@ -1014,6 +1024,7 @@ function buildProductButtons() {
     if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', () => {
       if (routeProductToPane(id)) return;
+      ensureLiveForSwitch();
       const wasL3 = isL3Product(state.productId);
       state.productId = id;
       document
@@ -1690,6 +1701,7 @@ function buildSatProductButtons() {
     if (id === activeProductId()) btn.classList.add('active');
     btn.addEventListener('click', async () => {
       if (routeProductToPane(id)) return;
+      ensureLiveForSwitch();
       state.sat.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       buildSatLegend();
@@ -1917,6 +1929,7 @@ function buildMrmsProductButtons() {
       if (id === active) btn.classList.add('active');
       btn.addEventListener('click', () => {
         if (routeProductToPane(id)) return;
+        ensureLiveForSwitch(); // load the new product's latest frame, stay live
         state.mrms.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
         buildMrmsLegend();
@@ -2123,6 +2136,7 @@ function buildModelProductButtons() {
       if (id === activeProductId()) btn.classList.add('active');
       btn.addEventListener('click', () => {
         if (routeProductToPane(id)) return;
+        ensureLiveForSwitch();
         state.models.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
         buildModelLegend();
@@ -3610,17 +3624,76 @@ function stopLive() {
   }
 }
 
-function tickClock() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  if (!el.clock) return;
-  if (state.tzLocal) {
-    // Local time, with the browser's short time-zone abbreviation (e.g. CDT).
-    const tz = localTzLabel(d);
-    el.clock.textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${tz}`;
-  } else {
-    el.clock.textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+// Re-arm LIVE on a product switch so the newest frame for the new selection
+// always loads — the user shouldn't have to flip LIVE back on to see it, and the
+// view shouldn't stay on the previous product's (now stale) frame. `_forceLatest`
+// makes the next list load jump to the most recent frame; if LIVE was off we turn
+// it back on (button + 60s auto-refresh) without kicking an extra load, since the
+// product handler runs its own load right after.
+function ensureLiveForSwitch() {
+  state._forceLatest = true;
+  if (state.live) return;
+  state.live = true;
+  if (el.liveBtn) {
+    el.liveBtn.classList.add('active');
+    el.liveBtn.textContent = '● LIVE';
   }
+  syncDateToUtcToday();
+  if (state.liveTimer) clearInterval(state.liveTimer);
+  state.liveTimer = setInterval(() => refreshActive(), 60000);
+}
+
+// Format a Date as HH:MM(:SS) in either UTC or the viewer's local zone, with the
+// matching zone label. Seconds are included only for the live wall clock.
+function fmtClock(d, withSeconds) {
+  const p = (n) => String(n).padStart(2, '0');
+  if (state.tzLocal) {
+    const base = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return `${withSeconds ? `${base}:${p(d.getSeconds())}` : base} ${localTzLabel(d)}`;
+  }
+  const base = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  return `${withSeconds ? `${base}:${p(d.getUTCSeconds())}` : base} UTC`;
+}
+
+// The valid/scan time (Date) of the frame currently shown for the active mode,
+// plus a short tag describing it. Returns null when nothing is loaded yet.
+function productTime() {
+  if (state.mode === 'satellite') {
+    const f = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
+    const t = (f && f.time) || (state.sat.scene && state.sat.scene.time) || null;
+    return t ? { time: t, tag: 'sat' } : null;
+  }
+  if (state.mode === 'mrms') {
+    const f = state.mrms.frames.find((x) => x.key === state.mrms.frameKey);
+    const t = (f && f.time) || (state.mrms.grid && state.mrms.grid.time) || null;
+    return t ? { time: t, tag: 'mrms' } : null;
+  }
+  if (state.mode === 'models') {
+    const t = modelValidTime();
+    return t && Number.isFinite(t.getTime())
+      ? { time: t, tag: `F${String(currentModelFhour()).padStart(2, '0')}` }
+      : null;
+  }
+  // Radar — the active Level II volume / Level III frame.
+  const f = state.volumes.find((x) => x.key === state.volumeKey);
+  return f && f.time ? { time: f.time, tag: 'scan' } : null;
+}
+
+// Refresh the floating time readout. In 'now' mode it shows the live wall clock;
+// in 'product' mode (the default) it shows the selected frame's scan / valid time
+// with a short tag, falling back to the wall clock until a frame has loaded.
+function tickClock() {
+  if (!el.clock) return;
+  if (state.timeSource === 'product') {
+    const pt = productTime();
+    if (pt) {
+      el.clock.textContent = `${pt.tag} ${fmtClock(pt.time, false)}`;
+      return;
+    }
+    el.clock.textContent = `— ${fmtClock(new Date(), false)}`;
+    return;
+  }
+  el.clock.textContent = fmtClock(new Date(), true);
 }
 
 // The browser's short time-zone abbreviation for the current locale (e.g. "CDT",
@@ -3647,6 +3720,21 @@ function setTzLocal(local) {
     el.tzToggle.title = state.tzLocal
       ? 'Show time in UTC'
       : 'Switch between UTC and your local time zone';
+  }
+  tickClock();
+}
+
+// Flip the readout between the selected product's frame time and the live clock.
+function setTimeSource(src) {
+  state.timeSource = src === 'now' ? 'now' : 'product';
+  if (el.timeSrcToggle) {
+    const productMode = state.timeSource === 'product';
+    el.timeSrcToggle.classList.toggle('active', productMode);
+    // The button shows the alternative the click switches to.
+    el.timeSrcToggle.textContent = productMode ? 'Now' : 'Frame';
+    el.timeSrcToggle.title = productMode
+      ? 'Switch to the live clock'
+      : "Switch to the selected product's time";
   }
   tickClock();
 }
@@ -4552,6 +4640,7 @@ function saveSettings() {
         alertStyle: state.alertStyle,
         showRings: state.showRings,
         tzLocal: state.tzLocal,
+        timeSource: state.timeSource,
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
         modelCityValues: state.modelCityValues,
@@ -4612,6 +4701,7 @@ function applyStoredSettings(s) {
   if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (typeof s.tzLocal === 'boolean') state.tzLocal = s.tzLocal;
+  if (s.timeSource === 'now' || s.timeSource === 'product') state.timeSource = s.timeSource;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
@@ -4769,6 +4859,14 @@ function init() {
   if (el.tzToggle) {
     el.tzToggle.addEventListener('click', () => {
       setTzLocal(!state.tzLocal);
+      saveSettings();
+    });
+  }
+
+  // Time-source toggle (selected product's frame time ↔ live clock).
+  if (el.timeSrcToggle) {
+    el.timeSrcToggle.addEventListener('click', () => {
+      setTimeSource(state.timeSource === 'product' ? 'now' : 'product');
       saveSettings();
     });
   }
@@ -4986,6 +5084,7 @@ function init() {
   setTimeout(() => state.map.resize(), 100);
 
   setTzLocal(state.tzLocal); // sync the toggle label + clock to the restored prefs
+  setTimeSource(state.timeSource);
   setInterval(tickClock, 1000);
 
   // Start in LIVE mode so the newest data streams in automatically — the user

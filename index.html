@@ -152,6 +152,17 @@
             <div id="map"></div>
             <div id="map2" hidden></div>
 
+            <!-- Floating time readout in the upper-left corner. By default it
+                 shows the time of the selected product's frame (radar scan, MRMS
+                 / satellite image, or model forecast hour + valid time); the
+                 "Now" button switches it to the live wall clock, and the tz
+                 button toggles UTC ↔ the viewer's local time zone. -->
+            <div id="timeBar" class="time-bar">
+              <span id="clock" class="clock">--:--:-- UTC</span>
+              <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
+              <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+            </div>
+
             <!-- Map tools: draw / measure / storm track / METARs / split view -->
             <div id="mapTools" class="map-tools">
               <button id="toolDraw" class="map-tool" title="Draw (freehand)">✎</button>
@@ -196,12 +207,6 @@
             <div id="decoding" class="decoding">DECODING</div>
           </div>
           <div id="legend" class="legend"></div>
-          <!-- Time bar: sits just below the legend and shows the current time,
-               toggling between UTC and the viewer's local time zone. -->
-          <div id="timeBar" class="time-bar">
-            <span id="clock" class="clock">--:--:-- UTC</span>
-            <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
-          </div>
         </section>
 
         <!-- Right rail: products & metadata -->

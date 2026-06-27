@@ -670,35 +670,29 @@ export function drawHodograph(canvas, profile) {
 
   // ---- Storm-relative helicity area shading ----------------------------------
   // The signed area swept out by the storm-relative wind vectors between the
-  // surface and a given height equals ½·SRH. Filling the polygon bounded by the
-  // storm-motion point and the hodograph trace is the classic grey/white "SRH"
-  // region on an SPC/SHARPpy hodograph — drawn here for the 0–3 km layer (light
-  // grey) with the 0–1 km layer brighter on top, relative to the right mover.
-  const fillSRH = (topAGL, style) => {
-    const pts = hodoPointsTo(L, topAGL);
-    if (pts.length < 2) return;
+  // surface and 3 km equals ½·SRH. Filling the single polygon bounded by the
+  // storm-motion point and the 0–3 km hodograph trace is the classic grey/white
+  // "SRH" region on an SPC/SHARPpy hodograph — one fill, relative to the right
+  // mover, with a single inflow edge so it reads cleanly (no overlapping fills).
+  const srhPts = hodoPointsTo(L, 3000);
+  if (srhPts.length >= 2) {
     ctx.beginPath();
     ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
-    for (const [u, v] of pts) ctx.lineTo(px(u), py(v));
+    for (const [u, v] of srhPts) ctx.lineTo(px(u), py(v));
     ctx.closePath();
-    ctx.fillStyle = style;
+    ctx.fillStyle = 'rgba(205,214,228,0.18)';
     ctx.fill();
-  };
-  fillSRH(3000, 'rgba(190,200,215,0.16)'); // 0–3 km — soft grey
-  fillSRH(1000, 'rgba(235,240,248,0.22)'); // 0–1 km — brighter white-grey
+  }
 
-  // Storm-relative inflow vectors: storm motion → surface wind, and the 0–1 /
-  // 0–3 km edges that bound the shaded areas above.
+  // Storm-relative inflow vector: storm motion → surface wind (the one edge that
+  // bounds the shaded area).
   ctx.strokeStyle = 'rgba(230,236,247,0.45)';
   ctx.setLineDash([4, 3]);
   ctx.lineWidth = 1.1;
-  const cap1 = windAtAGL(L, 1000), cap3 = windAtAGL(L, 3000);
-  for (const [u, v] of [[L[0].u, L[0].v], cap1, cap3]) {
-    ctx.beginPath();
-    ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
-    ctx.lineTo(px(u), py(v));
-    ctx.stroke();
-  }
+  ctx.beginPath();
+  ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
+  ctx.lineTo(px(L[0].u), py(L[0].v));
+  ctx.stroke();
   ctx.setLineDash([]);
 
   // Hodograph curve, coloured by height band.
