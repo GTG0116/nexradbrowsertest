@@ -3655,6 +3655,17 @@ function fmtClock(d, withSeconds) {
   return `${withSeconds ? `${base}:${p(d.getUTCSeconds())}` : base} UTC`;
 }
 
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Compact calendar date ("Jun 27") to pair with fmtClock. Defaults to the same
+// zone the clock is showing (UTC or the viewer's local time); pass local=false to
+// force a UTC date for the always-UTC frame labels (radar/satellite/MRMS exports).
+function fmtDate(d, local = state.tzLocal) {
+  return local
+    ? `${MONTH_ABBR[d.getMonth()]} ${d.getDate()}`
+    : `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
 // The valid/scan time (Date) of the frame currently shown for the active mode,
 // plus a short tag describing it. Returns null when nothing is loaded yet.
 function productTime() {
@@ -3687,13 +3698,15 @@ function tickClock() {
   if (state.timeSource === 'product') {
     const pt = productTime();
     if (pt) {
-      el.clock.textContent = `${pt.tag} ${fmtClock(pt.time, false)}`;
+      el.clock.textContent = `${pt.tag} ${fmtDate(pt.time)} ${fmtClock(pt.time, false)}`;
       return;
     }
-    el.clock.textContent = `— ${fmtClock(new Date(), false)}`;
+    const now = new Date();
+    el.clock.textContent = `— ${fmtDate(now)} ${fmtClock(now, false)}`;
     return;
   }
-  el.clock.textContent = fmtClock(new Date(), true);
+  const now = new Date();
+  el.clock.textContent = `${fmtDate(now)} ${fmtClock(now, true)}`;
 }
 
 // The browser's short time-zone abbreviation for the current locale (e.g. "CDT",
@@ -4364,23 +4377,24 @@ function buildExportCaption() {
     cap.title = sat ? sat.label : 'GOES';
     cap.sub = `${state.sat.productId} · ${sec ? sec.label : ''} · ${sat && sat.family === 'himawari' ? 'Himawari AHI' : 'GOES ABI'}`;
     const t = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
-    cap.time = t ? t.label : '';
+    cap.time = t ? stampWithDate(t) : '';
   } else if (state.mode === 'mrms') {
     const p = MRMS_PRODUCTS[state.mrms.productId];
     cap.title = 'MRMS CONUS';
     cap.sub = `${p ? p.name : state.mrms.productId} · MRMS`;
     const t = state.mrms.frames.find((x) => x.key === state.mrms.frameKey);
-    cap.time = t ? t.label : '';
+    cap.time = t ? stampWithDate(t) : '';
   } else if (state.mode === 'models') {
     const m = MODELS[state.models.modelKey];
     const p = MODEL_PRODUCTS[state.models.productId];
     cap.title = m ? m.label : 'Model';
     cap.sub = `${p ? p.name : state.models.productId} · F${String(state.models.fhour).padStart(2, '0')}`;
     const run = state.models.runs.find((x) => x.key === state.models.runKey);
-    // Stamp the frame's valid time beside the run, in whichever zone the upper-left
-    // clock is currently showing (UTC or the viewer's local time, per state.tzLocal).
+    // Stamp the frame's valid date + time beside the run, in whichever zone the
+    // upper-left clock is showing (UTC or the viewer's local time, per state.tzLocal).
     const valid = modelValidTime();
-    const validStr = Number.isFinite(valid.getTime()) ? fmtClock(valid, false) : '';
+    const validStr = Number.isFinite(valid.getTime())
+      ? `${fmtDate(valid)} ${fmtClock(valid, false)}` : '';
     cap.time = run
       ? (validStr ? `${run.label} run · ${validStr}` : `${run.label} run`)
       : validStr;
@@ -4393,9 +4407,15 @@ function buildExportCaption() {
     cap.title = meta ? `${site} · ${meta[1]}` : site;
     cap.sub = `${p.name} (${dispUnitOf(p)}) · NEXRAD Level ${l3 ? 'III' : 'II'}`;
     const t = state.volumes.find((x) => x.key === state.volumeKey);
-    cap.time = t ? t.label : '';
+    cap.time = t ? stampWithDate(t) : '';
   }
   return cap;
+}
+
+// Prefix a frame's UTC time label (radar/satellite/MRMS) with its calendar date.
+// These labels are always UTC, so the date is taken in UTC to match.
+function stampWithDate(frame) {
+  return frame.time ? `${fmtDate(frame.time, false)} ${frame.label}` : (frame.label || '');
 }
 
 // "2026-06-22 18:42:07 UTC" for the export footer.
