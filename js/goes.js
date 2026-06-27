@@ -558,17 +558,18 @@ export function lonLatToColRow(scene, lat, lon) {
   // Visibility: the point must be on the Earth face toward the satellite.
   if (proj.H * (proj.H - sx) < sy * sy + (req2 / rpol2) * sz * sz) return null;
   const sxyz = Math.sqrt(sx * sx + sy * sy + sz * sz);
+  const clamp1 = (v) => (v < -1 ? -1 : v > 1 ? 1 : v); // keep asin finite
   let scanX, scanY;
   if (proj.sweep === 'y') {
     scanX = Math.atan(sy / sx);
-    scanY = Math.asin(-sz / sxyz);
+    scanY = Math.asin(clamp1(-sz / sxyz));
   } else {
     scanY = Math.atan(sz / sx);
-    scanX = Math.asin(-sy / sxyz);
+    scanX = Math.asin(clamp1(-sy / sxyz));
   }
   const col = (scanX - xOffset) / xScale;
   const row = (scanY - yOffset) / yScale;
-  if (col < 0 || col >= W || row < 0 || row >= H) return null;
+  if (!(col >= 0 && col < W && row >= 0 && row < H)) return null;
   return { col, row };
 }
 

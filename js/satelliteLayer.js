@@ -62,17 +62,25 @@ void main() {
 
   float sxyz = sqrt(sx * sx + sy * sy + sz * sz);
   float scanX, scanY;
+  // asin's argument can land a hair outside [-1, 1] from rounding (and 0/0 in
+  // atan can yield NaN). Some GL stacks — notably Chrome's ANGLE backend on
+  // Windows/Linux — then return NaN where Apple/WebKit GPUs clamp, and a NaN
+  // here poisons col/row below; clamp the domain so the navigation is finite
+  // everywhere the disk is visible.
   if (u_sweepY > 0.5) {
     scanX = atan(sy / sx);
-    scanY = asin(-sz / sxyz);
+    scanY = asin(clamp(-sz / sxyz, -1.0, 1.0));
   } else {
     scanY = atan(sz / sx);
-    scanX = asin(-sy / sxyz);
+    scanX = asin(clamp(-sy / sxyz, -1.0, 1.0));
   }
 
   float col = (scanX - u_xOffset) / u_xScale;
   float row = (scanY - u_yOffset) / u_yScale;
-  if (col < 0.0 || col >= u_W || row < 0.0 || row >= u_H) discard;
+  // Positive-logic bounds test so a NaN col/row discards (a NaN fails every
+  // comparison, so the old "col < 0.0 || col >= u_W" form let NaN through and
+  // sampled garbage — which reads as a blank disk on stacks that produce NaN).
+  if (!(col >= 0.0 && col < u_W && row >= 0.0 && row < u_H)) discard;
 
   vec3 rgb;
   float alpha;

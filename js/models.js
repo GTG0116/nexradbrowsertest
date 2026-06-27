@@ -172,9 +172,19 @@ export const MODELS = {
     id: 'rrfs',
     label: 'RRFS (3 km CONUS)',
     bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
-    // The AWS RRFS bucket isn't CORS-enabled and has no CORS mirror (unlike the
-    // RAP/Azure case), so browser fetches need a Range-capable proxy via
-    // setModelProxy(); without one this model can't load in the browser.
+    // Two compounding problems make RRFS browser-unfriendly:
+    //   1. CORS — the AWS noaa-rrfs-pds bucket sends no Access-Control-Allow-Origin
+    //      header, and there is no CORS-enabled mirror (the RAP/Azure trick has no
+    //      RRFS equivalent; the GCP/Azure NODD buckets for RRFS don't exist). So a
+    //      direct browser fetch is blocked and a Range-capable proxy is required.
+    //   2. Product — NOAA's deterministic RRFS-A has been superseded by the REFS
+    //      *ensemble*: the old `rrfs_a/rrfs.<day>/<HH>/...3km.f###.conus.grib2`
+    //      keys are gone (those folders are now `refs.<day>/<HH>/enspost/graphics`
+    //      GIFs, with no per-member CONUS GRIB2 exposed). So even through a proxy
+    //      the keys below 404 against the current bucket.
+    // It's kept here (behind the proxy, off by default) for self-hosters pointing
+    // setModelProxy() at an archive/mirror that still serves the old layout; on the
+    // public CORS-less bucket it will report "index fetch failed" rather than load.
     needsProxy: true,
     cycleStep: 1,
     latencyMin: 90,
@@ -856,34 +866,56 @@ async function runExists(model, run, productId) {
 // by `model.cycleStep` (hourly for HRRR/RAP, 6-hourly for NAM/GFS). For the
 // current day we drop any cycle that shouldn't have posted yet (its nominal time
 // plus `model.latencyMin`).
+//
+// If the requested day turns up no runs we walk back a couple of earlier UTC days
+// and list those instead. Experimental / high-latency feeds (HRRRCast on GSL's
+// bucket, RRFS) can run a full day behind real time, so early in the UTC day —
+// or whenever the feed lags — a today-only listing comes up empty and the model
+// looks broken even though recent runs are sitting in the bucket one day back.
 export async function listModels(modelKey, productId, date) {
   const model = MODELS[modelKey];
   if (!model) throw new Error('unknown model');
-  const dayStr = dayStrOf(date);
   const now = new Date();
-  const isToday = dayStrOf(now) === dayStr;
   const step = model.cycleStep || 1;
   const latencyMs = (model.latencyMin || 55) * 60000;
-  const runs = [];
-  const candidates = [];
-  for (let h = 0; h <= 23; h += step) {
-    const time = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), h));
-    if (isToday && now.getTime() < time.getTime() + latencyMs) continue; // not posted yet
-    const fhours = forecastHoursFor(model, h);
-    candidates.push({
-      key: `${dayStr}t${pad(h)}`,
-      dayStr,
-      cycle: h,
-      label: `${pad(h)}z`,
-      time,
-      maxFhour: fhours[fhours.length - 1] || 0,
-      fhours,
-    });
-  }
-  for (let i = 0; i < candidates.length; i += 6) {
-    const batch = candidates.slice(i, i + 6);
-    const ok = await Promise.all(batch.map((run) => runExists(model, run, productId)));
-    for (let j = 0; j < batch.length; j++) if (ok[j]) runs.push(batch[j]);
+
+  // Build the cycle candidates for one UTC day (today drops cycles that
+  // shouldn't have posted yet; past days keep all 24/step).
+  const candidatesForDay = (d) => {
+    const dayStr = dayStrOf(d);
+    const isToday = dayStrOf(now) === dayStr;
+    const list = [];
+    for (let h = 0; h <= 23; h += step) {
+      const time = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h));
+      if (isToday && now.getTime() < time.getTime() + latencyMs) continue; // not posted yet
+      const fhours = forecastHoursFor(model, h);
+      list.push({
+        key: `${dayStr}t${pad(h)}`,
+        dayStr,
+        cycle: h,
+        label: `${pad(h)}z`,
+        time,
+        maxFhour: fhours[fhours.length - 1] || 0,
+        fhours,
+      });
+    }
+    return list;
+  };
+
+  // Probe a day's candidates (batched) and keep the ones whose files exist.
+  const probeDay = async (candidates) => {
+    const runs = [];
+    for (let i = 0; i < candidates.length; i += 6) {
+      const batch = candidates.slice(i, i + 6);
+      const ok = await Promise.all(batch.map((run) => runExists(model, run, productId)));
+      for (let j = 0; j < batch.length; j++) if (ok[j]) runs.push(batch[j]);
+    }
+    return runs;
+  };
+
+  let runs = await probeDay(candidatesForDay(date));
+  for (let back = 1; back <= 2 && runs.length === 0; back++) {
+    runs = await probeDay(candidatesForDay(new Date(date.getTime() - back * 86400000)));
   }
   return runs;
 }

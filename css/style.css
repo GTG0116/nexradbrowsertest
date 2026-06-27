@@ -1,18 +1,26 @@
-/* AETHER — a radar-operations console aesthetic: deep space-blue glass panels,
-   a glowing circular scope at the heart, monospace data readouts, and a slow
-   rotating sweep line. Deliberately distinct from typical radar sites. */
+/* RadarNexus — a radar-operations console aesthetic built on the logo's palette:
+   a near-black field, deep-navy glass panels, and a high-contrast jump to the
+   bright azure "Nexus" blue for every highlight, glow and active state. Monospace
+   data readouts and a slow rotating sweep keep the scope feel. The wide gap
+   between the deep navy and the electric azure is deliberate — it's what gives
+   the UI its punch. */
 
 :root {
-  --bg: #050912;
-  --bg-2: #070d1c;
-  --panel: #121e36;
-  --panel-edge: #27456f;
-  --ink: #d6e6ff;
-  --ink-dim: #7c93b8;
-  --accent: #36e0c8;
-  --accent-2: #4d8dff;
+  --bg: #03060f;
+  --bg-2: #060c1c;
+  --panel: #0c1a36;
+  --panel-edge: #1d4a93;
+  --ink: #dceaff;
+  --ink-dim: #7f9bc6;
+  /* Two-tone blue system: --accent is the bright "Nexus" azure (primary
+     highlight), --accent-2 the deeper electric blue, --accent-bright a near-cyan
+     glint for the strongest accents and glows. */
+  --accent: #2bb8f5;
+  --accent-2: #2f6bff;
+  --accent-bright: #5fd4ff;
   --warn: #ff9d3c;
-  --glow: 0 0 24px rgba(54, 224, 200, 0.25);
+  --glow: 0 0 24px rgba(43, 184, 245, 0.32);
+  --glow-strong: 0 0 30px rgba(95, 212, 255, 0.45);
   --radius: 14px;
   /* Motion system: shared durations + easing so every transition feels of a
      piece. --ease-out matches the bottom sheet's existing curve. */
@@ -67,8 +75,21 @@ body {
   padding: 10px 18px;
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #172947 0%, #0b1428 100%);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(135deg, #10254a 0%, #0a1226 60%, #0b1f3e 100%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  position: relative;
+  overflow: hidden;
+}
+/* A thin azure light line along the top edge ties the bar to the accent. */
+.topbar::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent) 22%, var(--accent-bright) 50%, var(--accent) 78%, transparent);
+  opacity: 0.7;
 }
 
 .brand {
@@ -78,36 +99,51 @@ body {
 }
 
 .brand-mark {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  border: 1px solid rgba(95, 212, 255, 0.5);
   display: grid;
   place-items: center;
   position: relative;
-  box-shadow: var(--glow);
+  overflow: hidden;
+  background: #000;
+  box-shadow: var(--glow), inset 0 0 0 1px rgba(43, 184, 245, 0.12);
 }
-.brand-mark span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent);
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
+/* A faint sweeping sheen across the mark keeps the live-scope feel without the
+   old spinning ring. */
 .brand-mark::after {
   content: '';
   position: absolute;
-  inset: 4px;
-  border-radius: 50%;
-  border-top: 1px solid rgba(54, 224, 200, 0.7);
-  animation: spin 3s linear infinite;
+  inset: -40%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(95, 212, 255, 0.18) 28deg,
+    transparent 70deg
+  );
+  animation: spin 4.5s linear infinite;
+  pointer-events: none;
 }
 
 .brand-text h1 {
   margin: 0;
   font-size: 20px;
-  letter-spacing: 6px;
+  letter-spacing: 1.5px;
   font-weight: 700;
+  color: #f2f8ff;
+}
+/* The wordmark's two-tone: white "Radar", bright azure "Nexus", matching the
+   logo. */
+.brand-text h1 span {
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(43, 184, 245, 0.55);
 }
 .brand-text p {
   margin: 0;
@@ -262,9 +298,10 @@ input:focus {
 }
 .mode-btn:hover { color: var(--ink); }
 .mode-btn.active {
-  background: rgba(54, 224, 200, 0.14);
-  color: var(--accent);
-  box-shadow: var(--glow);
+  background: linear-gradient(180deg, rgba(47, 107, 255, 0.32) 0%, rgba(43, 184, 245, 0.18) 100%);
+  color: #eaf6ff;
+  box-shadow: var(--glow), inset 0 0 0 1px rgba(95, 212, 255, 0.45);
+  text-shadow: 0 0 10px rgba(95, 212, 255, 0.6);
 }
 
 /* ---------------- Volume list ---------------- */
@@ -321,7 +358,7 @@ button {
   color: var(--ink);
 }
 .vol-btn.active {
-  background: rgba(54, 224, 200, 0.12);
+  background: rgba(43, 184, 245, 0.12);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -696,10 +733,10 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
 }
 .product-btn.active {
-  border-color: var(--accent);
-  background: rgba(54, 224, 200, 0.12);
-  color: var(--accent);
-  box-shadow: var(--glow);
+  border-color: var(--accent-bright);
+  background: linear-gradient(160deg, rgba(47, 107, 255, 0.22) 0%, rgba(43, 184, 245, 0.14) 100%);
+  color: #eaf6ff;
+  box-shadow: var(--glow), inset 0 0 0 1px rgba(95, 212, 255, 0.3);
 }
 
 /* ---------------- Tilt list ---------------- */
@@ -727,7 +764,7 @@ input[type='range']::-moz-range-thumb {
 .tilt-btn.active {
   color: var(--accent);
   border-color: var(--accent);
-  background: rgba(54, 224, 200, 0.12);
+  background: rgba(43, 184, 245, 0.12);
 }
 
 /* ---------------- Meta ---------------- */
@@ -1077,7 +1114,7 @@ input[type='range']::-moz-range-thumb {
   height: 38px;
   border-radius: 9px;
   border: 1px solid var(--accent);
-  background: rgba(54, 224, 200, 0.12);
+  background: rgba(43, 184, 245, 0.12);
   color: var(--accent);
   font-size: 13px;
   font-weight: 600;
@@ -1086,7 +1123,7 @@ input[type='range']::-moz-range-thumb {
   transition: 0.12s;
 }
 .apv-details:hover {
-  background: rgba(54, 224, 200, 0.2);
+  background: rgba(43, 184, 245, 0.2);
 }
 
 .alert-detail {
@@ -1785,7 +1822,7 @@ input[type='range']::-moz-range-thumb {
 .crosshair .cx-line {
   position: absolute;
   background: var(--accent);
-  box-shadow: 0 0 6px rgba(54, 224, 200, 0.8);
+  box-shadow: 0 0 6px rgba(43, 184, 245, 0.8);
 }
 .crosshair .cx-v {
   left: 50%;
@@ -1810,7 +1847,7 @@ input[type='range']::-moz-range-thumb {
   margin: -11px 0 0 -11px;
   border: 1.5px solid var(--accent);
   border-radius: 50%;
-  box-shadow: 0 0 8px rgba(54, 224, 200, 0.7), inset 0 0 6px rgba(54, 224, 200, 0.4);
+  box-shadow: 0 0 8px rgba(43, 184, 245, 0.7), inset 0 0 6px rgba(43, 184, 245, 0.4);
 }
 .crosshair .cx-read {
   position: absolute;
@@ -1989,11 +2026,11 @@ input[type='range']::-moz-range-thumb {
   cursor: pointer;
 }
 .dock-tool-item:active {
-  background: rgba(54, 224, 200, 0.14);
+  background: rgba(43, 184, 245, 0.14);
 }
 .dock-tool-item.active {
   color: var(--accent);
-  background: rgba(54, 224, 200, 0.1);
+  background: rgba(43, 184, 245, 0.1);
 }
 .dock-tool-item .ti-icon {
   width: 22px;
@@ -2217,7 +2254,7 @@ input[type='range']::-moz-range-thumb {
 .sheet-tab.active {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(54, 224, 200, 0.14);
+  background: rgba(43, 184, 245, 0.14);
   box-shadow: var(--glow);
 }
 .sheet-pager {
@@ -2561,7 +2598,7 @@ input[type='range']::-moz-range-thumb {
   color: var(--accent);
 }
 .map-tool.active {
-  background: rgba(54, 224, 200, 0.18);
+  background: rgba(43, 184, 245, 0.18);
   border-color: var(--accent);
   color: var(--accent);
   box-shadow: var(--glow);
@@ -3103,10 +3140,10 @@ body.storm-active .playback-bar {
 .weather-picker-card {
   position: relative;
   width: min(430px, 100%);
-  border: 1px solid #2f8d9d;
+  border: 1px solid #2f7fc8;
   border-radius: calc(var(--radius) + 4px);
   background: linear-gradient(160deg, #142947 0%, #0b1830 48%, #07101f 100%);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(54, 224, 200, 0.08);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(43, 184, 245, 0.08);
   padding: 20px;
   pointer-events: auto;
 }
@@ -3168,7 +3205,7 @@ body.storm-active .playback-bar {
   margin: -46px 0 0 -46px;
   pointer-events: none;
   color: var(--accent);
-  filter: drop-shadow(0 0 10px rgba(54, 224, 200, 0.75));
+  filter: drop-shadow(0 0 10px rgba(43, 184, 245, 0.75));
 }
 .weather-center-picker .wxp-line {
   position: absolute;
@@ -3203,7 +3240,7 @@ body.storm-active .playback-bar {
   left: 50%;
   top: calc(100% + 8px);
   transform: translateX(-50%);
-  border: 1px solid #2f8d9d;
+  border: 1px solid #2f7fc8;
   border-radius: 999px;
   background: linear-gradient(180deg, #10233f, #07101f);
   padding: 4px 8px;
@@ -3218,7 +3255,7 @@ body.storm-active .playback-bar {
   display: block;
   width: max-content;
   max-width: min(340px, calc(100vw - 32px));
-  border-color: #2f8d9d;
+  border-color: #2f7fc8;
   background: linear-gradient(160deg, #142947 0%, #0b1830 52%, #07101f 100%);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.38);
 }
@@ -3371,7 +3408,7 @@ body.storm-active .playback-bar {
   gap: 10px;
   align-items: center;
   margin-top: 10px;
-  border: 1px solid #2f8d9d;
+  border: 1px solid #2f7fc8;
   border-radius: 14px;
   background: linear-gradient(135deg, #123b50 0%, #0a1428 100%);
   padding: 10px;
@@ -3409,8 +3446,8 @@ body.storm-active .playback-bar {
 .weather-card .wx-forecast-pill { cursor: pointer; transition: border-color 140ms ease, transform 140ms ease, background 140ms ease; }
 .weather-card .wx-forecast-pill:hover,
 .weather-card .wx-forecast-pill:focus-visible {
-  border-color: rgba(54, 224, 200, 0.75);
-  background: rgba(54, 224, 200, 0.12);
+  border-color: rgba(43, 184, 245, 0.75);
+  background: rgba(43, 184, 245, 0.12);
   transform: translateY(-2px);
   outline: none;
 }
@@ -3428,7 +3465,7 @@ body.storm-active .playback-bar {
   width: min(520px, calc(100vw - 36px));
   max-height: min(680px, calc(100vh - 36px));
   overflow: auto;
-  border: 1px solid rgba(54, 224, 200, 0.34);
+  border: 1px solid rgba(43, 184, 245, 0.34);
   border-radius: 20px;
   background: rgba(8, 16, 32, 0.94);
   box-shadow: var(--glow);
@@ -3526,7 +3563,7 @@ body.storm-active .playback-bar {
 .mbx-gate-card code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
-  background: rgba(54, 224, 200, 0.1);
+  background: rgba(43, 184, 245, 0.1);
   color: var(--accent);
   padding: 1px 5px;
   border-radius: 5px;
@@ -3550,7 +3587,7 @@ body.storm-active .playback-bar {
 }
 .mbx-gate-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(54, 224, 200, 0.18);
+  box-shadow: 0 0 0 3px rgba(43, 184, 245, 0.18);
 }
 .mbx-gate-error {
   min-height: 18px;
