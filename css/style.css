@@ -1518,10 +1518,10 @@ input[type='range']::-moz-range-thumb {
     border: none;
     border-radius: 0;
   }
-  /* Float the legend over the top of the map. */
+  /* Float the legend over the top of the map, clear of the status bar / notch. */
   .legend {
     position: absolute;
-    top: 8px;
+    top: calc(8px + env(safe-area-inset-top, 0px));
     left: 50%;
     right: auto;
     transform: translateX(-50%);
@@ -2919,6 +2919,11 @@ body.storm-active .playback-bar {
      collide with the nav control / toolbar at the top. */
   .map-wrap.split #map .split-badge { top: 70px; }
   .map-wrap.split #map2 .split-badge { top: auto; bottom: 8px; }
+  /* The top (stacked) pane's legend must clear the device status bar / notch;
+     the bottom pane's legend sits at the seam and needs no inset. */
+  .map-wrap.split #map2 .split-pane-legend {
+    top: calc(10px + env(safe-area-inset-top, 0px));
+  }
 }
 
 /* PC / iPad: the two-pane split is LEFT/RIGHT (each half the width) rather than
@@ -2941,6 +2946,12 @@ body.storm-active .playback-bar {
     top: 72px;
     bottom: auto;
   }
+  /* Side-by-side panes both reach the top, so both legends clear the
+     status bar / notch. */
+  .map-wrap.split #map .split-pane-legend,
+  .map-wrap.split #map2 .split-pane-legend {
+    top: calc(10px + env(safe-area-inset-top, 0px));
+  }
 
   /* Four-quadrant split: four equal panes, each its own product over the same
      view. Panes 3/4 only exist in this mode (built by SplitView). */
@@ -2949,6 +2960,12 @@ body.storm-active .playback-bar {
   .map-wrap.quad #map3 { left: 0; right: 50%; top: 50%; bottom: 0; }
   .map-wrap.quad #map4 { left: 50%; right: 0; top: 50%; bottom: 0; border-left: 1px solid var(--panel-edge); }
   .map-wrap.quad #map3, .map-wrap.quad #map4 { border-top: 1px solid var(--panel-edge); }
+  /* The two top quadrants' legends clear the status bar / notch; the bottom
+     quadrants sit at mid-screen and need no inset. */
+  .map-wrap.quad #map .split-pane-legend,
+  .map-wrap.quad #map2 .split-pane-legend {
+    top: calc(10px + env(safe-area-inset-top, 0px));
+  }
 }
 
 /* The extra quadrant panes share #map2's base styling. */
