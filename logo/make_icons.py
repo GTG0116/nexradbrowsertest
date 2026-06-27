@@ -1,166 +1,122 @@
 #!/usr/bin/env python3
-"""Procedurally render the RadarNexus storm-cell icon and write the PNG sizes the
-app needs (favicon + iOS web-app / PWA icons).
+"""Generate the favicon + iOS web-app / PWA icon PNGs from the RadarNexus mark.
 
-There is no SVG rasteriser in this environment, so the icon is drawn here as a
-metaball reflectivity field — a cluster of Gaussian "cells" forming an irregular
-storm mass with a curved hook echo, coloured with the familiar NWS reflectivity
-palette (green -> yellow -> red -> magenta) over black, matching the supplied
-logo mark. PNGs are encoded straight from RGBA with zlib (stdlib only).
+The square brand mark lives in `Logo2.png`; this script decodes it and box-
+downscales it to every size the app and manifest reference. (The wide wordmark,
+`Logo1.png`, is shown on screen directly and isn't rasterised here.)
+
+Everything is stdlib only — a minimal PNG decoder (zlib inflate + per-scanline
+unfilter), an area-average downscaler, and a zlib PNG encoder — so it runs with
+no Pillow/ImageMagick in the environment.
 """
-import math, struct, zlib
+import os
+import struct
+import zlib
 
-# NWS-style reflectivity palette as (stop 0..1, (r,g,b)). Warm/strong = high.
-PALETTE = [
-    (0.00, (10, 110, 25)),    # dark green (edge)
-    (0.16, (24, 175, 35)),    # green
-    (0.30, (90, 215, 45)),    # light green
-    (0.42, (245, 245, 50)),   # yellow
-    (0.52, (250, 175, 30)),   # orange
-    (0.62, (240, 60, 30)),    # red
-    (0.78, (205, 20, 25)),    # deep red (bulk of the cell)
-    (0.90, (150, 0, 10)),     # darkest red
-    (0.96, (210, 40, 225)),   # magenta core
-    (1.00, (240, 150, 250)),  # bright magenta core
+HERE = os.path.dirname(os.path.abspath(__file__))
+SOURCE = os.path.join(HERE, "Logo2.png")
+
+# (filename, size) for each icon the app + manifest declare.
+TARGETS = [
+    ("icon-512.png", 512),
+    ("icon-192.png", 192),
+    ("apple-touch-icon.png", 180),
+    ("favicon-32.png", 32),
+    ("favicon-16.png", 16),
 ]
 
 
-def ramp(t):
-    t = max(0.0, min(1.0, t))
-    for i in range(len(PALETTE) - 1):
-        a, ca = PALETTE[i]
-        b, cb = PALETTE[i + 1]
-        if a <= t <= b:
-            f = (t - a) / (b - a) if b > a else 0.0
-            return tuple(ca[j] + (cb[j] - ca[j]) * f for j in range(3))
-    return PALETTE[-1][1]
+def _paeth(a, b, c):
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
 
 
-# Storm cells: (cx, cy, radius, weight) in a -1..1 normalised square. The main
-# mass sits upper-right; a trailing arc of shrinking cells curls into a hook
-# echo toward the lower-left, like the logo.
-def build_cells():
-    cells = [
-        (0.18, -0.22, 0.52, 1.05),
-        (0.36, -0.05, 0.42, 0.95),
-        (0.00, -0.34, 0.40, 0.90),
-        (0.42, -0.40, 0.34, 0.80),
-        (-0.16, -0.10, 0.40, 0.92),
-        (0.30, 0.18, 0.34, 0.78),
-        (-0.04, 0.10, 0.36, 0.85),
-        (0.50, -0.20, 0.30, 0.70),
-        (-0.30, -0.36, 0.30, 0.72),
-    ]
-    # Hook echo: a curling tail of cells spiralling down-left then hooking up.
-    n = 10
-    for i in range(n):
-        f = i / (n - 1)
-        ang = math.pi * (0.55 + 1.55 * f)        # sweep around
-        rad = 0.30 + 0.42 * f                     # spiral outward
-        cx = -0.30 - rad * 0.55 * math.cos(ang)
-        cy = 0.18 + rad * 0.62 * math.sin(ang)
-        cells.append((cx, cy, 0.20 - 0.10 * f, 0.62 - 0.18 * f))
-    return cells
+def decode_png(path):
+    """Decode an 8-bit non-interlaced PNG (RGB or RGBA) to (w, h, channels, bytes)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    pos = 8
+    width = height = bit_depth = color_type = None
+    idat = bytearray()
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        tag = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + length]
+        pos += 12 + length  # length + tag + data + CRC
+        if tag == b"IHDR":
+            width, height, bit_depth, color_type = struct.unpack(">IIBB", chunk[:10])
+        elif tag == b"IDAT":
+            idat.extend(chunk)
+        elif tag == b"IEND":
+            break
+    assert bit_depth == 8, "only 8-bit PNGs supported"
+    channels = {0: 1, 2: 3, 6: 4}[color_type]
+    raw = zlib.decompress(bytes(idat))
+    stride = width * channels
+    out = bytearray(stride * height)
+    prev = bytearray(stride)
+    p = 0
+    for y in range(height):
+        ftype = raw[p]; p += 1
+        line = bytearray(raw[p:p + stride]); p += stride
+        for i in range(stride):
+            a = line[i - channels] if i >= channels else 0
+            b = prev[i]
+            c = prev[i - channels] if i >= channels else 0
+            if ftype == 1:
+                line[i] = (line[i] + a) & 0xff
+            elif ftype == 2:
+                line[i] = (line[i] + b) & 0xff
+            elif ftype == 3:
+                line[i] = (line[i] + ((a + b) >> 1)) & 0xff
+            elif ftype == 4:
+                line[i] = (line[i] + _paeth(a, b, c)) & 0xff
+        out[y * stride:(y + 1) * stride] = line
+        prev = line
+    return width, height, channels, bytes(out)
 
 
-CELLS = build_cells()
-
-# A handful of intense "cores" that punch into magenta, like the logo's hot
-# streaks low and left of centre.
-CORES = [(-0.08, 0.06, 0.16), (0.06, 0.16, 0.14), (-0.20, -0.02, 0.13)]
-
-
-def _hash(ix, iy):
-    h = (ix * 374761393 + iy * 668265263) & 0xffffffff
-    h = (h ^ (h >> 13)) * 1274126177 & 0xffffffff
-    return ((h ^ (h >> 16)) & 0xffff) / 65535.0
-
-
-def noise(x, y, cells=34):
-    """Blocky value noise on a coarse grid -> the pixelated radar-gate texture."""
-    gx, gy = x * cells, y * cells
-    ix, iy = math.floor(gx), math.floor(gy)
-    return _hash(int(ix), int(iy))
-
-
-def field(x, y):
-    s = 0.0
-    for cx, cy, r, w in CELLS:
-        dx, dy = (x - cx) / r, (y - cy) / r
-        s += w * math.exp(-(dx * dx + dy * dy) * 1.55)
-    core = 0.0
-    for cx, cy, r in CORES:
-        dx, dy = (x - cx) / r, (y - cy) / r
-        core += math.exp(-(dx * dx + dy * dy))
-    return s, core
+def downscale(src_w, src_h, ch, pixels, size):
+    """Area-average downscale `pixels` to size×size, returning RGBA bytes."""
+    out = bytearray(4 * size * size)
+    for dy in range(size):
+        y0 = dy * src_h // size
+        y1 = max(y0 + 1, (dy + 1) * src_h // size)
+        for dx in range(size):
+            x0 = dx * src_w // size
+            x1 = max(x0 + 1, (dx + 1) * src_w // size)
+            r = g = b = a = n = 0
+            for sy in range(y0, y1):
+                row = sy * src_w * ch
+                for sx in range(x0, x1):
+                    o = row + sx * ch
+                    r += pixels[o]
+                    g += pixels[o + 1]
+                    b += pixels[o + 2]
+                    a += pixels[o + 3] if ch == 4 else 255
+                    n += 1
+            d = 4 * (dy * size + dx)
+            out[d] = r // n
+            out[d + 1] = g // n
+            out[d + 2] = b // n
+            out[d + 3] = a // n
+    return bytes(out)
 
 
-def render(size, pad=0.10, corner=0.0):
-    """Return RGBA bytes for an icon `size`x`size`. `corner` rounds the black
-    tile (0 = square). 2x supersampled for clean edges."""
-    ss = 2
-    S = size * ss
-    px = bytearray(4 * size * size)
-    half = (size - 1) / 2.0
-    rad_px = size * (0.5 - 0.0)
-    for j in range(size):
-        for i in range(size):
-            acc = [0, 0, 0, 0]
-            for sj in range(ss):
-                for si in range(ss):
-                    fx = (i + (si + 0.5) / ss)
-                    fy = (j + (sj + 0.5) / ss)
-                    # normalised -1..1 with padding margin
-                    nx = (fx / size * 2 - 1) / (1 - pad)
-                    ny = (fy / size * 2 - 1) / (1 - pad)
-                    r, g, b, a = 0, 0, 0, 255
-                    v, core = field(nx, ny)
-                    # granular texture: jitter the field by blocky noise so the
-                    # cell breaks into radar-gate speckle instead of smooth bands
-                    nz = noise(nx * 0.5 + 0.5, ny * 0.5 + 0.5)
-                    v *= 0.82 + 0.34 * nz
-                    if v > 0.34:
-                        # Map the bulk of the mass into greens->reds; only the
-                        # intense cores (plus a noise kick) reach magenta.
-                        base = (v - 0.34) / 0.62          # 0..~1 across the cell
-                        t = 0.10 + 0.74 * min(1.0, base)
-                        if core > 0.55:
-                            t = max(t, 0.90 + 0.12 * (core - 0.55) + 0.05 * nz)
-                        col = ramp(t)
-                        # soft alpha at the faint fringe so the edge melts to black
-                        edge = min(1.0, (v - 0.34) / 0.12)
-                        r = int(col[0] * edge)
-                        g = int(col[1] * edge)
-                        b = int(col[2] * edge)
-                    # rounded-corner / circular mask
-                    if corner > 0:
-                        cx = min(fx, size - fx)
-                        cy = min(fy, size - fy)
-                        cr = corner * size
-                        if cx < cr and cy < cr:
-                            d = math.hypot(cr - cx, cr - cy)
-                            if d > cr:
-                                a = 0
-                    acc[0] += r; acc[1] += g; acc[2] += b; acc[3] += a
-            o = 4 * (j * size + i)
-            px[o] = acc[0] // (ss * ss)
-            px[o + 1] = acc[1] // (ss * ss)
-            px[o + 2] = acc[2] // (ss * ss)
-            px[o + 3] = acc[3] // (ss * ss)
-    return bytes(px)
-
-
-def write_png(path, size, **kw):
-    rgba = render(size, **kw)
+def write_png(path, size, rgba):
     raw = bytearray()
     stride = size * 4
     for y in range(size):
-        raw.append(0)
+        raw.append(0)  # filter type 0 (none)
         raw.extend(rgba[y * stride:(y + 1) * stride])
 
-    def chunk(tag, data):
-        return (struct.pack(">I", len(data)) + tag + data +
-                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+    def chunk(tag, payload):
+        return (struct.pack(">I", len(payload)) + tag + payload +
+                struct.pack(">I", zlib.crc32(tag + payload) & 0xffffffff))
 
     ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
     png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
@@ -171,12 +127,6 @@ def write_png(path, size, **kw):
 
 
 if __name__ == "__main__":
-    import os
-    here = os.path.dirname(os.path.abspath(__file__))
-    # Maskable/full-bleed square icons (PWA + iOS use a black tile, no rounding —
-    # iOS rounds it for us; the manifest declares them maskable).
-    write_png(os.path.join(here, "icon-512.png"), 512)
-    write_png(os.path.join(here, "icon-192.png"), 192)
-    write_png(os.path.join(here, "apple-touch-icon.png"), 180)
-    write_png(os.path.join(here, "favicon-32.png"), 32)
-    write_png(os.path.join(here, "favicon-16.png"), 16)
+    w, h, ch, px = decode_png(SOURCE)
+    for name, size in TARGETS:
+        write_png(os.path.join(HERE, name), size, downscale(w, h, ch, px, size))
