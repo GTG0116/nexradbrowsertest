@@ -80,7 +80,6 @@
         </div>
         <div class="topbar-status">
           <div id="status" class="status">initializing…</div>
-          <div id="clock" class="clock">--:--:-- UTC</div>
         </div>
       </header>
 
@@ -160,6 +159,7 @@
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
               <button id="toolWeather" class="map-tool" title="Local current conditions">☼</button>
+              <button id="toolLocate" class="map-tool" title="Show my live location">📍</button>
               <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
               <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
               <button id="toolClear" class="map-tool" title="Clear drawings">✕</button>
@@ -196,6 +196,12 @@
             <div id="decoding" class="decoding">DECODING</div>
           </div>
           <div id="legend" class="legend"></div>
+          <!-- Time bar: sits just below the legend and shows the current time,
+               toggling between UTC and the viewer's local time zone. -->
+          <div id="timeBar" class="time-bar">
+            <span id="clock" class="clock">--:--:-- UTC</span>
+            <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+          </div>
         </section>
 
         <!-- Right rail: products & metadata -->

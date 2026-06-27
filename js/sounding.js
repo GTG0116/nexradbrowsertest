@@ -620,6 +620,19 @@ const HODO_BANDS = [
   { max: 99000, color: '#9aa6bd' },  // 9 km+
 ];
 
+// The hodograph trace points (u,v m/s) from the surface up to a height AGL, with
+// an interpolated cap exactly at topAGL so the storm-relative area closes cleanly.
+function hodoPointsTo(levels, topAGL) {
+  const pts = [];
+  for (const lv of levels) {
+    if (lv.zAGL < -10) continue;
+    if (lv.zAGL > topAGL) break;
+    pts.push([lv.u, lv.v]);
+  }
+  pts.push(windAtAGL(levels, topAGL));
+  return pts;
+}
+
 export function drawHodograph(canvas, profile) {
   const ctx = canvas.getContext('2d');
   const { w, h } = prepCanvas(canvas, ctx);
@@ -655,6 +668,39 @@ export function drawHodograph(canvas, profile) {
   ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
   ctx.stroke();
 
+  // ---- Storm-relative helicity area shading ----------------------------------
+  // The signed area swept out by the storm-relative wind vectors between the
+  // surface and a given height equals ½·SRH. Filling the polygon bounded by the
+  // storm-motion point and the hodograph trace is the classic grey/white "SRH"
+  // region on an SPC/SHARPpy hodograph — drawn here for the 0–3 km layer (light
+  // grey) with the 0–1 km layer brighter on top, relative to the right mover.
+  const fillSRH = (topAGL, style) => {
+    const pts = hodoPointsTo(L, topAGL);
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
+    for (const [u, v] of pts) ctx.lineTo(px(u), py(v));
+    ctx.closePath();
+    ctx.fillStyle = style;
+    ctx.fill();
+  };
+  fillSRH(3000, 'rgba(190,200,215,0.16)'); // 0–3 km — soft grey
+  fillSRH(1000, 'rgba(235,240,248,0.22)'); // 0–1 km — brighter white-grey
+
+  // Storm-relative inflow vectors: storm motion → surface wind, and the 0–1 /
+  // 0–3 km edges that bound the shaded areas above.
+  ctx.strokeStyle = 'rgba(230,236,247,0.45)';
+  ctx.setLineDash([4, 3]);
+  ctx.lineWidth = 1.1;
+  const cap1 = windAtAGL(L, 1000), cap3 = windAtAGL(L, 3000);
+  for (const [u, v] of [[L[0].u, L[0].v], cap1, cap3]) {
+    ctx.beginPath();
+    ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
+    ctx.lineTo(px(u), py(v));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
   // Hodograph curve, coloured by height band.
   ctx.lineWidth = 3;
   ctx.lineJoin = 'round';
@@ -668,6 +714,23 @@ export function drawHodograph(canvas, profile) {
     ctx.stroke();
   }
 
+  // Height markers: a numbered dot at each whole kilometre AGL along the trace,
+  // like the labelled rings in a reference hodograph.
+  const topKm = Math.min(12, Math.floor(L[L.length - 1].zAGL / 1000));
+  ctx.font = '700 9px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let km = 1; km <= topKm; km++) {
+    const [u, v] = windAtAGL(L, km * 1000);
+    if (Math.hypot(u, v) * MS2KT > ring) continue; // outside the plotted rings
+    const x = px(u), y = py(v);
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7);
+    ctx.fillStyle = 'rgba(12,16,24,0.92)'; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(230,236,247,0.85)'; ctx.stroke();
+    ctx.fillStyle = '#e6ecf7';
+    ctx.fillText(String(km), x, y + 0.5);
+  }
+
   // Storm motion markers.
   const drawSM = (vec, label, fill) => {
     const x = px(vec[0]), y = py(vec[1]);
@@ -678,22 +741,16 @@ export function drawHodograph(canvas, profile) {
     ctx.font = '700 10px "Space Grotesk", sans-serif';
     ctx.fillText(label, x + 12, y);
   };
-  // 0-6 km mean wind (hollow), then both movers.
+  // 0–6 km mean wind (hollow, labelled MW), then both movers.
   const mx = px(sm.mean[0]), my = py(sm.mean[1]);
   ctx.beginPath(); ctx.arc(mx, my, 4, 0, 7);
   ctx.strokeStyle = '#9aa6bd'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#e6ecf7';
+  ctx.font = '700 10px "Space Grotesk", sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('MW', mx + 14, my);
   drawSM(sm.lm, 'LM', '#6aa9ff');
   drawSM(sm.rm, 'RM', '#ff6f61');
-
-  // Storm-relative inflow: surface → RM, the 0-1 km SRH area edge.
-  ctx.strokeStyle = 'rgba(255,111,97,0.5)';
-  ctx.setLineDash([4, 3]);
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
-  ctx.lineTo(px(L[0].u), py(L[0].v));
-  ctx.stroke();
-  ctx.setLineDash([]);
 }
 
 // ---------------------------------------------------------------------------
