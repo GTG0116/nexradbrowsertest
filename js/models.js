@@ -484,6 +484,43 @@ const stp = (a, i) => {
   return Math.max(0, (cape / 1500) * lclT * (srh / 150) * shrT * cinT);
 };
 
+// NWS heat index (Rothfusz regression) from temperature (°F) and relative
+// humidity (%). The simple average formula is used in the cooler/drier range; the
+// full regression — with the low-humidity and high-humidity adjustments — kicks
+// in once the apparent temperature reaches ~80°F.
+function heatIndexF(T, R) {
+  let hi = 0.5 * (T + 61 + (T - 68) * 1.2 + R * 0.094);
+  if ((T + hi) / 2 < 80) return hi;
+  hi = -42.379 + 2.04901523 * T + 10.14333127 * R - 0.22475541 * T * R
+    - 6.83783e-3 * T * T - 5.481717e-2 * R * R + 1.22874e-3 * T * T * R
+    + 8.5282e-4 * T * R * R - 1.99e-6 * T * T * R * R;
+  if (R < 13 && T >= 80 && T <= 112) {
+    hi -= ((13 - R) / 4) * Math.sqrt((17 - Math.abs(T - 95)) / 17);
+  } else if (R > 85 && T >= 80 && T <= 87) {
+    hi += ((R - 85) / 10) * ((87 - T) / 5);
+  }
+  return hi;
+}
+// Apparent temperature ("feels like"): heat index when it's hot and humid, wind
+// chill when it's cold and windy, the plain air temperature in between. Returned
+// in kelvin so it rides the same color scale as 2 m temperature. arrays = 2 m
+// temperature (K), 2 m RH (%), 10 m U and V wind (m/s).
+const feelsLike = (a, i) => {
+  const tK = a[0][i];
+  if (Number.isNaN(tK)) return NaN;
+  const tF = tK * 1.8 - 459.67;
+  const rh = a[1][i];
+  const windMph = Math.hypot(a[2][i], a[3][i]) * MS_TO_MPH;
+  let outF = tF;
+  if (tF >= 80 && Number.isFinite(rh)) {
+    outF = heatIndexF(tF, rh);
+  } else if (tF <= 50 && windMph > 3) {
+    const vp = Math.pow(windMph, 0.16);
+    outF = 35.74 + 0.6215 * tF - 35.75 * vp + 0.4275 * tF * vp;
+  }
+  return (outF + 459.67) / 1.8;
+};
+
 export const MODEL_PRODUCTS = {
   REFC: {
     id: 'REFC',
@@ -505,6 +542,14 @@ export const MODEL_PRODUCTS = {
   GUST: { ...GUST_PROD, varName: 'GUST', level: 'surface' },
   RH: { ...RH_PROD, varName: 'RH', level: '2 m above ground' },
   DPT: { ...DPT_PROD, varName: 'DPT', level: '2 m above ground' },
+  FEELS: {
+    ...gridProduct('FEELS', 'Feels Like (Heat Index/Wind Chill)', TMP_SCALE, TMP_SCALE.lo, 'K', { unit: '°F', ...K_TO_F }),
+    combine: feelsLike,
+    sources: () => [
+      sfc('TMP', '2 m above ground'), sfc('RH', '2 m above ground'),
+      sfc('UGRD', '10 m above ground'), sfc('VGRD', '10 m above ground'),
+    ],
+  },
   TCDC: { ...CLOUD_PROD, varName: 'TCDC', level: 'entire atmosphere' },
   QPF1: {
     ...gridProduct('QPF1', '1 hr Precip', precipScale(50), 0.1, 'mm', { unit: 'in', factor: MM_TO_IN }),
@@ -642,7 +687,7 @@ export const MODEL_PRODUCTS = {
 export const MODEL_CATEGORIES = [
   {
     id: 'surface', name: 'Surface & Precip',
-    products: ['REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF'],
+    products: ['REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF'],
   },
   {
     id: 'upper', name: 'Upper Air',
@@ -671,7 +716,7 @@ export const MODEL_ORDER = MODEL_CATEGORIES.flatMap((c) => c.products);
 // the QPF products need. HRRR (unlisted) supports the full set.
 const MODEL_PRODUCT_SUPPORT = {
   nam: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH3', 'SHEAR6', 'LTNG',
@@ -680,14 +725,14 @@ const MODEL_PRODUCT_SUPPORT = {
     'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   namnest: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
     'SRH1', 'SRH3', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG',
   ],
   rap: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE',
@@ -696,7 +741,7 @@ const MODEL_PRODUCT_SUPPORT = {
     'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT', 'ICET', 'FZRA',
   ],
   gfs: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'SRH3', 'STORM', 'EHI3',
@@ -715,7 +760,7 @@ const MODEL_PRODUCT_SUPPORT = {
   // VVCSH) fields decode to ~0 here, so the shear products are dropped too;
   // storm motion (USTM/VSTM) is fine.
   hrrrcast: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH1', 'SRH3', 'STORM',
