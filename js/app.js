@@ -255,7 +255,7 @@ function setupOverlays(map) {
       type: 'fill',
       source: 'spc-outlook',
       filter: ['!', isCig],
-      paint: { 'fill-color': ['get', 'fill'], 'fill-opacity': 0.3 },
+      paint: { 'fill-color': ['get', 'fill'], 'fill-opacity': state.spcOpacity },
     },
     dataAnchor
   );
@@ -271,7 +271,7 @@ function setupOverlays(map) {
           'CIG2', 'cig-hatch-2',
           'CIG3', 'cig-hatch-3',
           'cig-hatch-1'],
-        'fill-opacity': 0.85,
+        'fill-opacity': Math.min(1, (state.spcOpacity / 0.3) * 0.85),
       },
     },
     dataAnchor
@@ -502,6 +502,9 @@ const state = {
   // is built at init. (`spc`/`_spc` names kept for settings back-compat.)
   spc: null,
   _spc: { on: false, product: 'spc_conv', detail: '1:cat' },
+  // Outlook fill shading opacity (0–1), user-adjustable + persisted. The risk-area
+  // boundaries (outline) stay full so they read even at a faint fill.
+  spcOpacity: 0.3,
   shownSweep: null,
   shownSite: null,
   inspect: false,
@@ -607,6 +610,8 @@ function cacheEls() {
   el.spcToggle = $('#spcToggle');
   el.outlookSelect = $('#outlookSelect');
   el.outlookDetail = $('#outlookDetail');
+  el.spcOpacity = $('#spcOpacity');
+  el.spcOpacityVal = $('#spcOpacityVal');
   el.spcStatus = $('#spcStatus');
   el.spcLegend = $('#spcLegend');
 
@@ -859,7 +864,7 @@ function setBasemap(key) {
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
 // option (so right-click can reach any of the ~160 WSR-88D sites).
-function selectSite(icao, name) {
+function selectSite(icao, name, recenter = false) {
   if (!el.siteSelect.querySelector(`option[value="${icao}"]`)) {
     const opt = document.createElement('option');
     opt.value = icao;
@@ -867,15 +872,18 @@ function selectSite(icao, name) {
     el.siteSelect.appendChild(opt);
   }
   el.siteSelect.value = icao;
-  onSiteSwitch(icao);
+  onSiteSwitch(icao, recenter);
 }
 
-// Shared housekeeping whenever the active radar changes (picker, dot, long-press
-// or right-click). Always recenters and loads the newest scan automatically.
-function onSiteSwitch(icao) {
+// Shared housekeeping whenever the active radar changes (picker list, map dot,
+// long-press or right-click). Loads the newest scan automatically. Only an
+// explicit pick from the site *list* recenters/zooms onto the tower (recenter =
+// true); switching via a map dot, right-click or long-press keeps the user's
+// current location and zoom so the view doesn't jump out from under them.
+function onSiteSwitch(icao, recenter = false) {
   if (state.playback && state.playback.active) state.playback.stop();
   state.site = icao;
-  state._recenterRadar = true; // explicit pick → recenter/zoom on the next load
+  state._recenterRadar = recenter;
   state._forceLatest = true; // show the latest frame without needing LIVE
   // TDWR is Doppler-only: drop a dual-pol selection and rebuild the product row
   // so its dual-pol buttons disappear (and reappear when leaving a TDWR site).
@@ -965,7 +973,8 @@ function buildSiteSelect() {
     if (code === state.site) opt.selected = true;
     el.siteSelect.appendChild(opt);
   }
-  el.siteSelect.addEventListener('change', () => onSiteSwitch(el.siteSelect.value));
+  // Picking from the list is the one path that recenters/zooms onto the tower.
+  el.siteSelect.addEventListener('change', () => onSiteSwitch(el.siteSelect.value, true));
 }
 
 // In split view the product buttons drive whichever pane is selected. This
@@ -2249,7 +2258,10 @@ async function loadModelFrame() {
     const grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
-    if (seq !== modelLoadSeq) return; // a newer selection superseded this one
+    // Bail if a newer selection superseded this one, or the user has since left
+    // models mode (e.g. a model loop stopped *because* the mode/source changed —
+    // its idle() reload must not paint a model layer over the new source).
+    if (seq !== modelLoadSeq || state.mode !== 'models') return;
     setStatus(`decoding ${modelName()}…`, true);
     el.decoding.classList.add('show');
     state.models.grid = grid;
@@ -3028,8 +3040,29 @@ function populateOutlookDetails() {
   sel.value = state.spc.detail;
 }
 
+// Push the user's outlook opacity onto the live GL layers. The fill takes it
+// directly; the CIG hatch scales from its 0.85 default so the hatch dims with the
+// fill but stays readable. The risk-area outline is left at full opacity so the
+// boundaries read even when the shading is faint. Safe to call before the layers
+// exist; setupOverlays already bakes state.spcOpacity into the layers it (re)adds
+// on each basemap swap, so this is mainly the live response to the slider.
+function applyOutlookOpacity() {
+  const map = state.map;
+  if (!map || !map.getLayer) return;
+  const o = state.spcOpacity;
+  if (map.getLayer('spc-outlook-fill')) map.setPaintProperty('spc-outlook-fill', 'fill-opacity', o);
+  if (map.getLayer('spc-outlook-cig'))
+    map.setPaintProperty('spc-outlook-cig', 'fill-opacity', Math.min(1, (o / 0.3) * 0.85));
+}
+
+// Reflect state.spcOpacity on the slider + its readout (used at init and restore).
+function syncOutlookOpacityUI() {
+  if (el.spcOpacity) el.spcOpacity.value = String(Math.round(state.spcOpacity * 100));
+  if (el.spcOpacityVal) el.spcOpacityVal.textContent = `${Math.round(state.spcOpacity * 100)}%`;
+}
+
 // Wire the outlook controller to its panel: ON/OFF toggle, product + detail
-// pickers, and persistence of all three across sessions.
+// pickers, opacity, and persistence of all four across sessions.
 function setupSpcOutlook() {
   state.spc = new OutlookController(state.map, {
     productSelect: el.outlookSelect,
@@ -3084,6 +3117,16 @@ function setupSpcOutlook() {
   if (el.outlookDetail) {
     el.outlookDetail.addEventListener('change', () => {
       state.spc.setDetail(el.outlookDetail.value);
+      saveSettings();
+    });
+  }
+  syncOutlookOpacityUI();
+  applyOutlookOpacity();
+  if (el.spcOpacity) {
+    el.spcOpacity.addEventListener('input', () => {
+      state.spcOpacity = Math.max(0.05, Math.min(0.9, (Number(el.spcOpacity.value) || 30) / 100));
+      if (el.spcOpacityVal) el.spcOpacityVal.textContent = `${Math.round(state.spcOpacity * 100)}%`;
+      applyOutlookOpacity();
       saveSettings();
     });
   }
@@ -3192,6 +3235,29 @@ function applyResponsiveLayout() {
 // extra lanes mostly hide round-trip time.
 const PLAYBACK_CONCURRENCY = 6;
 
+// Cap how many forecast-hour frames a model loop holds at once. A full GFS or
+// AI-GFS run is 60–200+ hours; caching a decoded global grid *and* a GPU texture
+// (and, for upper-air products, the wind/height overlay arrays) for every hour
+// exhausts memory and crashes the tab mid-loop — exactly the GFS/AI-GFS failure
+// reported. We subsample the hours evenly (always keeping the first and last) so
+// the loop still spans the whole run, just with a bounded, memory-safe frame set.
+// The forecast-hour picker still reaches every individual hour outside the loop.
+const MAX_MODEL_PLAYBACK_FRAMES = 24;
+
+// Evenly subsample an ordered array down to at most `max` entries, preserving the
+// first and last and never repeating an index.
+function subsampleEven(arr, max) {
+  if (!arr || arr.length <= max) return arr || [];
+  const out = [];
+  const step = (arr.length - 1) / (max - 1);
+  let lastIdx = -1;
+  for (let i = 0; i < max; i++) {
+    const idx = Math.round(i * step);
+    if (idx !== lastIdx) { out.push(arr[idx]); lastIdx = idx; }
+  }
+  return out;
+}
+
 // A short key identifying the current playback context; when it changes (site,
 // product, run, sector…) the cached frames are no longer valid and are dropped.
 function playbackContextKey() {
@@ -3278,10 +3344,12 @@ async function buildPlaybackProvider() {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Span the *entire* selected run: the scrubber reaches every forecast hour
-    // out to the run's max lead time, not just the first N. Frames stream in
-    // progressively (see createPlayback), so a long run is usable immediately.
-    const hours = forecastHours(run);
+    // Span the selected run, but cap the frame count: a full GFS/AI-GFS run is
+    // far too many hours to hold a global grid + texture for each without
+    // crashing, so subsample evenly (keeping the first and last hour). Frames
+    // stream in progressively (see createPlayback), so a long run is usable
+    // immediately. The forecast-hour picker still reaches every individual hour.
+    const hours = subsampleEven(forecastHours(run), MAX_MODEL_PLAYBACK_FRAMES);
     return {
       // Model frames are independent network fetches (a separate GRIB per hour),
       // so a wider lane count hides more round-trip latency and fills the run
@@ -3291,18 +3359,26 @@ async function buildPlaybackProvider() {
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
         const payload = prepareGridTexture(grid, resolveGridProduct(grid.product));
+        // The loop draws only the coloured fill (barb/contour overlays are hidden
+        // while playing), so drop the heavy wind/height overlay arrays before the
+        // frame is cached — they can be 3× the grid's own size on upper-air
+        // products and would otherwise multiply the loop's memory footprint.
+        // `grid.values` is kept so map readouts still sample the scrubbed hour.
+        if (grid.overlays) grid.overlays = null;
         payload.grid = grid;
         return payload;
       },
       render(payload) { drawModelPayload(payload); },
-      // Stopping the loop keeps the hour the user scrubbed to (already reflected
-      // in state.models.fhour): promote that frame's grid to the live grid so
-      // renderModels redraws it with its full barb/contour overlays, rather than
-      // snapping back to the grid the loop started on. No refetch — the frame is
-      // already decoded — and it stays synchronous like the previous behaviour.
+      // On stop, restore the live view at the hour the user scrubbed to
+      // (state.models.fhour already tracks it via setDisplayedFhour). Promote the
+      // cached frame's grid first so the coloured fill stays on screen instantly,
+      // then reload that hour in full — the loop's frames carry no overlays, so
+      // this brings the barb/contour overlays back. loadModelFrame() is guarded so
+      // a stop caused by leaving models mode won't repaint the layer afterwards.
       idle() {
         if (state.models.displayGrid) state.models.grid = state.models.displayGrid;
         renderModels();
+        loadModelFrame();
       },
     };
   }
@@ -4672,8 +4748,8 @@ function saveSettings() {
         modelCityValues: state.modelCityValues,
         alertsOn: state.alerts ? state.alerts.enabled : true,
         spc: state.spc
-          ? { on: state.spc.enabled, product: state.spc.product, detail: state.spc.detail }
-          : state._spc,
+          ? { on: state.spc.enabled, product: state.spc.product, detail: state.spc.detail, opacity: state.spcOpacity }
+          : { ...state._spc, opacity: state.spcOpacity },
         playbackFrames: state.playbackFrames,
         dockTool: state.dockTool,
         sat: {
@@ -4736,6 +4812,8 @@ function applyStoredSettings(s) {
   if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
   if (s.spc && typeof s.spc === 'object') {
     if (typeof s.spc.on === 'boolean') state._spc.on = s.spc.on;
+    if (typeof s.spc.opacity === 'number' && isFinite(s.spc.opacity))
+      state.spcOpacity = Math.max(0.05, Math.min(0.9, s.spc.opacity));
     // New shape: product + detail. Restore only if the product still exists; the
     // controller re-validates the detail against that product when it builds.
     if (typeof s.spc.product === 'string' && OUTLOOKS[s.spc.product]) {

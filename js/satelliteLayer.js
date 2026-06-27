@@ -100,16 +100,26 @@ void main() {
     float cn = floor(col + 0.5), rn = floor(row + 0.5);
     float inv2s2 = 1.0 / (2.0 * sigma * sigma);
     vec4 sum = vec4(0.0);
+    float wsum = 0.0;               // total Gaussian weight (incl. off-disk taps)
     for (int m = -3; m <= 3; m++) {
       for (int n = -3; n <= 3; n++) {
         float ci = cn + float(n), rj = rn + float(m);
         float dx = ci - col, dy = rj - row;
-        sum += texelAt(ci, rj) * exp(-(dx * dx + dy * dy) * inv2s2);
+        float w = exp(-(dx * dx + dy * dy) * inv2s2);
+        sum += texelAt(ci, rj) * w;
+        wsum += w;
       }
     }
-    if (sum.a < 1e-4) discard;
-    rgb = sum.rgb / sum.a;   // un-premultiply for the shared output tail
-    alpha = sum.a;
+    if (sum.a < 1e-4 || wsum < 1e-6) discard;
+    // sum is premultiplied. The colour divides by the covered weight (sum.a) to
+    // recover straight-alpha colour, but the coverage must divide by the TOTAL
+    // weight (wsum) so it stays in [0,1]. The old code set alpha = sum.a — the raw
+    // Gaussian weight-sum, which for the medium/high kernels is much greater than
+    // 1 — so the premultiplied rgb*a blew past white: the "blinding light" that
+    // wiped out the colour tables. Normalising by wsum keeps the enhancement
+    // intact and only softens alpha at the disk edge (where some taps are off-disk).
+    rgb = sum.rgb / sum.a;
+    alpha = sum.a / wsum;
   }
 
   float a = alpha * u_opacity;
