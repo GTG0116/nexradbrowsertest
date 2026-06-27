@@ -513,7 +513,7 @@ function decodeVolume(bytes) {
 
 const state = {
   site: 'KTLX',
-  date: new Date(),
+  date: utcDay(),
   volumes: [],
   volumeKey: null,
   volume: null,
@@ -1647,6 +1647,7 @@ function setMode(mode) {
 
 // Dispatch refresh / live / date changes to the active source.
 function refreshActive() {
+  if (state.live) syncDateToUtcToday();
   if (state.mode === 'radar') return loadVolumeList();
   if (state.mode === 'satellite') return loadSatScenes();
   if (state.mode === 'mrms') return loadMrmsList();
@@ -3600,8 +3601,7 @@ function startLive() {
   state.live = true;
   el.liveBtn.classList.add('active');
   el.liveBtn.textContent = '● LIVE';
-  state.date = new Date();
-  el.dateInput.value = isoDate(state.date);
+  syncDateToUtcToday();
   refreshActive();
   if (state.liveTimer) clearInterval(state.liveTimer);
   state.liveTimer = setInterval(() => refreshActive(), 60000);
@@ -3623,6 +3623,19 @@ function tickClock() {
   el.clock.textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(
     d.getUTCSeconds()
   )} UTC`;
+}
+
+function utcDay(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function syncDateToUtcToday() {
+  state.date = utcDay();
+  if (el.dateInput) {
+    const today = isoDate(state.date);
+    el.dateInput.value = today;
+    el.dateInput.max = today;
+  }
 }
 
 function isoDate(d) {
@@ -4487,8 +4500,7 @@ function init() {
     if (btn) setMode(btn.dataset.mode);
   });
 
-  el.dateInput.value = isoDate(state.date);
-  el.dateInput.max = isoDate(state.date);
+  syncDateToUtcToday();
   el.dateInput.addEventListener('change', () => {
     const [y, m, d] = el.dateInput.value.split('-').map(Number);
     state.date = new Date(Date.UTC(y, m - 1, d));
