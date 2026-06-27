@@ -175,7 +175,7 @@ function addCoastline(map, anchor) {
   );
 }
 
-// The basemap's own town labels, roads, highways, rivers and admin borders are
+// The basemap's own town labels, roads, rivers and admin borders are
 // restyled in place by applyMapStyle() (js/mapStyle.js) using the user's
 // `state.mapStyle` options. setStyle() (a basemap switch) resets every layer to
 // its stock paint, so setupOverlays re-applies the customisation on every load.
@@ -372,7 +372,7 @@ function setupOverlays(map) {
   );
 
   addCoastline(map, anchor);
-  // Restyle the basemap's own town labels, roads, highways, rivers and borders
+  // Restyle the basemap's own town labels, roads, rivers and borders
   // (and add county lines) per the user's map-style options. setStyle wiped the
   // stock paint, so capture fresh native widths here (fresh: true).
   applyMapStyle(map, state.mapStyle, anchor, { fresh: true });
@@ -470,7 +470,7 @@ const state = {
   map: null,
   basemap: 'dark',
   // User customisation of the basemap's own layers (town labels, roads,
-  // highways, rivers, borders). Re-applied on every style load so it survives a
+  // rivers, borders). Re-applied on every style load so it survives a
   // basemap switch. See js/mapStyle.js.
   mapStyle: { ...DEFAULT_MAP_STYLE },
   // Per-alert-kind appearance overrides, keyed by display name:
@@ -4227,7 +4227,7 @@ function utcStamp(d) {
 }
 
 // ---------------------------------------------------------------------------
-// Basemap layer customisation UI (town labels, roads, highways, rivers, borders)
+// Basemap layer customisation UI (town labels, roads, rivers, borders)
 // ---------------------------------------------------------------------------
 // Re-apply the current map-style options to the live map(s) without a reload,
 // then persist them. The customisation is also re-applied on every style load by
@@ -4239,12 +4239,11 @@ function applyMapStyleLive() {
   saveSettings();
 }
 
-// The line-style controls (roads/highways/rivers) share one shape: a width
-// multiplier slider plus an optional colour override. Borders are always
-// recoloured (no "native" colour), so they get a plain colour picker.
+// The line-style controls (roads, rivers) share one shape: a width multiplier
+// slider plus an optional colour override. Borders are always recoloured (no
+// "native" colour), so they get a plain colour picker.
 const MAP_LINE_CONTROLS = [
   { key: 'road', label: 'Roads', optionalColor: true },
-  { key: 'highway', label: 'Highways', optionalColor: true },
   { key: 'river', label: 'Rivers', optionalColor: true },
   { key: 'border', label: 'Borders', optionalColor: false },
 ];

@@ -1,5 +1,5 @@
 // mapStyle.js — user-adjustable styling of the basemap's own vector layers
-// (town labels, roads, highways, rivers and admin borders) plus the alert
+// (town labels, roads, rivers and admin borders) plus the alert
 // overlay paint. The basemap is a Mapbox vector style, so "customising the map"
 // means overriding the paint/layout of the style's native layers in place.
 //
@@ -28,8 +28,6 @@ export const DEFAULT_MAP_STYLE = {
   townThickness: 1, // text-halo-width, px
   roadColor: '', // '' → keep the style's native colour
   roadWidth: 1, // multiplier on the native line width
-  highwayColor: '',
-  highwayWidth: 1,
   riverColor: '',
   riverWidth: 1,
   borderColor: '#ffffff',
@@ -41,9 +39,9 @@ export function normalizeMapStyle(s) {
   if (s && typeof s === 'object') {
     if (TOWN_FONTS[s.townFont]) o.townFont = s.townFont;
     if (typeof s.townThickness === 'number') o.townThickness = clamp(s.townThickness, 0, 6);
-    for (const k of ['roadColor', 'highwayColor', 'riverColor', 'borderColor'])
+    for (const k of ['roadColor', 'riverColor', 'borderColor'])
       if (typeof s[k] === 'string') o[k] = s[k];
-    for (const k of ['roadWidth', 'highwayWidth', 'riverWidth', 'borderWidth'])
+    for (const k of ['roadWidth', 'riverWidth', 'borderWidth'])
       if (typeof s[k] === 'number') o[k] = clamp(s[k], 0.1, 6);
   }
   return o;
@@ -58,14 +56,51 @@ function adminSource(map) {
 }
 
 // Classify the style's native line layers so the right user control drives each.
+// (Highways live in the same `road` source-layer as ordinary roads in Mapbox's
+// styles, so they're covered by the single Roads control.)
 function isRoadLayer(ly) {
   return ly.type === 'line' && ly['source-layer'] === 'road';
 }
-function isHighwayLayer(ly) {
-  return isRoadLayer(ly) && /motorway|trunk|highway/i.test(ly.id);
-}
 function isRiverLayer(ly) {
   return ly.type === 'line' && (ly['source-layer'] === 'waterway' || /waterway|river/i.test(ly.id));
+}
+
+// Does an expression reference a camera value (zoom)? Such expressions may only
+// appear at the top level of a paint property, never nested inside another
+// expression — so we must never wrap them in a multiply.
+function referencesCamera(expr) {
+  return Array.isArray(expr) && (expr[0] === 'zoom' || expr.some(referencesCamera));
+}
+
+// Scale a single interpolate/step output (a constant, normally) by `mult`.
+function scaleOutput(v, mult) {
+  return typeof v === 'number' ? v * mult : referencesCamera(v) ? v : ['*', v, mult];
+}
+
+// Multiply a `line-width` value by `mult` *without* nesting a zoom expression
+// inside a multiply (which Mapbox rejects, silently dropping the property — the
+// reason an earlier version's thickness sliders did nothing). For zoom-/step-
+// interpolated widths we rebuild the expression with each output stop scaled, so
+// `['zoom']` stays at the top level; plain numbers are multiplied directly.
+function scaleLineWidth(value, mult) {
+  if (mult === 1) return value;
+  if (typeof value === 'number') return value * mult;
+  if (Array.isArray(value)) {
+    const op = value[0];
+    if (op === 'interpolate' || op === 'interpolate-hcl' || op === 'interpolate-lab') {
+      const out = value.slice(0, 3); // ['interpolate', interpolation, input]
+      for (let i = 3; i < value.length; i += 2) out.push(value[i], scaleOutput(value[i + 1], mult));
+      return out;
+    }
+    if (op === 'step') {
+      const out = [value[0], value[1], scaleOutput(value[2], mult)]; // step, input, out0
+      for (let i = 3; i < value.length; i += 2) out.push(value[i], scaleOutput(value[i + 1], mult));
+      return out;
+    }
+    // Any other expression: multiply only when it carries no camera reference.
+    return referencesCamera(value) ? value : ['*', value, mult];
+  }
+  return value;
 }
 function isTownLabelLayer(ly) {
   if (ly.type !== 'symbol') return false;
@@ -93,15 +128,14 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
       const w = map.getPaintProperty(id, 'line-width');
       natives[id] = w == null ? 1 : w;
     }
-    map.setPaintProperty(id, 'line-width', mult === 1 ? natives[id] : ['*', natives[id], mult]);
+    map.setPaintProperty(id, 'line-width', scaleLineWidth(natives[id], mult));
     if (color) map.setPaintProperty(id, 'line-color', color);
     map.setLayoutProperty(id, 'visibility', 'visible');
   };
 
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
-    if (isHighwayLayer(ly)) styleLine(ly.id, opts.highwayWidth, opts.highwayColor);
-    else if (isRoadLayer(ly)) styleLine(ly.id, opts.roadWidth, opts.roadColor);
+    if (isRoadLayer(ly)) styleLine(ly.id, opts.roadWidth, opts.roadColor);
     else if (isRiverLayer(ly)) styleLine(ly.id, opts.riverWidth, opts.riverColor);
     else if (isTownLabelLayer(ly)) {
       const f = TOWN_FONTS[opts.townFont];
@@ -120,10 +154,13 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
 function styleBoundaries(map, anchor, o) {
   const col = o.borderColor || '#ffffff';
   const mult = o.borderWidth;
+  // Build a zoom-interpolated width from (zoom, width) pairs, baking the border
+  // thickness multiplier into each width output so `['zoom']` stays at the top
+  // level (Mapbox rejects a zoom expression nested inside a multiply).
   const w = (...stops) => {
     const expr = ['interpolate', ['linear'], ['zoom']];
-    for (const s of stops) expr.push(s);
-    return mult === 1 ? expr : ['*', expr, mult];
+    for (let i = 0; i < stops.length; i += 2) expr.push(stops[i], stops[i + 1] * mult);
+    return expr;
   };
   const repaint = (id, paint) => {
     if (!map.getLayer(id)) return;

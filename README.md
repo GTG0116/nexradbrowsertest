@@ -45,7 +45,7 @@ the radar imagery — entirely client-side.
   just Dark/Light, and including counties the stock styles never draw).
 - **Map-layer customisation** (`js/mapStyle.js`, under *Map settings → Customize
   map layers*): the basemap's own town-label font and thickness, the colour and
-  thickness of roads, highways and rivers, and the colour and thickness of the
+  thickness of roads and rivers, and the colour and thickness of the
   country/state/county borders are all user-adjustable. Because a basemap switch
   resets every layer to its stock paint, the customisation is re-applied on every
   style load (and mirrored into the split-view pane), so it persists across map
