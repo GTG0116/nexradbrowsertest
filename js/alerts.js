@@ -546,6 +546,12 @@ export class AlertsController {
     // them the briefing is showing.
     this.group = [];
     this.groupIndex = 0;
+
+    // True while the full briefing is open. When set, the map isolates the
+    // selected alert polygon (hiding every other one) until the briefing closes.
+    this.detailOpen = false;
+    // Last set of in-view alerts, so we can restore them after isolating one.
+    this._visibleCache = [];
   }
 
   // Push a GeoJSON FeatureCollection to the `alerts` source on the main map and
@@ -673,16 +679,44 @@ export class AlertsController {
   refreshVisible() {
     if (!this.enabled) return;
     const visible = this.visibleAlerts();
-    // Feed the GL source one feature per visible alert, carrying its colour and
-    // id so the fill/line layers can style and the click handler can identify
-    // it. Most-significant alerts are pushed last so they render on top.
-    const features = [...visible].reverse().map((a) => ({
+    this._visibleCache = visible;
+    this._applyAlertFeatures();
+    this.renderList(visible);
+  }
+
+  // Decide which alert polygons the GL source shows. While the full briefing is
+  // open we isolate the selected alert — hiding every other polygon and flagging
+  // the chosen one with `selected` so the fill/line layers highlight it.
+  // Otherwise every alert in view is shown.
+  //
+  // Feeds the GL source one feature per alert, carrying its colour and id so the
+  // fill/line layers can style and the click handler can identify it.
+  // Most-significant alerts are pushed last so they render on top.
+  _applyAlertFeatures() {
+    if (this.detailOpen && this.selectedId) {
+      const sel = this.alerts.find((a) => a.id === this.selectedId);
+      if (sel) {
+        this._setSourceData([
+          {
+            type: 'Feature',
+            geometry: sel.feature.geometry,
+            properties: {
+              id: sel.id,
+              color: sel.cls.color,
+              display: sel.cls.display,
+              selected: true,
+            },
+          },
+        ]);
+        return;
+      }
+    }
+    const features = [...this._visibleCache].reverse().map((a) => ({
       type: 'Feature',
       geometry: a.feature.geometry,
       properties: { id: a.id, color: a.cls.color, display: a.cls.display },
     }));
     this._setSourceData(features);
-    this.renderList(visible);
   }
 
   renderList(visible) {
@@ -916,6 +950,11 @@ export class AlertsController {
     this.closePreview();
     this._setGroup(id, group);
 
+    // Isolate the selected alert on the map: hide every other polygon and
+    // highlight this one for as long as the briefing is open.
+    this.detailOpen = true;
+    this._applyAlertFeatures();
+
     document.querySelector('.app').classList.add('alert-mode');
     document.querySelector('.app').classList.toggle(
       'alert-split-mode',
@@ -933,6 +972,9 @@ export class AlertsController {
     this.groupIndex = (this.groupIndex + delta + this.group.length) % this.group.length;
     this.selectedId = this.group[this.groupIndex];
     this.renderDetail();
+    // Keep the isolated/highlighted polygon in sync with the briefing.
+    this._applyAlertFeatures();
+    this._fitTo(this.selectedId);
   }
 
   // Zoom the map to an alert. bounds = [minLat, minLon, maxLat, maxLon];
@@ -956,6 +998,9 @@ export class AlertsController {
     this.group = [];
     this.groupIndex = 0;
     this.els.detail.hidden = true;
+    // Stop isolating the selected alert and bring every other polygon back.
+    this.detailOpen = false;
+    this._applyAlertFeatures();
     document.querySelector('.app').classList.remove('alert-mode', 'alert-split-mode');
     setTimeout(() => this.map.resize(), 60);
   }
