@@ -408,6 +408,12 @@ button {
 .mapboxgl-ctrl-group button:hover {
   background: rgba(30, 50, 90, 0.95) !important;
 }
+/* The live-location control is driven by the in-app map-tool button (📍), so its
+   own Mapbox control button is hidden — but the control still renders the
+   tracking dot + accuracy circle on the map. */
+.mapboxgl-ctrl-group:has(> .mapboxgl-ctrl-geolocate) {
+  display: none !important;
+}
 .mapboxgl-ctrl-attrib {
   background: rgba(6, 12, 24, 0.7) !important;
 }
@@ -628,6 +634,46 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
   color: var(--ink-dim);
   margin-top: 5px;
+}
+
+/* ---------------- Time bar (under the legend) ---------------- */
+.time-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 7px 14px;
+}
+.time-bar .clock {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--ink);
+  margin: 0;
+}
+.tz-toggle {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-edge);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.tz-toggle:hover {
+  color: var(--ink);
+}
+.tz-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(80, 200, 255, 0.08);
 }
 
 /* ---------------- Product grid ---------------- */
@@ -928,6 +974,7 @@ input[type='range']::-moz-range-thumb {
 .app.alert-mode .topbar,
 .app.alert-mode .rail,
 .app.alert-mode .stage > .legend,
+.app.alert-mode .stage > .time-bar,
 .app.alert-mode .footer {
   display: none;
 }
@@ -1534,6 +1581,17 @@ input[type='range']::-moz-range-thumb {
      covers it on touch, so drop them entirely to declutter the map. */
   .mapboxgl-ctrl-top-left {
     display: none;
+  }
+  /* Float the time bar as a compact pill just beneath the floating legend. */
+  .time-bar {
+    position: absolute;
+    top: calc(8px + env(safe-area-inset-top, 0px) + 70px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: auto;
+    z-index: 640;
+    padding: 5px 12px;
+    margin: 0;
   }
   /* Keep the map credits readable and clear of the bottom dock. */
   .mapboxgl-ctrl-attrib {
@@ -2742,6 +2800,7 @@ input[type='range']::-moz-range-thumb {
    stays — it's the control surface for the tool. */
 body.storm-active .mobile-dock,
 body.storm-active .legend,
+body.storm-active .time-bar,
 body.storm-active .footer,
 body.storm-active .playback-bar {
   display: none !important;

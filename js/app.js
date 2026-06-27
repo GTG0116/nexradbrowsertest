@@ -15,7 +15,7 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, scen
 import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
-import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
+import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from './mrms.js';
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours,
   modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
@@ -468,6 +468,9 @@ const state = {
   live: false,
   liveTimer: null,
   map: null,
+  geolocate: null,
+  // Show the clock in the viewer's local time zone instead of UTC.
+  tzLocal: false,
   basemap: 'dark',
   // User customisation of the basemap's own layers (town labels, roads,
   // rivers, borders). Re-applied on every style load so it survives a
@@ -560,6 +563,8 @@ function cacheEls() {
   el.legend = $('#legend');
   el.status = $('#status');
   el.clock = $('#clock');
+  el.timeBar = $('#timeBar');
+  el.tzToggle = $('#tzToggle');
   el.meta = $('#meta');
   el.readout = $('#mapReadout');
   el.liveBtn = $('#liveBtn');
@@ -666,6 +671,7 @@ function cacheEls() {
   el.toolStorm = $('#toolStorm');
   el.toolMetars = $('#toolMetars');
   el.toolWeather = $('#toolWeather');
+  el.toolLocate = $('#toolLocate');
   el.weatherPicker = $('#weatherPicker');
   el.weatherPickerClose = $('#weatherPickerClose');
   el.weatherCenterPicker = $('#weatherCenterPicker');
@@ -731,6 +737,17 @@ function initMap() {
     preserveDrawingBuffer: true,
   });
   map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-left');
+  // Live user location: a Mapbox GeolocateControl handles the browser permission
+  // prompt, the pulsing position dot, the accuracy circle and continuous
+  // tracking. Its own control button is hidden (CSS) in favour of the map-tool
+  // button below, which simply triggers it.
+  state.geolocate = new mapboxgl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true,
+    showUserHeading: true,
+    showAccuracyCircle: true,
+  });
+  map.addControl(state.geolocate, 'top-left');
   state.map = map;
 
   // If the supplied token is invalid/revoked, Mapbox emits a 401. Clear the bad
@@ -1857,25 +1874,59 @@ function updateSatInfo() {
 // ---------------------------------------------------------------------------
 // MRMS
 // ---------------------------------------------------------------------------
+// Remember which MRMS category sections the user has expanded, so a rebuild
+// (mode switch, product pick) doesn't snap them all shut again. The section
+// holding the active product opens by default; the rest start collapsed to keep
+// the long catalogue compact.
+const mrmsCatOpen = {};
+
 function buildMrmsProductButtons() {
   el.productButtons.innerHTML = '';
-  el.productButtons.className = 'product-grid';
-  for (const id of MRMS_ORDER) {
-    const p = MRMS_PRODUCTS[id];
-    const btn = document.createElement('button');
-    btn.className = 'product-btn';
-    btn.dataset.id = id;
-    btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
-    if (id === activeProductId()) btn.classList.add('active');
-    btn.addEventListener('click', () => {
-      if (routeProductToPane(id)) return;
-      state.mrms.productId = id;
-      document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-      buildMrmsLegend();
-      loadMrmsList(); // each product is a different S3 folder
-      saveSettings();
+  el.productButtons.className = 'product-stack';
+  const active = activeProductId();
+  for (const cat of MRMS_CATEGORIES) {
+    const ids = cat.products.filter((id) => MRMS_PRODUCTS[id]);
+    if (!ids.length) continue;
+
+    // Default-open the section that contains the active product; otherwise honour
+    // the user's remembered expand/collapse choice.
+    const hasActive = ids.includes(active);
+    const open = mrmsCatOpen[cat.id] != null ? !!mrmsCatOpen[cat.id] : hasActive;
+
+    const section = document.createElement('div');
+    section.className = 'product-cat-section' + (open ? '' : ' collapsed');
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'product-cat';
+    head.innerHTML = `<span class="cat-caret">▾</span><span>${cat.name}</span>`;
+    head.addEventListener('click', () => {
+      const nowOpen = section.classList.toggle('collapsed') === false;
+      mrmsCatOpen[cat.id] = nowOpen;
     });
-    el.productButtons.appendChild(btn);
+    section.appendChild(head);
+
+    const grid = document.createElement('div');
+    grid.className = 'product-grid';
+    for (const id of ids) {
+      const p = MRMS_PRODUCTS[id];
+      const btn = document.createElement('button');
+      btn.className = 'product-btn';
+      btn.dataset.id = id;
+      btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+      if (id === active) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        if (routeProductToPane(id)) return;
+        state.mrms.productId = id;
+        document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+        buildMrmsLegend();
+        loadMrmsList(); // each product is a different S3 folder
+        saveSettings();
+      });
+      grid.appendChild(btn);
+    }
+    section.appendChild(grid);
+    el.productButtons.appendChild(section);
   }
 }
 
@@ -3562,9 +3613,42 @@ function stopLive() {
 function tickClock() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
-  el.clock.textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(
-    d.getUTCSeconds()
-  )} UTC`;
+  if (!el.clock) return;
+  if (state.tzLocal) {
+    // Local time, with the browser's short time-zone abbreviation (e.g. CDT).
+    const tz = localTzLabel(d);
+    el.clock.textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${tz}`;
+  } else {
+    el.clock.textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+  }
+}
+
+// The browser's short time-zone abbreviation for the current locale (e.g. "CDT",
+// "PST"), falling back to a UTC offset label if the runtime won't emit one.
+function localTzLabel(d) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(d);
+    const tz = parts.find((x) => x.type === 'timeZoneName');
+    if (tz && tz.value && !/^GMT$/i.test(tz.value)) return tz.value;
+  } catch (_) { /* fall through to offset label */ }
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? '+' : '-';
+  const h = Math.floor(Math.abs(off) / 60);
+  return `UTC${sign}${h}`;
+}
+
+// Flip the clock between UTC and the viewer's local time zone, updating the
+// button label and re-rendering immediately.
+function setTzLocal(local) {
+  state.tzLocal = !!local;
+  if (el.tzToggle) {
+    el.tzToggle.classList.toggle('active', state.tzLocal);
+    el.tzToggle.textContent = state.tzLocal ? 'UTC' : 'Local';
+    el.tzToggle.title = state.tzLocal
+      ? 'Show time in UTC'
+      : 'Switch between UTC and your local time zone';
+  }
+  tickClock();
 }
 
 function utcDay(d = new Date()) {
@@ -4051,6 +4135,7 @@ const DOCK_TOOLS = [
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
+  { id: 'locate', icon: '📍', label: 'My live location', btn: () => el.toolLocate },
   // The model sounding isn't a slot tool anymore — in models mode you long-press
   // the map (or right-click on desktop) to open a sounding at that point.
   { id: 'split', icon: '⊟', label: 'Split screen', btn: () => el.toolSplit },
@@ -4466,6 +4551,7 @@ function saveSettings() {
         mapStyle: state.mapStyle,
         alertStyle: state.alertStyle,
         showRings: state.showRings,
+        tzLocal: state.tzLocal,
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
         modelCityValues: state.modelCityValues,
@@ -4525,6 +4611,7 @@ function applyStoredSettings(s) {
   if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
   if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
+  if (typeof s.tzLocal === 'boolean') state.tzLocal = s.tzLocal;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
@@ -4677,6 +4764,27 @@ function init() {
 
   el.refreshBtn.addEventListener('click', () => refreshActive());
   el.liveBtn.addEventListener('click', toggleLive);
+
+  // Clock time-zone toggle (UTC ↔ local).
+  if (el.tzToggle) {
+    el.tzToggle.addEventListener('click', () => {
+      setTzLocal(!state.tzLocal);
+      saveSettings();
+    });
+  }
+
+  // Live-location tool: triggers the Mapbox GeolocateControl, which prompts for
+  // permission, drops a tracking dot at the user's position and follows it.
+  if (el.toolLocate) {
+    el.toolLocate.addEventListener('click', () => {
+      if (state.geolocate && state.geolocate.trigger) state.geolocate.trigger();
+    });
+    if (state.geolocate && state.geolocate.on) {
+      state.geolocate.on('trackuserlocationstart', () => el.toolLocate.classList.add('active'));
+      state.geolocate.on('trackuserlocationend', () => el.toolLocate.classList.remove('active'));
+      state.geolocate.on('error', () => el.toolLocate.classList.remove('active'));
+    }
+  }
   el.opacity.addEventListener('input', () => {
     state.opacity = el.opacity.value / 100;
     el.opacityVal.textContent = el.opacity.value + '%';
@@ -4877,7 +4985,7 @@ function init() {
   });
   setTimeout(() => state.map.resize(), 100);
 
-  tickClock();
+  setTzLocal(state.tzLocal); // sync the toggle label + clock to the restored prefs
   setInterval(tickClock, 1000);
 
   // Start in LIVE mode so the newest data streams in automatically — the user
