@@ -8,7 +8,8 @@ import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispVal
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep } from './dealias.js';
-import { AlertsController } from './alerts.js';
+import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
+import { applyMapStyle, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
@@ -174,100 +175,12 @@ function addCoastline(map, anchor) {
   );
 }
 
-// White country/state borders (plus county lines) on every basemap.
-//
-// Every Mapbox style ships country (admin_level 0) and state (admin_level 1)
-// borders in its `admin` vector source as `admin-0-boundary` / `admin-1-boundary`
-// (each with a `-bg` casing layer) — but paints them crisply only on Dark/Light
-// and almost invisibly on Satellite/Streets/Outdoors. Earlier versions tried to
-// hide those native lines and redraw our own beneath them, but the redrawn lines
-// ended up *under* the still-visible native ones, so the faint native borders
-// were what actually showed — fine on Dark/Light, invisible on the rest.
-//
-// Instead we restyle the basemap's OWN admin lines in place. They already sit in
-// the right spot in every style's layer stack (above the roads/radar, below the
-// town labels), so recoloring them to white gives one identical, high-contrast
-// look on every basemap without fighting layer order. Counties (admin_level 2)
-// aren't drawn by the stock styles, so we still add those ourselves.
-function adminSource(map) {
-  const layers = map.getStyle().layers || [];
-  const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
-  return admin && admin.source;
-}
-
-function styleBoundaries(map, anchor) {
-  // Override paint on a native admin layer (if the style has it) and make sure
-  // it's visible — setStyle resets these to their stock paint on every load.
-  const repaint = (id, paint) => {
-    if (!map.getLayer(id)) return;
-    for (const [k, v] of Object.entries(paint)) map.setPaintProperty(id, k, v);
-    map.setLayoutProperty(id, 'visibility', 'visible');
-  };
-  // Country (admin_level 0): bright white over a dark casing for contrast on any
-  // basemap, light or dark.
-  repaint('admin-0-boundary-bg', {
-    'line-color': 'rgba(8,14,24,0.5)',
-    'line-opacity': 1,
-    'line-blur': 0,
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 2.6, 7, 3.8, 11, 4.8],
-  });
-  repaint('admin-0-boundary', {
-    'line-color': '#ffffff',
-    'line-opacity': 1,
-    'line-dasharray': [1, 0], // solid
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.1, 7, 1.9, 11, 2.5],
-  });
-  repaint('admin-0-boundary-disputed', {
-    'line-color': '#ffffff',
-    'line-opacity': 0.9,
-    'line-dasharray': [2, 2],
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 1.6, 11, 2.1],
-  });
-  // State (admin_level 1): white, thinner and dashed, over a faint dark casing.
-  repaint('admin-1-boundary-bg', {
-    'line-color': 'rgba(8,14,24,0.35)',
-    'line-opacity': 1,
-    'line-blur': 0,
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.4, 7, 2.2, 11, 3],
-  });
-  repaint('admin-1-boundary', {
-    'line-color': '#ffffff',
-    'line-opacity': 0.85,
-    'line-dasharray': [3, 2],
-    'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.5, 7, 1, 11, 1.5],
-  });
-  // Counties (admin_level 2): not drawn by the stock styles, so add our own from
-  // the same `admin` source — faint white, and only once zoomed in (there are far
-  // too many to read at continental scale).
-  if (!map.getLayer('county-outline')) {
-    const source = adminSource(map);
-    if (!source) return; // raster-only style with no vector admin source
-    map.addLayer(
-      {
-        id: 'county-outline',
-        type: 'line',
-        source,
-        'source-layer': 'admin',
-        // Match the basemap's own admin filtering: skip maritime/disputed
-        // segments and pin to the US worldview.
-        filter: [
-          'all',
-          ['==', ['get', 'admin_level'], 2],
-          ['==', ['get', 'maritime'], 'false'],
-          ['==', ['get', 'disputed'], 'false'],
-          ['match', ['get', 'worldview'], ['all', 'US'], true, false],
-        ],
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        minzoom: 5,
-        paint: {
-          'line-color': 'rgba(255,255,255,0.35)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 8, 0.7, 11, 1.1],
-        },
-      },
-      anchor
-    );
-  }
-}
+// The basemap's own town labels, roads, highways, rivers and admin borders are
+// restyled in place by applyMapStyle() (js/mapStyle.js) using the user's
+// `state.mapStyle` options. setStyle() (a basemap switch) resets every layer to
+// its stock paint, so setupOverlays re-applies the customisation on every load.
+// Counties (admin_level 2) aren't drawn by the stock styles, so applyMapStyle
+// adds those itself. See mapStyle.js for the full rationale.
 
 function sitesGeoJSON() {
   return {
@@ -372,23 +285,32 @@ function setupOverlays(map) {
       source: 'alerts',
       paint: {
         'fill-color': ['get', 'color'],
-        // Brighten the fill of an isolated alert (selected in the open briefing).
-        'fill-opacity': ['case', ['get', 'selected'], 0.34, 0.18],
+        // Per-kind fill opacity rides on the feature; an isolated alert (selected
+        // in the open briefing) is brightened on top of that.
+        'fill-opacity': [
+          'case',
+          ['boolean', ['get', 'selected'], false], 0.34,
+          ['coalesce', ['get', 'fillOpacity'], 0.18],
+        ],
       },
     },
     dataAnchor
   );
   // Alert outline — at the label anchor, so it stays above the radar and the
-  // basemap roads but beneath the town labels.
+  // basemap roads but beneath the town labels. Outline colour and width ride on
+  // the feature (per-kind, user-adjustable); a selected alert is thickened.
   map.addLayer(
     {
       id: 'alerts-line',
       type: 'line',
       source: 'alerts',
       paint: {
-        'line-color': ['get', 'color'],
-        // Thicken the outline of an isolated alert so it stands out clearly.
-        'line-width': ['case', ['get', 'selected'], 4.5, 2.5],
+        'line-color': ['coalesce', ['get', 'outlineColor'], ['get', 'color']],
+        'line-width': [
+          'case',
+          ['boolean', ['get', 'selected'], false], 4.5,
+          ['coalesce', ['get', 'outlineWidth'], 2.5],
+        ],
         'line-opacity': 0.95,
       },
     },
@@ -450,11 +372,10 @@ function setupOverlays(map) {
   );
 
   addCoastline(map, anchor);
-  // Restyle the basemap's own country/state borders to white (and add county
-  // lines) so they look the same on every basemap instead of only showing up on
-  // Dark/Light. The native admin lines already sit above the radar/roads and
-  // below the town labels, so recoloring them in place keeps that ordering.
-  styleBoundaries(map, anchor);
+  // Restyle the basemap's own town labels, roads, highways, rivers and borders
+  // (and add county lines) per the user's map-style options. setStyle wiped the
+  // stock paint, so capture fresh native widths here (fresh: true).
+  applyMapStyle(map, state.mapStyle, anchor, { fresh: true });
 
   refreshSiteDots();
 
@@ -548,6 +469,13 @@ const state = {
   liveTimer: null,
   map: null,
   basemap: 'dark',
+  // User customisation of the basemap's own layers (town labels, roads,
+  // highways, rivers, borders). Re-applied on every style load so it survives a
+  // basemap switch. See js/mapStyle.js.
+  mapStyle: { ...DEFAULT_MAP_STYLE },
+  // Per-alert-kind appearance overrides, keyed by display name:
+  // { color, fillOpacity, outlineColor, outlineWidth }. Empty = stock colours.
+  alertStyle: {},
   showRings: true,
   // Persist the map view, last product and settings between visits (toggleable).
   persist: true,
@@ -664,6 +592,8 @@ function cacheEls() {
   el.alertClose = $('#alertClose');
   el.alertPreview = $('#alertPreview');
   el.alertPreviewCard = $('#alertPreviewCard');
+  el.mapStyleControls = $('#mapStyleControls');
+  el.alertStyleControls = $('#alertStyleControls');
   el.spcPanel = $('#spcPanel');
   el.spcToggle = $('#spcToggle');
   el.outlookSelect = $('#outlookSelect');
@@ -4297,6 +4227,210 @@ function utcStamp(d) {
 }
 
 // ---------------------------------------------------------------------------
+// Basemap layer customisation UI (town labels, roads, highways, rivers, borders)
+// ---------------------------------------------------------------------------
+// Re-apply the current map-style options to the live map(s) without a reload,
+// then persist them. The customisation is also re-applied on every style load by
+// setupOverlays, so it survives a basemap switch.
+function applyMapStyleLive() {
+  const map = state.map;
+  if (map && map.getStyle) applyMapStyle(map, state.mapStyle, firstLabelLayerId(map), { fresh: false });
+  if (state.splitView && state.splitView.setMapStyle) state.splitView.setMapStyle(state.mapStyle);
+  saveSettings();
+}
+
+// The line-style controls (roads/highways/rivers) share one shape: a width
+// multiplier slider plus an optional colour override. Borders are always
+// recoloured (no "native" colour), so they get a plain colour picker.
+const MAP_LINE_CONTROLS = [
+  { key: 'road', label: 'Roads', optionalColor: true },
+  { key: 'highway', label: 'Highways', optionalColor: true },
+  { key: 'river', label: 'Rivers', optionalColor: true },
+  { key: 'border', label: 'Borders', optionalColor: false },
+];
+
+function setupMapStyleControls() {
+  const host = el.mapStyleControls;
+  if (!host) return;
+  const ms = state.mapStyle;
+
+  const fontOpts = Object.entries(TOWN_FONTS)
+    .map(([k, v]) => `<option value="${k}">${v.label}</option>`)
+    .join('');
+
+  const lineRows = MAP_LINE_CONTROLS.map(({ key, label, optionalColor }) => {
+    const colorVal = ms[`${key}Color`] || (key === 'border' ? '#ffffff' : '#888888');
+    const colorOn = key === 'border' ? true : !!ms[`${key}Color`];
+    const colorToggle = optionalColor
+      ? `<label class="ms-color-on"><input type="checkbox" id="${key}ColorOn"${colorOn ? ' checked' : ''}>Custom</label>`
+      : '';
+    return `
+      <div class="ms-line">
+        <span class="ms-line-name">${label}</span>
+        <label class="field opacity-field ms-line-width">
+          <span>Thickness <b id="${key}WidthVal">${ms[`${key}Width`].toFixed(1)}×</b></span>
+          <input type="range" id="${key}Width" min="0.2" max="4" step="0.1" value="${ms[`${key}Width`]}">
+        </label>
+        <div class="ms-line-color">
+          ${colorToggle}
+          <input type="color" id="${key}Color" value="${colorVal}">
+        </div>
+      </div>`;
+  }).join('');
+
+  host.innerHTML = `
+    <label class="field">
+      <span>Town label font</span>
+      <select id="townFontSelect">${fontOpts}</select>
+    </label>
+    <label class="field opacity-field">
+      <span>Town label thickness <b id="townThickVal">${ms.townThickness.toFixed(1)}</b></span>
+      <input type="range" id="townThick" min="0" max="4" step="0.5" value="${ms.townThickness}">
+    </label>
+    ${lineRows}`;
+
+  const fontSel = host.querySelector('#townFontSelect');
+  fontSel.value = ms.townFont;
+  fontSel.addEventListener('change', () => {
+    ms.townFont = fontSel.value;
+    applyMapStyleLive();
+  });
+
+  const thick = host.querySelector('#townThick');
+  const thickVal = host.querySelector('#townThickVal');
+  thick.addEventListener('input', () => {
+    ms.townThickness = Number(thick.value);
+    thickVal.textContent = ms.townThickness.toFixed(1);
+    applyMapStyleLive();
+  });
+
+  for (const { key, optionalColor } of MAP_LINE_CONTROLS) {
+    const width = host.querySelector(`#${key}Width`);
+    const widthVal = host.querySelector(`#${key}WidthVal`);
+    width.addEventListener('input', () => {
+      ms[`${key}Width`] = Number(width.value);
+      widthVal.textContent = ms[`${key}Width`].toFixed(1) + '×';
+      applyMapStyleLive();
+    });
+    const color = host.querySelector(`#${key}Color`);
+    const colorOn = host.querySelector(`#${key}ColorOn`);
+    const pushColor = () => {
+      if (optionalColor && colorOn && !colorOn.checked) ms[`${key}Color`] = '';
+      else ms[`${key}Color`] = color.value;
+      applyMapStyleLive();
+    };
+    color.addEventListener('input', () => {
+      if (colorOn && !colorOn.checked) colorOn.checked = true;
+      pushColor();
+    });
+    if (colorOn) colorOn.addEventListener('change', pushColor);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-alert-kind appearance customisation UI
+// ---------------------------------------------------------------------------
+// Effective default appearance of one alert kind, before any user override.
+function alertKindDefault(name, defColor) {
+  return {
+    color: defColor,
+    fillOpacity: DEFAULT_ALERT_FILL_OPACITY,
+    outlineColor: defColor,
+    outlineWidth: DEFAULT_ALERT_OUTLINE_WIDTH,
+  };
+}
+
+function setupAlertStyleControls() {
+  const host = el.alertStyleControls;
+  if (!host) return;
+  const kinds = styleableAlertKinds();
+
+  host.innerHTML = kinds
+    .map(([name, defColor]) => {
+      const ov = state.alertStyle[name] || {};
+      const d = alertKindDefault(name, defColor);
+      const fill = ov.color || d.color;
+      const opacity = Math.round((typeof ov.fillOpacity === 'number' ? ov.fillOpacity : d.fillOpacity) * 100);
+      const outline = ov.outlineColor || d.outlineColor;
+      const owidth = typeof ov.outlineWidth === 'number' ? ov.outlineWidth : d.outlineWidth;
+      const id = cssId(name);
+      return `
+        <div class="as-kind" data-name="${escHtml(name)}">
+          <div class="as-head">
+            <span class="as-sw" id="sw-${id}" style="background:${fill}"></span>
+            <span class="as-nm">${escHtml(name)}</span>
+            <button type="button" class="as-reset" data-name="${escHtml(name)}">Reset</button>
+          </div>
+          <div class="as-controls">
+            <label class="as-ctl"><span>Fill</span><input type="color" data-prop="color" value="${fill}"></label>
+            <label class="as-ctl"><span>Opacity <b class="as-opv">${opacity}%</b></span><input type="range" min="0" max="100" data-prop="fillOpacity" value="${opacity}"></label>
+            <label class="as-ctl"><span>Outline</span><input type="color" data-prop="outlineColor" value="${outline}"></label>
+            <label class="as-ctl"><span>Outline width <b class="as-owv">${owidth.toFixed(1)}</b></span><input type="range" min="0" max="8" step="0.5" data-prop="outlineWidth" value="${owidth}"></label>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  const commit = () => {
+    setAlertStyle(state.alertStyle);
+    if (state.alerts) state.alerts.restyle();
+    saveSettings();
+  };
+
+  host.querySelectorAll('.as-kind').forEach((row) => {
+    const name = row.dataset.name;
+    const sw = row.querySelector('.as-sw');
+    row.querySelectorAll('input[data-prop]').forEach((input) => {
+      input.addEventListener('input', () => {
+        const ov = state.alertStyle[name] || (state.alertStyle[name] = {});
+        const prop = input.dataset.prop;
+        if (prop === 'fillOpacity') {
+          ov.fillOpacity = Number(input.value) / 100;
+          row.querySelector('.as-opv').textContent = input.value + '%';
+        } else if (prop === 'outlineWidth') {
+          ov.outlineWidth = Number(input.value);
+          row.querySelector('.as-owv').textContent = ov.outlineWidth.toFixed(1);
+        } else {
+          ov[prop] = input.value;
+          if (prop === 'color') sw.style.background = input.value;
+        }
+        commit();
+      });
+    });
+    row.querySelector('.as-reset').addEventListener('click', () => {
+      delete state.alertStyle[name];
+      commit();
+      rebuildAlertStyleRow(row, name);
+    });
+  });
+}
+
+// Repaint one alert-kind row's controls back to the kind's defaults after a
+// reset (the override entry has already been removed from state.alertStyle).
+function rebuildAlertStyleRow(row, name) {
+  const entry = styleableAlertKinds().find(([n]) => n === name);
+  if (!entry) return;
+  const d = alertKindDefault(name, entry[1]);
+  row.querySelector('.as-sw').style.background = d.color;
+  row.querySelector('input[data-prop="color"]').value = d.color;
+  row.querySelector('input[data-prop="outlineColor"]').value = d.outlineColor;
+  const op = row.querySelector('input[data-prop="fillOpacity"]');
+  op.value = Math.round(d.fillOpacity * 100);
+  row.querySelector('.as-opv').textContent = op.value + '%';
+  const ow = row.querySelector('input[data-prop="outlineWidth"]');
+  ow.value = d.outlineWidth;
+  row.querySelector('.as-owv').textContent = d.outlineWidth.toFixed(1);
+}
+
+// Safe id/selector fragment from an alert display name.
+function cssId(s) { return String(s).replace(/[^a-z0-9]+/gi, '-').toLowerCase(); }
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;'
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Persisted settings — remember the user's last source/product, the map view
 // (center + zoom) and every map/display toggle across visits, so a reload drops
 // you right back where you left off. Storage may be blocked (private mode), so
@@ -4330,6 +4464,8 @@ function saveSettings() {
         opacity: state.opacity,
         smooth: state.smooth,
         basemap: state.basemap,
+        mapStyle: state.mapStyle,
+        alertStyle: state.alertStyle,
         showRings: state.showRings,
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
@@ -4357,6 +4493,24 @@ function saveSettings() {
   }, 400);
 }
 
+// Keep only well-formed per-kind alert overrides from storage so a corrupted or
+// hand-edited blob can't feed bad values into the GL paint expressions.
+function sanitizeAlertStyle(raw) {
+  const out = {};
+  for (const [name, ov] of Object.entries(raw || {})) {
+    if (!ov || typeof ov !== 'object') continue;
+    const clean = {};
+    if (typeof ov.color === 'string') clean.color = ov.color;
+    if (typeof ov.outlineColor === 'string') clean.outlineColor = ov.outlineColor;
+    if (typeof ov.fillOpacity === 'number')
+      clean.fillOpacity = Math.max(0, Math.min(1, ov.fillOpacity));
+    if (typeof ov.outlineWidth === 'number')
+      clean.outlineWidth = Math.max(0, Math.min(12, ov.outlineWidth));
+    if (Object.keys(clean).length) out[name] = clean;
+  }
+  return out;
+}
+
 // Fold stored settings into `state` defaults before the map and UI are built, so
 // the first render already reflects them (basemap, last view, last product…).
 function applyStoredSettings(s) {
@@ -4369,6 +4523,8 @@ function applyStoredSettings(s) {
   if (typeof s.smooth === 'number') state.smooth = Math.max(0, Math.min(3, s.smooth | 0));
   else if (typeof s.smooth === 'boolean') state.smooth = s.smooth ? 2 : 0;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
+  if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
+  if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
@@ -4631,6 +4787,10 @@ function init() {
     });
   }
 
+  // Push any restored per-kind alert overrides into the classifier before the
+  // first alert load so colours/outlines are right from the first paint.
+  setAlertStyle(state.alertStyle);
+
   // Live NWS watches/warnings overlay.
   state.alerts = new AlertsController(state.map, {
     listPanel: el.alertList,
@@ -4654,6 +4814,11 @@ function init() {
     state.alerts.setEnabled(on);
     saveSettings();
   });
+
+  // ---- Basemap layer customisation (town labels, roads, rivers, borders) ----
+  setupMapStyleControls();
+  // ---- Per-alert-kind appearance customisation ----
+  setupAlertStyleControls();
 
   // ---- SPC convective outlook overlay (days 1–8) ----
   setupSpcOutlook();
