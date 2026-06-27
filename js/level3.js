@@ -16,9 +16,13 @@
 //
 //   • EET (135) — Enhanced Echo Tops, kft. height = (code & 0x7F) − 2; the 0x80
 //     bit flags a "topped" (≥) value. We mask the flag and use offset 2, scale 1.
-//   • DAA (170) 1-hr · DU3 (173) 3-hr · DTA (172) storm-total — dual-pol QPE in
-//     mm. value = (code − offset) / scale, with offset/scale IEEE floats read from
-//     the product description block (storm-total carries ~2× the 1-hr range).
+//   • DAA (170) 1-hr · DU3 (173) 3-hr · DTA (172) storm-total — dual-pol QPE.
+//     value = (code − offset) / scale, with offset/scale IEEE floats read from the
+//     product description block. Critically, that quotient is in *hundredths of an
+//     inch* (0.01 in), not mm — the PDB `scale` is per-0.01-inch, so a raw decode
+//     overstates the depth ~3.94×. We fold a 0.01-in → mm factor into the stored
+//     scale so the native value is true mm, matching the product's own reported
+//     max accumulation (and keeping it in the same unit as the mm colour scale).
 
 import { decodeBzip2 } from './bzip2.js';
 import { makeScale } from './products.js';
@@ -27,11 +31,17 @@ const BUCKET = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 
 // Per-product decode + geometry. `code` is the Level III message code; `space` is
 // the range-bin spacing in metres (EET is 1 km, the dual-pol QPE grids 0.25 km).
+// The dual-pol QPE products store `scale` as levels per 0.01 inch, so dividing by
+// the PDB scale yields hundredths of an inch. One mm is 0.03937 in = 3.937 of those
+// hundredths, so multiplying the stored scale by that factor makes the shader's
+// `(code − offset) / scale` land in mm — the unit the rest of the QPE pipeline
+// (colour scale, mm→in display factor) already expects.
+const HUNDREDTHS_IN_PER_MM = 100 / 25.4; // ≈ 3.937
 const L3_DECODE = {
   135: { space: 1000, mask: 0x7f, offset: 2, scale: 1 }, // EET: height = (code&0x7f) - 2 kft
-  170: { space: 250 },  // DAA  — 1-hr QPE (offset/scale from the PDB)
-  173: { space: 250 },  // DUA  — user-selectable accumulation (3-hr in the DU3 feed)
-  172: { space: 250 },  // DTA  — storm-total QPE
+  170: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DAA  — 1-hr QPE (offset/scale from the PDB)
+  173: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DUA  — user-selectable accumulation (3-hr in the DU3 feed)
+  172: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DTA  — storm-total QPE
 };
 
 // Decode one Level III file into a synthetic single-tilt "sweep" the radar layer
@@ -64,7 +74,7 @@ export function decodeLevel3(bytes) {
   const lat = i32(hb(11)) / 1000;
   const lon = i32(hb(13)) / 1000;
   const offset = dec.offset != null ? dec.offset : f32(hb(33));
-  const scale = dec.scale != null ? dec.scale : f32(hb(31));
+  const scale = (dec.scale != null ? dec.scale : f32(hb(31))) * (dec.scaleMul || 1);
 
   // Symbology block sits right after the 102-byte PDB and is bzip2-compressed.
   const symStart = start + 18 + 102;
