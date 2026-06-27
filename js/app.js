@@ -370,7 +370,11 @@ function setupOverlays(map) {
       id: 'alerts-fill',
       type: 'fill',
       source: 'alerts',
-      paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.18 },
+      paint: {
+        'fill-color': ['get', 'color'],
+        // Brighten the fill of an isolated alert (selected in the open briefing).
+        'fill-opacity': ['case', ['get', 'selected'], 0.34, 0.18],
+      },
     },
     dataAnchor
   );
@@ -381,7 +385,12 @@ function setupOverlays(map) {
       id: 'alerts-line',
       type: 'line',
       source: 'alerts',
-      paint: { 'line-color': ['get', 'color'], 'line-width': 2.5, 'line-opacity': 0.95 },
+      paint: {
+        'line-color': ['get', 'color'],
+        // Thicken the outline of an isolated alert so it stands out clearly.
+        'line-width': ['case', ['get', 'selected'], 4.5, 2.5],
+        'line-opacity': 0.95,
+      },
     },
     anchor
   );
