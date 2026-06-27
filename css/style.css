@@ -636,23 +636,30 @@ input[type='range']::-moz-range-thumb {
   margin-top: 5px;
 }
 
-/* ---------------- Time bar (under the legend) ---------------- */
+/* ---------------- Time bar (floats over the map, upper-left) ---------------- */
 .time-bar {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  left: calc(10px + env(safe-area-inset-left, 0px));
+  z-index: 640;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--panel-edge);
-  border-radius: var(--radius);
-  background: var(--panel);
-  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(8, 14, 26, 0.82);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 5px 8px 5px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 }
 .time-bar .clock {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   color: var(--ink);
   margin: 0;
+  white-space: nowrap;
 }
 .tz-toggle {
   font-family: 'JetBrains Mono', monospace;
@@ -974,7 +981,7 @@ input[type='range']::-moz-range-thumb {
 .app.alert-mode .topbar,
 .app.alert-mode .rail,
 .app.alert-mode .stage > .legend,
-.app.alert-mode .stage > .time-bar,
+.app.alert-mode .time-bar,
 .app.alert-mode .footer {
   display: none;
 }
@@ -1568,7 +1575,8 @@ input[type='range']::-moz-range-thumb {
   /* Float the legend over the top of the map, clear of the status bar / notch. */
   .legend {
     position: absolute;
-    top: calc(8px + env(safe-area-inset-top, 0px));
+    /* Sits below the floating time pill so the two don't overlap at the top. */
+    top: calc(8px + env(safe-area-inset-top, 0px) + 44px);
     left: 50%;
     right: auto;
     transform: translateX(-50%);
@@ -1577,21 +1585,13 @@ input[type='range']::-moz-range-thumb {
     margin: 0;
     transition: opacity 0.2s ease;
   }
-  /* The on-screen zoom buttons collided with the floating legend; pinch-zoom
-     covers it on touch, so drop them entirely to declutter the map. */
-  .mapboxgl-ctrl-top-left {
+  /* The on-screen zoom buttons collide with the floating UI / bottom dock;
+     pinch-zoom covers it on touch, so drop the control corners entirely
+     (attribution stays bottom-right). */
+  .mapboxgl-ctrl-top-left,
+  .mapboxgl-ctrl-top-right,
+  .mapboxgl-ctrl-bottom-left {
     display: none;
-  }
-  /* Float the time bar as a compact pill just beneath the floating legend. */
-  .time-bar {
-    position: absolute;
-    top: calc(8px + env(safe-area-inset-top, 0px) + 70px);
-    left: 50%;
-    transform: translateX(-50%);
-    width: auto;
-    z-index: 640;
-    padding: 5px 12px;
-    margin: 0;
   }
   /* Keep the map credits readable and clear of the bottom dock. */
   .mapboxgl-ctrl-attrib {
