@@ -44,7 +44,6 @@ const SOUNDING_SOURCE = {
   nam:      { label: 'NAM',      native: true },
   namnest:  { label: 'NAM Nest', native: true },
   rap:      { label: 'RAP',      native: true },
-  rrfs:     { label: 'RRFS',     native: true },
   aigfs:    { label: 'AI GFS',   unavailable: true },
   hrrrcast: { label: 'HRRRCast', unavailable: true },
 };

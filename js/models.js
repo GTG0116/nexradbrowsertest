@@ -14,29 +14,10 @@
 import { decodeGrib2 } from './grib2.js';
 import { makeScale } from './products.js';
 
-// Optional CORS proxy for buckets that don't advertise CORS (RRFS — see
-// `needsProxy` below). Left empty, those models talk to AWS directly, which a
-// browser will block; set a Range-capable proxy prefix here to enable them. The
-// proxy must forward the `Range` request header and return 206 Partial Content,
-// since model loads fetch single GRIB messages by byte range.
-function defaultModelProxy() {
-  const loc = window.location;
-  const local = /^(localhost|127\.0\.0\.1|::1)$/.test(loc.hostname);
-  if (local && loc.port && loc.port !== '8080') {
-    const host = loc.hostname === '::1' ? '[::1]' : loc.hostname;
-    return `${loc.protocol}//${host}:8080/proxy?url=`;
-  }
-  return `${loc.origin}/proxy?url=`;
-}
-let modelProxy = defaultModelProxy();
-export function setModelProxy(p) {
-  modelProxy = p || '';
-}
-// The fetch URL for a bucket key, routed through the proxy for `needsProxy`
-// models when one is configured (otherwise the bare bucket URL).
+// The fetch URL for a bucket key. Every model here is backed by a CORS-enabled
+// NODD bucket, so requests go straight to AWS.
 function modelUrl(model, key) {
-  const full = `${model.bucket}/${key}`;
-  return model.needsProxy && modelProxy ? modelProxy + encodeURIComponent(full) : full;
+  return `${model.bucket}/${key}`;
 }
 
 // Available models, each backed by a CORS-enabled NODD AWS bucket (listing, GET
@@ -166,37 +147,6 @@ export const MODELS = {
     },
     maxForecastHour() {
       return 48;
-    },
-  },
-  rrfs: {
-    id: 'rrfs',
-    label: 'RRFS (3 km CONUS)',
-    bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
-    // Two compounding problems make RRFS browser-unfriendly:
-    //   1. CORS — the AWS noaa-rrfs-pds bucket sends no Access-Control-Allow-Origin
-    //      header, and there is no CORS-enabled mirror (the RAP/Azure trick has no
-    //      RRFS equivalent; the GCP/Azure NODD buckets for RRFS don't exist). So a
-    //      direct browser fetch is blocked and a Range-capable proxy is required.
-    //   2. Product — NOAA's deterministic RRFS-A has been superseded by the REFS
-    //      *ensemble*: the old `rrfs_a/rrfs.<day>/<HH>/...3km.f###.conus.grib2`
-    //      keys are gone (those folders are now `refs.<day>/<HH>/enspost/graphics`
-    //      GIFs, with no per-member CONUS GRIB2 exposed). So even through a proxy
-    //      the keys below 404 against the current bucket.
-    // It's kept here (behind the proxy, off by default) for self-hosters pointing
-    // setModelProxy() at an archive/mirror that still serves the old layout; on the
-    // public CORS-less bucket it will report "index fetch failed" rather than load.
-    needsProxy: true,
-    cycleStep: 1,
-    latencyMin: 90,
-    // Surface fields live in the 2dfld file, pressure levels in prslev.
-    keysFor(dayStr, cycle, fhour, file = 'sfc') {
-      const kind = file === 'prs' ? 'prslev' : '2dfld';
-      const grib = `rrfs_a/rrfs.${dayStr}/${pad(cycle)}/rrfs.t${pad(cycle)}z.${kind}.3km.f${pad(fhour, 3)}.conus.grib2`;
-      return { grib, idx: grib + '.idx' };
-    },
-    // Synoptic cycles (00/06/12/18z) run out to F84; the rest to F18.
-    maxForecastHour(cycle) {
-      return cycle % 6 === 0 ? 84 : 18;
     },
   },
 };
@@ -770,19 +720,6 @@ const MODEL_PRODUCT_SUPPORT = {
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH1', 'SRH3', 'STORM',
   ],
-  // RRFS carries nearly the full HRRR set across its 2dfld (surface) and prslev
-  // (pressure) files — REFC, the layer-parcel CAPE/CIN suite, composites,
-  // run-total QPF, lightning and the frozen-precip/freezing-rain accretions.
-  // Its WEASD field isn't a run-total accumulation here, so the snow-depth
-  // products (which difference run totals) are dropped.
-  rrfs: [
-    'REFC', 'TMP', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
-    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
-    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
-    'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
-    'SRH1', 'SRH3', 'SHEAR1', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG',
-    'ICET', 'FZRA',
-  ],
 };
 for (const [key, model] of Object.entries(MODELS)) {
   model.products = new Set(MODEL_PRODUCT_SUPPORT[key] || MODEL_ORDER);
@@ -869,8 +806,8 @@ async function runExists(model, run, productId) {
 //
 // If the requested day turns up no runs we walk back a couple of earlier UTC days
 // and list those instead. Experimental / high-latency feeds (HRRRCast on GSL's
-// bucket, RRFS) can run a full day behind real time, so early in the UTC day —
-// or whenever the feed lags — a today-only listing comes up empty and the model
+// bucket) can run a full day behind real time, so early in the UTC day — or
+// whenever the feed lags — a today-only listing comes up empty and the model
 // looks broken even though recent runs are sitting in the bucket one day back.
 export async function listModels(modelKey, productId, date) {
   const model = MODELS[modelKey];

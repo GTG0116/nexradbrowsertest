@@ -388,17 +388,12 @@ js/app.js                         controller: UI, state, interaction
 ## Running it
 
 Serve the folder over HTTP (ES modules and module workers require `http(s)://`,
-not `file://`). Use the included Node server when you want RRFS, because it also
-provides the Range-capable `/proxy?url=...` endpoint that RRFS needs:
+not `file://`). Any static file server works:
 
 ```bash
-node server.js
-# then open http://localhost:8080/
+python3 -m http.server 8000
+# then open http://localhost:8000/
 ```
-
-If you keep serving the app from another local static server such as
-`http://localhost:8000/`, leave `node server.js` running too; RRFS requests will
-use `http://localhost:8080/proxy?url=...` for the byte-range proxy.
 
 Pick a radar site, choose a product, and scrub through the day's volume scans.
 Toggle **LIVE** to auto-load the newest scan as it arrives. Scroll to zoom, drag
