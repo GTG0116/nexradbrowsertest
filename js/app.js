@@ -47,6 +47,9 @@ const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
 // The Mapbox public token is supplied by the end user (not baked into the build),
 // so a public deployment carries no shared/billable key. It is stored per-browser
 // in localStorage and prompted for on first run by the setup gate (see init()).
+// NB: the localStorage keys keep their original `aether.*` namespace across the
+// RadarNexus rebrand on purpose — renaming them would silently drop every existing
+// user's saved token, palettes and settings on their next visit.
 const MAPBOX_TOKEN_KEY = 'aether.mapboxToken';
 let MAPBOX_TOKEN = '';
 function getStoredMapboxToken() {
@@ -418,14 +421,14 @@ function setupOverlays(map) {
         // terminal radars → yellow; NEXRAD → blue.
         'circle-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'current'], 1], '#2bb8f5',
           ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
           ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
           'rgba(80,140,220,0.85)',
         ],
         'circle-stroke-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#36e0c8',
+          ['==', ['get', 'current'], 1], '#2bb8f5',
           ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
           ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
           'rgba(150,205,255,0.85)',
@@ -4236,7 +4239,7 @@ function buildExportScene() {
 // sub-line, the scan/frame time and a UTC stamp. Adapts to the active mode.
 function buildExportCaption() {
   const cap = {
-    brand: 'AETHER',
+    brand: 'RadarNexus',
     title: '',
     sub: '',
     time: '',

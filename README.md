@@ -1,4 +1,4 @@
-# AETHER — browser-native NEXRAD scope
+# RadarNexus — browser-native NEXRAD scope
 
 A live WSR-88D **NEXRAD Level II** weather-radar viewer that does **all** of its
 work in the browser. There is no backend: the page lists scans, downloads the

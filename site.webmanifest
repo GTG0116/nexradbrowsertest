@@ -1,0 +1,16 @@
+{
+  "name": "RadarNexus",
+  "short_name": "RadarNexus",
+  "description": "Live NEXRAD radar, satellite and weather models decoded in your browser.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#03060f",
+  "theme_color": "#03060f",
+  "icons": [
+    { "src": "logo/favicon-16.png", "sizes": "16x16", "type": "image/png" },
+    { "src": "logo/favicon-32.png", "sizes": "32x32", "type": "image/png" },
+    { "src": "logo/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "logo/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "logo/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

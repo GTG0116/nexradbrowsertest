@@ -131,7 +131,7 @@ export class ExportTool {
     const actions = document.createElement('div');
     actions.className = 'export-actions';
 
-    const fileName = `aether-${slug(cap && cap.title)}-${tsForName()}.png`;
+    const fileName = `radarnexus-${slug(cap && cap.title)}-${tsForName()}.png`;
     const toBlob = () => new Promise((res) => canvas.toBlob(res, 'image/png'));
 
     // Native share — only shown when the platform can share files.
@@ -153,7 +153,7 @@ export class ExportTool {
           const file = new File([blob], fileName, { type: 'image/png' });
           await navigator.share({
             files: [file],
-            title: 'AETHER radar',
+            title: 'RadarNexus radar',
             text: shareText(cap),
           });
         } catch (e) {
@@ -229,30 +229,43 @@ export class ExportTool {
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
 const SANS = "'Space Grotesk', system-ui, sans-serif";
 
-// Header: "◆ AETHER" wordmark on the left, title + sub stacked in the middle,
+// Header: "◆ RadarNexus" wordmark on the left, title + sub stacked in the middle,
 // scan time on the right. Everything is measured and clipped so the three blocks
 // never overlap, whatever the image width. `u` is the base text unit (~px).
 function drawHeader(ctx, cap, W, H, u, padX) {
+  const AZURE = '#2bb8f5';
   // Brand accent bar down the left edge.
-  ctx.fillStyle = '#36e2c4';
+  ctx.fillStyle = AZURE;
   ctx.fillRect(0, 0, Math.max(2, Math.round(u * 0.22)), H);
 
   const midY = Math.round(H / 2);
-  // Wordmark (left), vertically centred.
+  // Wordmark (left), vertically centred. Drawn two-tone when the brand is the
+  // default RadarNexus — white "Radar" + azure "Nexus", matching the logo.
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#36e2c4';
   ctx.font = `700 ${Math.round(u * 1.15)}px ${MONO}`;
-  const brand = cap.brand || 'AETHER';
-  ctx.fillText(brand, padX, midY);
-  const brandRight = padX + ctx.measureText(brand).width;
+  const brand = cap.brand || 'RadarNexus';
+  let brandRight;
+  const split = /^Radar(Nexus)$/.test(brand) ? ['Radar', 'Nexus'] : null;
+  if (split) {
+    ctx.fillStyle = '#f2f8ff';
+    ctx.fillText(split[0], padX, midY);
+    const midX = padX + ctx.measureText(split[0]).width;
+    ctx.fillStyle = AZURE;
+    ctx.fillText(split[1], midX, midY);
+    brandRight = midX + ctx.measureText(split[1]).width;
+  } else {
+    ctx.fillStyle = AZURE;
+    ctx.fillText(brand, padX, midY);
+    brandRight = padX + ctx.measureText(brand).width;
+  }
 
   // Scan time (right), vertically centred — measured first so the title block
   // knows where it must stop.
   let timeLeft = W - padX;
   if (cap.time) {
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#36e2c4';
+    ctx.fillStyle = AZURE;
     ctx.font = `700 ${Math.round(u * 1.05)}px ${MONO}`;
     ctx.fillText(cap.time, W - padX, midY);
     timeLeft = W - padX - ctx.measureText(cap.time).width;
@@ -319,7 +332,7 @@ function drawCredit(ctx, cap, minX, maxX, y, H, u) {
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#6b7785';
   ctx.font = `400 ${Math.round(u * 0.72)}px ${MONO}`;
-  const full = `${cap.stamp || ''}  ·  aether`;
+  const full = `${cap.stamp || ''}  ·  radarnexus`;
   const text = ctx.measureText(full).width <= avail ? full : (cap.stamp || '');
   ctx.fillText(clip(ctx, text, avail), maxX, y + H / 2);
   ctx.textAlign = 'left';
@@ -508,7 +521,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
       if (y > bottom) return;
       ctx.textAlign = 'left';
       if (i === 0) {
-        ctx.fillStyle = b.color || '#36e2c4';
+        ctx.fillStyle = b.color || '#2bb8f5';
         ctx.fillText('•', x0 + pad, y);
       }
       ctx.fillStyle = '#cdd6e0';
@@ -703,7 +716,7 @@ function flash(btn, msg) {
 }
 
 function shareText(cap) {
-  if (!cap) return 'AETHER radar';
+  if (!cap) return 'RadarNexus radar';
   return [cap.title, cap.sub, cap.time].filter(Boolean).join(' · ');
 }
 

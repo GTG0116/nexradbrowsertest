@@ -10,11 +10,21 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
     />
-    <title>AETHER · Live NEXRAD Scope</title>
+    <title>RadarNexus · Live NEXRAD Scope</title>
     <meta
       name="description"
-      content="Live WSR-88D NEXRAD radar decoded entirely in your browser and draped over an interactive map — reflectivity, velocity and dual-pol products."
+      content="RadarNexus — live WSR-88D NEXRAD radar, GOES/Himawari satellite and NWP models decoded entirely in your browser and draped over an interactive map."
     />
+    <meta name="theme-color" content="#03060f" />
+    <!-- Brand icons (favicon + iOS/Android web-app icon), generated from the
+         RadarNexus storm mark in logo/. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="logo/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="logo/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="logo/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="RadarNexus" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="site.webmanifest" />
     <link rel="preconnect" href="https://unidata-nexrad-level2.s3.amazonaws.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
@@ -32,12 +42,12 @@
          no shared/billable key. Shown only when no token is stored yet. -->
     <div id="mbxGate" class="mbx-gate" hidden>
       <div class="mbx-gate-card">
-        <div class="mbx-gate-kicker">AETHER · setup</div>
+        <div class="mbx-gate-kicker">RadarNexus · setup</div>
         <h2>Add your Mapbox token</h2>
         <p>
           The basemap is drawn with Mapbox GL. To keep this viewer free to host,
-          AETHER uses <b>your own</b> Mapbox public access token — it stays in this
-          browser only (localStorage) and is never sent anywhere but Mapbox.
+          RadarNexus uses <b>your own</b> Mapbox public access token — it stays in
+          this browser only (localStorage) and is never sent anywhere but Mapbox.
         </p>
         <ol class="mbx-gate-steps">
           <li>Create a free account at <a href="https://account.mapbox.com/auth/signup/" target="_blank" rel="noopener">mapbox.com</a>.</li>
@@ -61,10 +71,12 @@
       <!-- Top bar -->
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark"><span></span></div>
+          <div class="brand-mark">
+            <img src="logo/icon-192.png" alt="RadarNexus" width="38" height="38" />
+          </div>
           <div class="brand-text">
-            <h1>AETHER</h1>
-            <p>browser-native NEXRAD scope</p>
+            <h1>Radar<span>Nexus</span></h1>
+            <p>browser-native weather scope</p>
           </div>
         </div>
         <div class="topbar-status">
