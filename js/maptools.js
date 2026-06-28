@@ -64,6 +64,8 @@ export class MapTools {
     this.draftMarkers = [];
     this.onChange = null;
     this.onToolEnd = null;
+    this.drawColor = bgColor.draw; // user-adjustable freehand-draw colour
+    this.drawWidth = 2.4; // user-adjustable freehand-draw line width (px)
     this.stormSpeed = 30; // mph
     this.stormMinutes = 60;
     this.stormMaxTowns = 20; // cap on town labels in the cone (user-adjustable)
@@ -102,7 +104,9 @@ export class MapTools {
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        // Honour a per-feature `width` (set by the draw tool) and fall back to
+        // the storm/measure defaults when a feature doesn't carry one.
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, ['coalesce', ['get', 'width'], 2.4]],
         'line-opacity': 0.95,
       },
     });
@@ -112,7 +116,7 @@ export class MapTools {
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, ['coalesce', ['get', 'width'], 2.4]],
         'line-dasharray': [2, 1.6],
         'line-opacity': 0.95,
       },
@@ -139,17 +143,19 @@ export class MapTools {
 
   _draftFeatures() {
     const d = this.draft;
-    const color = bgColor[d.kind] || '#36e0c8';
+    const color = d.kind === 'draw' ? this.drawColor : bgColor[d.kind] || '#36e0c8';
+    const width = d.kind === 'draw' ? this.drawWidth : undefined;
+    const props = (extra) => (width != null ? { kind: d.kind, color, width, ...extra } : { kind: d.kind, color, ...extra });
     const out = [];
     if (d.coords.length >= 2) {
       out.push({
         type: 'Feature',
         geometry: { type: 'LineString', coordinates: d.coords },
-        properties: { kind: d.kind, color, dashed: d.kind === 'storm' },
+        properties: props({ dashed: d.kind === 'storm' }),
       });
     }
     for (const c of d.coords)
-      out.push({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: { kind: d.kind, color, role: 'vertex' } });
+      out.push({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: props({ role: 'vertex' }) });
     return out;
   }
 
@@ -166,6 +172,18 @@ export class MapTools {
   _emit() {
     this._refresh();
     if (this.onChange) this.onChange(this.getFeatureCollection());
+  }
+
+  // ---- Freehand-draw appearance (user-adjustable colour + line width) ----
+  setDrawColor(color) {
+    if (typeof color === 'string' && color) this.drawColor = color;
+    if (this.draft && this.draft.kind === 'draw') this._refresh();
+  }
+
+  setDrawWidth(width) {
+    const w = Number(width);
+    if (isFinite(w) && w > 0) this.drawWidth = w;
+    if (this.draft && this.draft.kind === 'draw') this._refresh();
   }
 
   // ---- Tool activation ----
@@ -312,7 +330,7 @@ export class MapTools {
     this.shapes.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: this.draft.coords },
-      properties: { kind: 'draw', color: bgColor.draw },
+      properties: { kind: 'draw', color: this.drawColor, width: this.drawWidth },
     });
     this.draft = null;
     this._emit();

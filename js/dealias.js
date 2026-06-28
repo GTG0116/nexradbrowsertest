@@ -16,9 +16,13 @@
 // every gate after it look confidently offset by 2·VN, painting a whole spoke
 // the wrong colour. Referencing a short window's median instead lets the good
 // gates outvote a single bad one, so a mistake stays a lone speckle and the beam
-// self-heals on the next gate. A fresh run (the first gate, or the first gate
-// after a no-data gap) starts from the native value instead of copying the
-// previous radial, preventing one bad azimuth from becoming a whole spoke.
+// self-heals on the next gate. Before that window has filled (a beam's first
+// gates, or the first gate after a no-data gap) the reference comes from the
+// same gate in the adjacent already-unfolded radial, so a beam that re-enters
+// echo at an already-aliased velocity grows out of azimuthal continuity with
+// the storm beside it instead of anchoring to its (possibly folded) native
+// value and painting the whole storm one uniform colour. A lone bad seed is
+// still caught by the cross-radial de-spoke pass below.
 //
 // The result is a sweep whose VEL moment blocks carry re-encoded 16-bit codes
 // (so unfolded values beyond the original ±VN range still fit) with a matching
@@ -155,9 +159,15 @@ function computeDealias(sweep) {
   const win = new Float32Array(WIN);
   const scratch = new Float32Array(WIN);
 
-  // Phase 1 — unfold each radial in isolation (continuity walk outward), keeping
-  // the per-radial arrays so a second, cross-radial pass can de-spoke them.
+  // Phase 1 — unfold each radial walking outward, keeping the per-radial arrays
+  // so a second, cross-radial pass can de-spoke them. Each beam is also seeded
+  // from its azimuth neighbour (see `prevVals`) at its start / after a no-data
+  // gap, so a beam that first re-encounters echo at an already-aliased velocity
+  // is unfolded into continuity with the storm beside it instead of being left
+  // folded — the cause of a uniform velocity streak running the length of a
+  // line of storms.
   const infos = [];
+  let prevVals = null; // previous (lower-azimuth) radial's unfolded values
   for (const r of ordered) {
     const m = r.moments.VEL;
     const gc = m.gateCount;
@@ -182,11 +192,16 @@ function computeDealias(sweep) {
       let v = native;
       nativeVals[g] = native;
       if (canUnfold) {
-        // Anchor only to a mature recent-beam median. If the window was just
-        // reset by no-data/range-folded gates, keep the first few gates native
-        // until there is enough same-radial evidence to avoid a long false spoke.
-        if (wn >= MIN_REF_GATES) {
-          const ref = windowMedian(win, wn, scratch);
+        // Prefer a mature recent-beam median along this radial. Before the window
+        // has filled (the first gates of a beam, or just after a no-data gap),
+        // fall back to the same gate in the previous azimuth-neighbour radial,
+        // which is already unfolded — so the beam grows out of azimuthal
+        // continuity with the storm next to it rather than anchoring to a
+        // possibly-aliased native value and streaking the whole storm one colour.
+        let ref = null;
+        if (wn >= MIN_REF_GATES) ref = windowMedian(win, wn, scratch);
+        else if (prevVals && g < prevVals.length && !Number.isNaN(prevVals[g])) ref = prevVals[g];
+        if (ref !== null) {
           const fold = Math.round((ref - v) / twoVN);
           v += fold * twoVN;
           folds[g] = fold;
@@ -200,6 +215,7 @@ function computeDealias(sweep) {
 
     suppressHighVelocitySpokes(vals, nativeVals, folds);
     infos.push({ r, m, vals, nativeVals, folds, twoVN, canUnfold });
+    prevVals = vals; // seed the next (adjacent-azimuth) beam from this one
   }
 
   // Phase 2 — pull any remaining mis-folded beams back into azimuthal continuity.

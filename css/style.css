@@ -3944,3 +3944,98 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
 }
 .as-ctl b { color: var(--accent); }
 .as-ctl input[type='range'] { width: 100%; }
+
+/* Keyboard-shortcut editor */
+.keybind-controls { padding: 4px 11px 11px; }
+.kb-group { margin-top: 12px; }
+.kb-group:first-child { margin-top: 4px; }
+.kb-group-title {
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(29, 74, 147, 0.4);
+}
+.kb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.kb-act {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink);
+}
+.kb-key {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(54, 224, 200, 0.08);
+  border: 1px solid var(--panel-edge);
+  border-radius: 5px;
+  padding: 3px 9px;
+  min-width: 64px;
+  text-align: center;
+  cursor: pointer;
+}
+.kb-key:hover { border-color: var(--accent); }
+.kb-remove {
+  font-size: 12px;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  line-height: 1;
+}
+.kb-remove:hover { color: #ff5a7a; border-color: #ff5a7a; }
+.kb-empty {
+  font-size: 11px;
+  color: var(--ink-dim);
+  padding: 2px 0;
+}
+.kb-add {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(29, 74, 147, 0.4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.kb-add-title {
+  flex-basis: 100%;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.kb-add-action {
+  flex: 1;
+  min-width: 0;
+}
+.kb-add-key { white-space: nowrap; }
+.kb-reset {
+  margin-top: 12px;
+  width: 100%;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  padding: 7px;
+  cursor: pointer;
+}
+.kb-reset:hover { color: var(--ink); border-color: var(--accent); }
+.kb-hint {
+  font-size: 11px;
+  color: var(--ink-dim);
+  margin-top: 6px;
+  min-height: 0;
+}

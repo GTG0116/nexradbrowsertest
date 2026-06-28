@@ -26,6 +26,7 @@ export const TOWN_FONTS = {
 export const DEFAULT_MAP_STYLE = {
   townFont: 'default',
   townThickness: 1, // text-halo-width, px
+  townSize: 1, // multiplier on the style's native text-size (town/place labels)
   roadColor: '', // '' → keep the style's native colour
   roadWidth: 1, // multiplier on the native line width
   riverColor: '',
@@ -39,6 +40,7 @@ export function normalizeMapStyle(s) {
   if (s && typeof s === 'object') {
     if (TOWN_FONTS[s.townFont]) o.townFont = s.townFont;
     if (typeof s.townThickness === 'number') o.townThickness = clamp(s.townThickness, 0, 6);
+    if (typeof s.townSize === 'number') o.townSize = clamp(s.townSize, 0.5, 3);
     for (const k of ['roadColor', 'riverColor', 'borderColor'])
       if (typeof s[k] === 'string') o[k] = s[k];
     for (const k of ['roadWidth', 'riverWidth', 'borderWidth'])
@@ -119,6 +121,11 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
   const o = normalizeMapStyle(opts);
   if (fresh || !map.__nativeLineWidth) map.__nativeLineWidth = {};
   const natives = map.__nativeLineWidth;
+  // Town/place labels' native text-size is captured the same way as line widths
+  // so the user's size multiplier scales the stock value without compounding on
+  // repeated live changes (and is re-read fresh on each style load).
+  if (fresh || !map.__nativeTextSize) map.__nativeTextSize = {};
+  const textNatives = map.__nativeTextSize;
 
   // Remember a layer's stock line width the first time we see it on this style
   // load, then drive its width as native × multiplier (and optionally recolour).
@@ -141,6 +148,11 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
       const f = TOWN_FONTS[opts.townFont];
       if (f && f.stack) map.setLayoutProperty(ly.id, 'text-font', f.stack);
       map.setPaintProperty(ly.id, 'text-halo-width', opts.townThickness);
+      if (!(ly.id in textNatives)) {
+        const ts = map.getLayoutProperty(ly.id, 'text-size');
+        textNatives[ly.id] = ts == null ? 16 : ts;
+      }
+      map.setLayoutProperty(ly.id, 'text-size', scaleLineWidth(textNatives[ly.id], o.townSize));
     }
   }
 

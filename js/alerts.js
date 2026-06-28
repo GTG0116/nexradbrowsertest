@@ -35,6 +35,12 @@ const EMERGENCY_PURPLE = '#b02cff';
 // deep, saturated green that is clearly distinct from the bright Flash Flood
 // Warning green (#2ecc40) so the most severe flood alert stands out.
 const FLASH_FLOOD_EMERGENCY_GREEN = '#0a6e2a';
+// Impact-Based "tagged" Severe Thunderstorm Warnings. The base SVR is orange
+// (#ffa500); a CONSIDERABLE damage threat reads as a hotter orange-red, and a
+// DESTRUCTIVE one (the tag that triggers a Wireless Emergency Alert) a deep
+// magenta so the two strongest tiers stand clearly apart from a routine SVR.
+const SVR_CONSIDERABLE_ORANGE = '#ff5a1f';
+const SVR_DESTRUCTIVE_MAGENTA = '#d4006a';
 
 const EVENT_COLORS = {
   'Tornado Warning': '#e0152d',
@@ -97,6 +103,8 @@ export const UPGRADE_COLORS = {
   'Tornado Emergency': EMERGENCY_PURPLE,
   'PDS Tornado Warning': PDS_PINK,
   'Flash Flood Emergency': FLASH_FLOOD_EMERGENCY_GREEN,
+  'Considerable Severe Thunderstorm Warning': SVR_CONSIDERABLE_ORANGE,
+  'Destructive Severe Thunderstorm Warning': SVR_DESTRUCTIVE_MAGENTA,
 };
 
 // Ordered [displayName, defaultColor] for every alert kind the customiser lists.
@@ -140,6 +148,8 @@ const PRIORITY = [
   'Tornado Emergency',
   'PDS Tornado Warning',
   'Tornado Warning',
+  'Destructive Severe Thunderstorm Warning',
+  'Considerable Severe Thunderstorm Warning',
   'Severe Thunderstorm Warning',
   'Flash Flood Emergency',
   'PDS Flash Flood Warning',
@@ -179,6 +189,23 @@ export function classifyAlert(feature) {
     } else if (torThreat === 'CONSIDERABLE') {
       display = 'PDS Tornado Warning';
       color = PDS_PINK;
+      upgraded = true;
+    }
+  }
+
+  // Severe Thunderstorm Warnings carry their own Impact-Based damage tag: a
+  // CONSIDERABLE threat (≈70 mph / 1.75" hail) and a DESTRUCTIVE threat
+  // (≥80 mph / 2.75" hail, which fires a Wireless Emergency Alert) each get a
+  // distinct display name + colour so the strongest SVRs stand out.
+  const svrThreat = (firstParam(params, 'thunderstormDamageThreat') || '').toUpperCase();
+  if (event === 'Severe Thunderstorm Warning') {
+    if (svrThreat === 'DESTRUCTIVE') {
+      display = 'Destructive Severe Thunderstorm Warning';
+      color = SVR_DESTRUCTIVE_MAGENTA;
+      upgraded = true;
+    } else if (svrThreat === 'CONSIDERABLE') {
+      display = 'Considerable Severe Thunderstorm Warning';
+      color = SVR_CONSIDERABLE_ORANGE;
       upgraded = true;
     }
   }
@@ -379,6 +406,24 @@ const GUIDANCE = {
       'Cover your head and neck and crouch low.',
       'Mobile homes offer no protection — go to a sturdy building.',
       'If driving, do not shelter under an overpass; seek a strong building instead.',
+    ],
+  },
+  'Destructive Severe Thunderstorm Warning': {
+    lead: 'A destructive thunderstorm — winds of 80+ mph and/or baseball-size (2.75"+) hail — is occurring. This is the highest severe-thunderstorm tier and triggers a Wireless Emergency Alert to phones; the damage can rival a weak tornado.',
+    points: [
+      'Treat this like a tornado warning: move to an interior room on the lowest floor, away from all windows, now.',
+      'These winds can level outbuildings, flip vehicles, and bring down trees and power lines — do not go outside to watch.',
+      'Abandon mobile homes for a sturdy building; they offer no protection from 80+ mph winds.',
+      'Stay sheltered until the storm passes, and watch for a tornado warning that may follow.',
+    ],
+  },
+  'Considerable Severe Thunderstorm Warning': {
+    lead: 'A storm with considerable impact — winds near 70 mph and/or hail to 1.75" — is occurring. This is an enhanced severe-thunderstorm tier above a routine warning, with damage to roofs, vehicles and trees likely.',
+    points: [
+      'Move indoors to an interior room and stay well away from windows.',
+      'Park vehicles under cover if you safely can — 1.75" hail dents metal and breaks glass.',
+      'Secure or bring in loose outdoor objects that 70 mph gusts can turn into projectiles.',
+      'Be ready to shelter further if the storm strengthens or a tornado warning follows.',
     ],
   },
   'Severe Thunderstorm Warning': {
