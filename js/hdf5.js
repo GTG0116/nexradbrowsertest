@@ -22,13 +22,51 @@
 const SIG = [0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a];
 const UNDEF = 0xffffffffffffffff;
 
-// Inflate a zlib stream with the platform DecompressionStream (async). Falls
-// back through 'deflate' (zlib-wrapped, what HDF5's filter 1 emits).
+// Inflate a zlib stream (HDF5 filter id 1) with the platform DecompressionStream.
+//
+// HDF5 chunks frequently carry bytes *after* the zlib end-of-stream marker — a
+// Fletcher32 checksum (filter id 3) and/or chunk padding. Firefox and Safari stop
+// cleanly at the stream end and ignore the extra bytes, but Chrome's
+// DecompressionStream rejects with "junk found after the end of the compressed
+// data" — and the convenient `new Response(stream).arrayBuffer()` pattern then
+// throws away *all* the output that was already produced. That made every GOES
+// chunk fail to decode in Chrome (and only Chrome): the map drew but no satellite.
+//
+// So drive the stream by hand: read the inflated output as it comes, feed the
+// input fire-and-forget, and treat a post-output error as a normal end-of-stream.
+// We only surface an error if nothing at all was decoded (a genuinely bad stream).
 async function inflate(bytes) {
   const ds = new DecompressionStream('deflate');
-  const stream = new Response(bytes).body.pipeThrough(ds);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  let total = 0;
+  let readErr = null;
+
+  const collect = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.length;
+      }
+    } catch (e) {
+      readErr = e; // trailing-junk (Chrome) or truncation — judged below by `total`
+    }
+  })();
+
+  // Errors on the input side are reported by the read side; swallow them here so a
+  // trailing-bytes rejection can't discard the already-inflated output.
+  writer.write(bytes).catch(() => {});
+  writer.close().catch(() => {});
+  await collect;
+
+  if (!total && readErr) throw readErr; // produced nothing → a real failure
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
 }
 
 // Undo the HDF5 byte-shuffle filter (filter id 2): de-interleave the planes of
