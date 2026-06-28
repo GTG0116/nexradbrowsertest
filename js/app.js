@@ -16,7 +16,7 @@ import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from './mrms.js';
-import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, listModels, loadModel, forecastHours,
+import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, loadModel, forecastHours,
   modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
@@ -518,6 +518,12 @@ const state = {
   mapTools: null,
   splitView: null,
   exportTool: null,
+  // Freehand-draw tool appearance (user-adjustable, persisted).
+  draw: { color: '#36e0c8', width: 2.4 },
+  // Keyboard shortcuts: { global, radar, satellite, mrms, models } maps of
+  // combo→action. Built from defaults or storage by initKeybinds().
+  keybinds: null,
+  _storedKeybinds: null,
   weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', touchStart: null, touchMove: null, anim: null },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
@@ -606,6 +612,8 @@ function cacheEls() {
   el.alertPreviewCard = $('#alertPreviewCard');
   el.mapStyleControls = $('#mapStyleControls');
   el.alertStyleControls = $('#alertStyleControls');
+  el.drawStyleControls = $('#drawStyleControls');
+  el.keybindControls = $('#keybindControls');
   el.spcPanel = $('#spcPanel');
   el.spcToggle = $('#spcToggle');
   el.outlookSelect = $('#outlookSelect');
@@ -3137,8 +3145,11 @@ function setupSpcOutlook() {
 // switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
 // map settings + metadata. The same DOM nodes are moved, so all wiring is intact.
 function layoutMobilePages() {
-  el.pageControls.append(el.productPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
-  el.pageSettings.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
+  // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
+  // "MRMS frames" / "Model runs") lives with the product controls so the frame
+  // picker sits beside the product/tilt controls instead of on the source page.
+  el.pageControls.append(el.productPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageSettings.append(el.sourcePanel, el.alertsPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
 }
 
@@ -3863,6 +3874,7 @@ function setupMapTools() {
 
   // Draw / measure / storm-track annotations.
   state.mapTools = new MapTools(state.map);
+  applyDrawStyle(); // restore the user's freehand-draw colour + width
   // Mirror committed drawings into the split pane.
   state.mapTools.onChange = (fc) => {
     if (state.splitView) state.splitView.setDrawings(fc);
@@ -4514,6 +4526,367 @@ function applyMapStyleLive() {
   saveSettings();
 }
 
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts (user-customisable)
+// ---------------------------------------------------------------------------
+// A binding maps a normalised key combo (e.g. "Shift+KeyR") to an action id.
+// Tool + playback binds live in the `global` scope (they work in every source
+// mode); product binds are per-mode ("radar"/"satellite"/"mrms"/"models") so
+// the same key can mean a different product in each source, and the user can add
+// their own satellite/MRMS/model product shortcuts. Actions are applied by
+// driving the existing buttons, so all of their wiring is reused unchanged.
+const KEYBIND_SCOPES = ['global', 'radar', 'satellite', 'mrms', 'models'];
+
+const DEFAULT_KEYBINDS = {
+  global: {
+    'Shift+Digit1': 'tool:storm',
+    'Shift+Digit2': 'tool:measure',
+    'Shift+Digit3': 'tool:draw',
+    'Shift+Digit4': 'tool:metars',
+    'Shift+Digit5': 'tool:weather',
+    'Shift+Digit6': 'tool:locate',
+    'Shift+Digit7': 'tool:split',
+    'Shift+Digit8': 'tool:export',
+    'Shift+Digit9': 'tool:clear',
+    'Space': 'playback:loop',
+    'ArrowRight': 'playback:next',
+    'ArrowLeft': 'playback:prev',
+  },
+  radar: {
+    'Shift+KeyR': 'product:REF',
+    'Shift+KeyV': 'product:VEL',
+    'Shift+KeyC': 'product:RHO',
+    'Shift+KeyD': 'product:ZDR',
+    'Shift+KeyS': 'product:SW',
+    'Shift+KeyP': 'product:PHI',
+    'Shift+KeyE': 'product:ET',
+    'Shift+KeyT': 'product:PRT',
+  },
+  satellite: {},
+  mrms: {},
+  models: {},
+};
+
+// Buttons each tool action drives (reuses their full click wiring).
+const TOOL_ACTION_BTN = {
+  storm: 'toolStorm', measure: 'toolMeasure', draw: 'toolDraw',
+  metars: 'toolMetars', weather: 'toolWeather', locate: 'toolLocate',
+  split: 'toolSplit', export: 'toolExport', clear: 'toolClear',
+};
+const TOOL_ACTIONS = [
+  ['tool:storm', 'Storm track'], ['tool:measure', 'Measure'], ['tool:draw', 'Draw'],
+  ['tool:metars', 'Surface obs'], ['tool:weather', 'Local weather'], ['tool:locate', 'Live location'],
+  ['tool:split', 'Split screen'], ['tool:export', 'Export'], ['tool:clear', 'Clear drawings'],
+];
+const PLAYBACK_ACTIONS = [
+  ['playback:loop', 'Start / pause loop'],
+  ['playback:next', 'Next frame'],
+  ['playback:prev', 'Previous frame'],
+];
+
+// Catalog of product actions per source mode, [actionId, label]. Used to label
+// existing binds and to populate the "add a shortcut" product picker.
+function productCatalog(mode) {
+  if (mode === 'radar')
+    return [...PRODUCT_ORDER.map((id) => [`product:${id}`, PRODUCTS[id].name]),
+            ...L3_ORDER.map((id) => [`product:${id}`, L3_PRODUCTS[id].name])];
+  if (mode === 'satellite')
+    return [...SAT_CHANNELS.map((ch) => [`product:C${p2(ch.band)}`, `C${p2(ch.band)} · ${ch.name}`]),
+            ...SAT_RGB_ORDER.map((id) => [`product:RGB_${id}`, `${SAT_RGB[id].name} RGB`])];
+  if (mode === 'mrms')
+    return MRMS_ORDER.filter((id) => MRMS_PRODUCTS[id]).map((id) => [`product:${id}`, MRMS_PRODUCTS[id].name]);
+  if (mode === 'models')
+    return MODEL_ORDER.filter((id) => MODEL_PRODUCTS[id]).map((id) => [`product:${id}`, MODEL_PRODUCTS[id].name]);
+  return [];
+}
+
+// Human label for an action id (for the shortcut list).
+function actionLabel(action) {
+  if (action.startsWith('tool:')) {
+    const f = TOOL_ACTIONS.find(([id]) => id === action);
+    return f ? f[1] : action;
+  }
+  if (action.startsWith('playback:')) {
+    const f = PLAYBACK_ACTIONS.find(([id]) => id === action);
+    return f ? f[1] : action;
+  }
+  if (action.startsWith('product:')) {
+    const id = action.slice('product:'.length);
+    for (const mode of ['radar', 'satellite', 'mrms', 'models']) {
+      const f = productCatalog(mode).find(([a]) => a === action);
+      if (f) return f[1];
+    }
+    return id;
+  }
+  return action;
+}
+
+const KEYBIND_MODIFIER_CODES = new Set([
+  'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+]);
+
+// Canonicalise a keyboard event to a stable combo string using e.code (so it's
+// layout-independent and Shift+letter survives the shifted character). Returns
+// null for a bare modifier press.
+function keyComboFromEvent(e) {
+  const code = e.code || e.key;
+  if (!code || KEYBIND_MODIFIER_CODES.has(code)) return null;
+  const parts = [];
+  if (e.ctrlKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  if (e.metaKey) parts.push('Meta');
+  parts.push(code);
+  return parts.join('+');
+}
+
+// Pretty-print a combo for the UI ("Shift+KeyR" → "Shift + R").
+function keyComboLabel(combo) {
+  return combo.split('+').map((seg) => {
+    if (seg.startsWith('Key')) return seg.slice(3);
+    if (seg.startsWith('Digit')) return seg.slice(5);
+    if (seg === 'ArrowLeft') return '←';
+    if (seg === 'ArrowRight') return '→';
+    if (seg === 'ArrowUp') return '↑';
+    if (seg === 'ArrowDown') return '↓';
+    if (seg === 'Space') return 'Space';
+    if (seg === 'Ctrl' || seg === 'Alt' || seg === 'Shift' || seg === 'Meta') return seg;
+    return seg;
+  }).join(' + ');
+}
+
+// Build state.keybinds from storage (if any) or the defaults.
+function initKeybinds() {
+  const stored = state._storedKeybinds;
+  state.keybinds = {};
+  for (const scope of KEYBIND_SCOPES) {
+    const src = stored && typeof stored[scope] === 'object' ? stored[scope] : (stored ? {} : DEFAULT_KEYBINDS[scope]);
+    state.keybinds[scope] = { ...src };
+  }
+}
+
+// Run an action id by driving the matching button. Returns true if handled.
+function runKeyAction(action) {
+  if (typeof action !== 'string') return false;
+  if (action.startsWith('tool:')) {
+    const btn = el[TOOL_ACTION_BTN[action.slice(5)]];
+    if (btn) { btn.click(); return true; }
+    return false;
+  }
+  if (action.startsWith('playback:')) return runPlaybackAction(action.slice('playback:'.length));
+  if (action.startsWith('product:')) {
+    const id = action.slice('product:'.length);
+    const btns = el.productButtons ? el.productButtons.querySelectorAll('.product-btn') : [];
+    for (const b of btns) if (b.dataset.id === id) { b.click(); return true; }
+    return false;
+  }
+  return false;
+}
+
+function runPlaybackAction(which) {
+  const pb = state.playback;
+  if (!pb) return false;
+  if (which === 'loop') {
+    if (!pb.active) pb.start();
+    else pb.toggle();
+    return true;
+  }
+  if (which === 'next') return stepFrame(1);
+  if (which === 'prev') return stepFrame(-1);
+  return false;
+}
+
+// Step one frame: through the playback loop when it's running, otherwise through
+// the active source's scan/scene/frame (or model forecast-hour) list. dir is +1
+// for "later in time", −1 for "earlier".
+function stepFrame(dir) {
+  const pb = state.playback;
+  if (pb && pb.active && pb.frames.length) { pb.seek(pb.idx + dir); return true; }
+  if (state.mode === 'models') return stepButtonList(el.fhourList, dir > 0 ? 'next' : 'prev');
+  // The scan/scene/frame lists render newest-first, so "later" = previous row.
+  return stepButtonList(el.volumeList, dir > 0 ? 'prev' : 'next');
+}
+
+function stepButtonList(listEl, which) {
+  if (!listEl) return false;
+  const active = listEl.querySelector('button.active');
+  if (!active) {
+    const first = listEl.querySelector('button');
+    if (first) { first.click(); return true; }
+    return false;
+  }
+  const sib = which === 'next' ? active.nextElementSibling : active.previousElementSibling;
+  if (sib && sib.tagName === 'BUTTON') sib.click();
+  return true; // consume the key even at an end of the list
+}
+
+// Global keydown dispatcher. Skips typing targets and modal overlays, and yields
+// to the capture UI while a new combo is being recorded.
+function handleKeybind(e) {
+  if (state._captureKeybind) return;
+  const t = e.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|OPTION)$/.test(t.tagName))) return;
+  if (!el.sounding.hidden || !el.alertDetail.hidden || (el.alertPreview && !el.alertPreview.hidden)) return;
+  const combo = keyComboFromEvent(e);
+  if (!combo) return;
+  let action = state.keybinds.global[combo];
+  if (!action) action = (state.keybinds[state.mode] || {})[combo];
+  if (!action) return;
+  if (runKeyAction(action)) { e.preventDefault(); e.stopPropagation(); }
+}
+
+// Where a given action id is stored: tools/playback are global; products live in
+// the mode whose catalog lists them.
+function scopeForAction(action) {
+  if (action.startsWith('tool:') || action.startsWith('playback:')) return 'global';
+  for (const mode of ['radar', 'satellite', 'mrms', 'models'])
+    if (productCatalog(mode).some(([a]) => a === action)) return mode;
+  return 'global';
+}
+
+// Remove any existing binding of `combo` across every scope (a combo is unique).
+function clearCombo(combo) {
+  for (const scope of KEYBIND_SCOPES) delete state.keybinds[scope][combo];
+}
+
+function setupKeybinds() {
+  initKeybinds();
+  // Capture phase so a bound arrow/space reliably reaches us before Mapbox's
+  // own canvas keyboard pan/zoom handling (and we only act on real bindings).
+  document.addEventListener('keydown', handleKeybind, true);
+  setupKeybindControls();
+}
+
+// Capture the next key combo the user presses, then invoke `done(combo)`.
+function captureNextKey(done) {
+  state._captureKeybind = true;
+  const onKey = (e) => {
+    if (e.key === 'Escape') { finish(null); return; }
+    const combo = keyComboFromEvent(e);
+    if (!combo) return; // ignore bare modifier presses; wait for the real key
+    e.preventDefault();
+    e.stopPropagation();
+    finish(combo);
+  };
+  const finish = (combo) => {
+    document.removeEventListener('keydown', onKey, true);
+    state._captureKeybind = false;
+    done(combo);
+  };
+  document.addEventListener('keydown', onKey, true);
+}
+
+// Render the keyboard-shortcuts editor: every binding grouped by scope, each row
+// rebindable or removable, plus an "add a shortcut" picker (which also covers
+// satellite / MRMS / model products) and a reset-to-defaults button.
+function setupKeybindControls() {
+  const host = el.keybindControls;
+  if (!host) return;
+  const groups = [
+    ['global', 'Tools & playback'],
+    ['radar', 'Radar products'],
+    ['satellite', 'Satellite products'],
+    ['mrms', 'MRMS products'],
+    ['models', 'Model products'],
+  ];
+
+  const rowsHTML = groups.map(([scope, title]) => {
+    const binds = Object.entries(state.keybinds[scope] || {});
+    if (!binds.length && scope !== 'global' && scope !== 'radar') return '';
+    const rows = binds.length
+      ? binds.map(([combo, action]) => `
+          <div class="kb-row" data-combo="${escHtml(combo)}">
+            <span class="kb-act">${escHtml(actionLabel(action))}</span>
+            <button type="button" class="kb-key" data-combo="${escHtml(combo)}" title="Click, then press a new key">${escHtml(keyComboLabel(combo))}</button>
+            <button type="button" class="kb-remove" data-combo="${escHtml(combo)}" title="Remove shortcut">✕</button>
+          </div>`).join('')
+      : '<div class="kb-empty">No shortcuts.</div>';
+    return `<div class="kb-group"><div class="kb-group-title">${escHtml(title)}</div>${rows}</div>`;
+  }).join('');
+
+  // "Add a shortcut" picker: every assignable action across all categories.
+  const addOpts = [
+    `<optgroup label="Tools">${TOOL_ACTIONS.map(([id, l]) => `<option value="${id}">${escHtml(l)}</option>`).join('')}</optgroup>`,
+    `<optgroup label="Playback">${PLAYBACK_ACTIONS.map(([id, l]) => `<option value="${id}">${escHtml(l)}</option>`).join('')}</optgroup>`,
+    ...['radar', 'satellite', 'mrms', 'models'].map((mode) =>
+      `<optgroup label="${mode[0].toUpperCase() + mode.slice(1)} products">${productCatalog(mode)
+        .map(([id, l]) => `<option value="${id}">${escHtml(l)}</option>`).join('')}</optgroup>`),
+  ].join('');
+
+  host.innerHTML = `
+    ${rowsHTML}
+    <div class="kb-add">
+      <div class="kb-add-title">Add a shortcut</div>
+      <select id="kbAddAction" class="kb-add-action">${addOpts}</select>
+      <button type="button" id="kbAddKey" class="kb-key kb-add-key">Press a key…</button>
+    </div>
+    <button type="button" id="kbReset" class="kb-reset">Reset shortcuts to defaults</button>
+    <div id="kbHint" class="kb-hint"></div>`;
+
+  const hint = host.querySelector('#kbHint');
+  const setHint = (msg) => { if (hint) hint.textContent = msg || ''; };
+
+  // Rebind an existing shortcut: capture a new combo for the same action.
+  host.querySelectorAll('.kb-key[data-combo]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const oldCombo = btn.dataset.combo;
+      btn.textContent = 'Press a key…';
+      captureNextKey((combo) => {
+        if (!combo) { setupKeybindControls(); return; }
+        const action = findActionForCombo(oldCombo);
+        if (!action) { setupKeybindControls(); return; }
+        clearCombo(oldCombo);
+        clearCombo(combo);
+        state.keybinds[scopeForAction(action)][combo] = action;
+        saveSettings();
+        setupKeybindControls();
+      });
+    });
+  });
+
+  host.querySelectorAll('.kb-remove').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      clearCombo(btn.dataset.combo);
+      saveSettings();
+      setupKeybindControls();
+    });
+  });
+
+  const addKeyBtn = host.querySelector('#kbAddKey');
+  const addSel = host.querySelector('#kbAddAction');
+  if (addKeyBtn && addSel) {
+    addKeyBtn.addEventListener('click', () => {
+      const action = addSel.value;
+      addKeyBtn.textContent = 'Press a key…';
+      captureNextKey((combo) => {
+        if (!combo) { setHint('Cancelled.'); addKeyBtn.textContent = 'Press a key…'; return; }
+        clearCombo(combo);
+        state.keybinds[scopeForAction(action)][combo] = action;
+        saveSettings();
+        setupKeybindControls();
+      });
+    });
+  }
+
+  const resetBtn = host.querySelector('#kbReset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      state._storedKeybinds = null;
+      initKeybinds();
+      saveSettings();
+      setupKeybindControls();
+    });
+  }
+}
+
+// Find the action currently bound to a combo (searched across every scope).
+function findActionForCombo(combo) {
+  for (const scope of KEYBIND_SCOPES)
+    if (state.keybinds[scope][combo]) return state.keybinds[scope][combo];
+  return null;
+}
+
 // The line-style controls (roads, rivers) share one shape: a width multiplier
 // slider plus an optional colour override. Borders are always recoloured (no
 // "native" colour), so they get a plain colour picker.
@@ -4561,6 +4934,10 @@ function setupMapStyleControls() {
       <span>Town label thickness <b id="townThickVal">${ms.townThickness.toFixed(1)}</b></span>
       <input type="range" id="townThick" min="0" max="4" step="0.5" value="${ms.townThickness}">
     </label>
+    <label class="field opacity-field">
+      <span>Town label size <b id="townSizeVal">${ms.townSize.toFixed(1)}×</b></span>
+      <input type="range" id="townSize" min="0.5" max="3" step="0.1" value="${ms.townSize}">
+    </label>
     ${lineRows}`;
 
   const fontSel = host.querySelector('#townFontSelect');
@@ -4575,6 +4952,14 @@ function setupMapStyleControls() {
   thick.addEventListener('input', () => {
     ms.townThickness = Number(thick.value);
     thickVal.textContent = ms.townThickness.toFixed(1);
+    applyMapStyleLive();
+  });
+
+  const size = host.querySelector('#townSize');
+  const sizeVal = host.querySelector('#townSizeVal');
+  size.addEventListener('input', () => {
+    ms.townSize = Number(size.value);
+    sizeVal.textContent = ms.townSize.toFixed(1) + '×';
     applyMapStyleLive();
   });
 
@@ -4599,6 +4984,48 @@ function setupMapStyleControls() {
     });
     if (colorOn) colorOn.addEventListener('change', pushColor);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Freehand-draw tool appearance (colour + line width)
+// ---------------------------------------------------------------------------
+// Push the stored draw appearance into the live MapTools instance.
+function applyDrawStyle() {
+  if (!state.mapTools) return;
+  state.mapTools.setDrawColor(state.draw.color);
+  state.mapTools.setDrawWidth(state.draw.width);
+}
+
+function setupDrawStyleControls() {
+  const host = el.drawStyleControls;
+  if (!host) return;
+  const d = state.draw;
+  host.innerHTML = `
+    <div class="ms-line">
+      <span class="ms-line-name">Draw</span>
+      <label class="field opacity-field ms-line-width">
+        <span>Thickness <b id="drawWidthVal">${d.width.toFixed(1)}px</b></span>
+        <input type="range" id="drawWidth" min="1" max="10" step="0.5" value="${d.width}">
+      </label>
+      <div class="ms-line-color">
+        <input type="color" id="drawColor" value="${d.color}">
+      </div>
+    </div>`;
+
+  const width = host.querySelector('#drawWidth');
+  const widthVal = host.querySelector('#drawWidthVal');
+  width.addEventListener('input', () => {
+    state.draw.width = Number(width.value);
+    widthVal.textContent = state.draw.width.toFixed(1) + 'px';
+    applyDrawStyle();
+    saveSettings();
+  });
+  const color = host.querySelector('#drawColor');
+  color.addEventListener('input', () => {
+    state.draw.color = color.value;
+    applyDrawStyle();
+    saveSettings();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -4751,6 +5178,8 @@ function saveSettings() {
           ? { on: state.spc.enabled, product: state.spc.product, detail: state.spc.detail, opacity: state.spcOpacity }
           : { ...state._spc, opacity: state.spcOpacity },
         playbackFrames: state.playbackFrames,
+        draw: state.draw,
+        keybinds: state.keybinds,
         dockTool: state.dockTool,
         sat: {
           satKey: state.sat.satKey,
@@ -4808,6 +5237,11 @@ function applyStoredSettings(s) {
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
   if (typeof s.playbackFrames === 'number') state.playbackFrames = s.playbackFrames;
+  if (s.draw && typeof s.draw === 'object') {
+    if (typeof s.draw.color === 'string') state.draw.color = s.draw.color;
+    if (typeof s.draw.width === 'number' && s.draw.width > 0) state.draw.width = s.draw.width;
+  }
+  if (s.keybinds && typeof s.keybinds === 'object') state._storedKeybinds = s.keybinds;
   if (typeof s.dockTool === 'string') state.dockTool = s.dockTool;
   if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
   if (s.spc && typeof s.spc === 'object') {
@@ -5128,6 +5562,10 @@ function init() {
   setupMapStyleControls();
   // ---- Per-alert-kind appearance customisation ----
   setupAlertStyleControls();
+  // ---- Freehand-draw tool appearance ----
+  setupDrawStyleControls();
+  // ---- Keyboard shortcuts (products, tools, playback; user-customisable) ----
+  setupKeybinds();
 
   // ---- SPC convective outlook overlay (days 1–8) ----
   setupSpcOutlook();

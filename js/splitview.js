@@ -226,7 +226,7 @@ export class SplitView {
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, ['coalesce', ['get', 'width'], 2.4]],
         'line-opacity': 0.95,
       },
     });
@@ -236,7 +236,7 @@ export class SplitView {
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, 2.4],
+        'line-width': ['case', ['==', ['get', 'kind'], 'storm'], 3, ['coalesce', ['get', 'width'], 2.4]],
         'line-dasharray': [2, 1.6],
         'line-opacity': 0.95,
       },
