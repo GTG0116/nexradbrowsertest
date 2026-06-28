@@ -3246,32 +3246,19 @@ function applyResponsiveLayout() {
 // extra lanes mostly hide round-trip time.
 const PLAYBACK_CONCURRENCY = 6;
 
-// A model loop now spans *every* forecast hour of the run (GFS goes hourly to
-// F120 then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384). Caching
-// a decoded global grid *and* a GPU-ready texture for every one of those hours at
-// once exhausts memory and crashes the tab — the original GFS/AI-GFS failure. So
-// model playback streams: the timeline holds a slot for every hour, but only a
-// bounded *window* of decoded frames is kept resident at a time (prefetched ahead
-// of the play head, evicted behind it). The window is sized from a memory budget,
-// so short runs stay fully buffered while long ones page through safely.
-//
-// Budget scales with the device's reported RAM (navigator.deviceMemory, in GB;
-// absent on some browsers, so assume a modest 4 GB). A resident global frame is
-// ~8 MB (a ~4 MB max-pooled texture plus the ~4 MB grid kept for cursor readouts),
-// so e.g. a 360 MB budget holds ~45 hours at once.
-function modelPlaybackMemoryBudget() {
-  const gb = navigator.deviceMemory || 4;
-  return Math.max(120, Math.min(640, gb * 80)) * 1024 * 1024;
-}
-
-// Rough resident size of a prepared model frame: the max-pooled texture bytes plus
-// the decoded grid values retained for readouts. Used to size the resident window.
-function modelFrameBytes(payload) {
-  let b = 0;
-  if (payload && payload.tex && payload.tex.data) b += payload.tex.data.byteLength;
-  if (payload && payload.grid && payload.grid.values) b += payload.grid.values.byteLength;
-  return b || 8 * 1024 * 1024;
-}
+// A model loop spans *every* forecast hour of the run (GFS goes hourly to F120
+// then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384) and keeps them
+// all resident so the whole loop scrubs/plays instantly. The hazard is the *load*:
+// decoding a global GRIB allocates large transient buffers, and firing every hour
+// at once multiplies those spikes until the tab crashes — the GFS/AI-GFS failure.
+// So model frames load in **chunks**: a small batch decodes, the loop yields long
+// enough for the browser to paint and reclaim the transient decode buffers, then
+// the next batch starts. Steady, bounded allocation instead of one big spike.
+const MODEL_PLAYBACK_CHUNK = 6;       // forecast hours decoded per batch
+const MODEL_PLAYBACK_CHUNK_PAUSE = 120; // ms breather between batches (GC/paint)
+// Decode concurrency within a model batch — kept modest so the transient memory of
+// several in-flight GRIB decodes can't pile up the way 10 parallel lanes did.
+const MODEL_PLAYBACK_CONCURRENCY = 4;
 
 // A short key identifying the current playback context; when it changes (site,
 // product, run, sector…) the cached frames are no longer valid and are dropped.
@@ -3359,22 +3346,18 @@ async function buildPlaybackProvider() {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Span the *entire* run — every forecast hour gets a frame. The loop can't
-    // hold a decoded global grid + texture for all 200+ GFS hours at once, so it
-    // streams: only a bounded, memory-budgeted window of frames stays resident
-    // (see createPlayback's windowed loader), prefetched ahead of the play head
-    // and evicted behind it. Frames stream in progressively, so a long run is
-    // usable immediately, and the timeline still reaches every individual hour.
+    // Span the *entire* run — every forecast hour gets a frame, all kept resident
+    // so the full loop scrubs and plays without re-fetching. To avoid crashing the
+    // tab while decoding 200+ global GRIBs, the loader paces the work in chunks
+    // (see createPlayback.loadInChunks): a small batch at a time with a breather
+    // between batches, rather than slamming every hour through the decoder at once.
     const hours = forecastHours(run);
     return {
-      // Model frames are independent network fetches (a separate GRIB per hour),
-      // so a wider lane count hides more round-trip latency and fills the run
-      // faster than the radar default.
-      concurrency: 10,
-      // Stream a bounded resident window instead of holding the whole run.
-      windowed: true,
-      memoryBudget: modelPlaybackMemoryBudget(),
-      frameBytes: modelFrameBytes,
+      // Decode a few hours at a time so several in-flight GRIB decodes can't pile
+      // their transient buffers into a memory spike.
+      concurrency: MODEL_PLAYBACK_CONCURRENCY,
+      chunkSize: MODEL_PLAYBACK_CHUNK,
+      chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
       frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
@@ -3419,11 +3402,6 @@ function createPlayback() {
     cache: new Map(),
     cacheCtx: null,
     provider: null,
-    // Windowed streaming (model loops): only `maxResident` decoded frames are kept
-    // at once. `loading` tracks in-flight fetches so the pump never double-loads a
-    // frame. For non-windowed sources maxResident stays Infinity (load everything).
-    maxResident: Infinity,
-    loading: new Set(),
 
     async start() {
       if (this.active) return;
@@ -3453,12 +3431,6 @@ function createPlayback() {
       this.frames = provider.frames.map((f) => ({ ...f, payload: null, loaded: false }));
       this.idx = 0;
       this.loadedCount = 0;
-      this.loading.clear();
-      // Windowed sources stream a bounded resident set; everything else loads in
-      // full. The window size is computed from the budget once the first frame's
-      // real size is known (see pump); start optimistic so the pump fills lanes.
-      this.maxResident = Infinity;
-      this._windowSized = !provider.windowed;
       this.buildProgress();
       el.playScrub.max = String(this.frames.length - 1);
       el.playScrub.value = '0';
@@ -3466,8 +3438,7 @@ function createPlayback() {
       el.dockTime.textContent = this.frames[0].label;
       setStatus('loading playback…', true);
 
-      this.loadSeq++; // adopt a fresh sequence for this run's loaders
-      this.pump();
+      this.loadInChunks();
     },
 
     // Build the per-frame progress segments (grey now, green as frames arrive).
@@ -3485,100 +3456,64 @@ function createPlayback() {
       el.playScrubProg.appendChild(frag);
     },
 
-    // Forward (circular) distance of frame `i` from the play head. Frames just
-    // ahead of the head are needed soonest; the one just behind is needed last.
-    forwardDist(i) {
-      const n = this.frames.length;
-      return (i - this.idx + n) % n;
-    },
-
-    // The scheduler. Keeps the resident window centred ahead of the play head:
-    // evicts loaded frames that have fallen outside the window, then fills idle
-    // lanes by loading the nearest-ahead unloaded frames. Re-runs whenever the
-    // head moves (play tick / seek) or a frame finishes, so the buffer follows
-    // playback. For non-windowed sources maxResident is Infinity, so nothing is
-    // ever evicted and every frame is loaded in order — the original behaviour.
-    pump() {
-      if (!this.active || !this.provider) return;
+    // Load every frame, keeping them all resident, but pace the work in chunks so
+    // a long run can't spike memory and crash the tab. Each chunk decodes up to
+    // `chunkSize` frames with bounded concurrency; between chunks the loop waits
+    // `chunkPause` ms so the browser can paint and reclaim the transient decode
+    // buffers before the next batch. Sources that set no chunkSize/chunkPause
+    // (radar/MRMS/satellite) load in one pass with no pause — unchanged behaviour.
+    async loadInChunks() {
       const provider = this.provider;
       const total = this.frames.length;
-      const cap = Math.min(this.maxResident, total);
+      const seq = ++this.loadSeq;
+      const lanes = Math.min(provider.concurrency || PLAYBACK_CONCURRENCY, total);
+      const chunk = Math.max(lanes, provider.chunkSize || total);
+      const pause = provider.chunkPause || 0;
 
-      // Evict resident frames outside the window (furthest-ahead first === the
-      // frames just behind the head), freeing their decoded payloads.
-      if (cap < total) {
-        for (let i = 0; i < total; i++) {
-          const fr = this.frames[i];
-          if (fr.loaded && this.forwardDist(i) >= cap) {
-            this.cache.delete(fr.ck);
-            fr.payload = null;
-            fr.loaded = false;
-            this.loadedCount--;
-            if (this.segEls[i]) this.segEls[i].classList.remove('loaded');
+      for (let start = 0; start < total; start += chunk) {
+        if (!this.active || this.loadSeq !== seq) return; // bailed / restarted
+        const end = Math.min(start + chunk, total);
+        let next = start;
+        const worker = async () => {
+          while (this.active && this.loadSeq === seq) {
+            const i = next++;
+            if (i >= end) return;
+            await this.loadOne(i, seq);
           }
+        };
+        await Promise.all(Array.from({ length: Math.min(lanes, end - start) }, worker));
+        if (end < total && pause && this.active && this.loadSeq === seq) {
+          await new Promise((r) => setTimeout(r, pause));
         }
       }
 
-      // Fill idle lanes with the nearest-ahead unloaded in-window frames. Never
-      // run more lanes than the window holds, so a frame is never loaded only to
-      // be evicted before it's shown.
-      const lanes = Math.min(provider.concurrency || PLAYBACK_CONCURRENCY, cap);
-      const todo = [];
-      for (let i = 0; i < total; i++) {
-        const fr = this.frames[i];
-        if (this.forwardDist(i) < cap && !fr.loaded && !this.loading.has(fr.ck))
-          todo.push(i);
-      }
-      todo.sort((a, b) => this.forwardDist(a) - this.forwardDist(b));
-      while (this.loading.size < lanes && todo.length) this.loadFrame(todo.shift());
-
-      // Nothing resident, nothing loading, nothing left to try → all loads failed.
-      if (!this.loadedCount && !this.loading.size && !todo.length) {
-        setStatus('playback unavailable');
-        this.stop();
-      }
+      if (!this.active || this.loadSeq !== seq) return;
+      if (!this.loadedCount) { setStatus('playback unavailable'); this.stop(); return; }
+      setStatus(`playback · ${this.loadedCount}/${total} frames`);
     },
 
-    // Load one frame (from cache if present), then size the window from its real
-    // footprint on the first success and re-pump to keep lanes saturated.
-    async loadFrame(i) {
-      const provider = this.provider;
+    // Decode (or reuse from cache) a single frame, then mark it loaded and let the
+    // playback loop pick it up. Errors are logged and skipped so one bad hour can't
+    // stall the whole run.
+    async loadOne(i, seq) {
       const fr = this.frames[i];
-      const seq = this.loadSeq;
-      this.loading.add(fr.ck);
-      try {
-        let payload = this.cache.get(fr.ck);
-        if (!payload) {
-          payload = await provider.load(fr);
-          if (!this.active || this.loadSeq !== seq) return; // bailed / restarted
-          this.cache.set(fr.ck, payload);
+      let payload = this.cache.get(fr.ck);
+      if (!payload) {
+        try {
+          payload = await this.provider.load(fr);
+        } catch (e) {
+          console.error(e);
+          return;
         }
-        if (!this.active || this.loadSeq !== seq) return;
-        // Size the resident window once, from the first real frame: budget / bytes,
-        // clamped so we always keep a few frames but never more than the whole run.
-        if (!this._windowSized) {
-          this._windowSized = true;
-          const bytes = (provider.frameBytes ? provider.frameBytes(payload) : 0)
-            || 8 * 1024 * 1024;
-          const budget = provider.memoryBudget || (320 * 1024 * 1024);
-          this.maxResident = Math.max(6, Math.min(this.frames.length, Math.floor(budget / bytes)));
-        }
-        fr.payload = payload;
-        fr.loaded = true;
-        this.loadedCount++;
-        if (this.segEls[i]) this.segEls[i].classList.add('loaded');
-        this.onFrameLoaded(i);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        // Only touch the live loader state if this load still belongs to the
-        // current run — a restart clears `loading` and bumps loadSeq, so a stale
-        // finally must not delete the new run's in-flight marker or re-pump it.
-        if (this.loadSeq === seq) {
-          this.loading.delete(fr.ck);
-          if (this.active) this.pump();
-        }
+        if (!this.active || this.loadSeq !== seq) return; // bailed / restarted
+        this.cache.set(fr.ck, payload);
       }
+      if (!this.active || this.loadSeq !== seq) return;
+      fr.payload = payload;
+      fr.loaded = true;
+      this.loadedCount++;
+      if (this.segEls[i]) this.segEls[i].classList.add('loaded');
+      this.onFrameLoaded(i);
     },
 
     // React to a frame finishing: display the first one and start looping; for
@@ -3593,9 +3528,7 @@ function createPlayback() {
       } else if (i === this.idx) {
         this.renderFrame();
       } else if (!this.playing) {
-        el.playLabel.textContent = this.provider && this.provider.windowed
-          ? `buffering ${this.loadedCount} frames…`
-          : `loading ${this.loadedCount}/${this.frames.length}…`;
+        el.playLabel.textContent = `loading ${this.loadedCount}/${this.frames.length}…`;
       }
     },
 
@@ -3631,9 +3564,6 @@ function createPlayback() {
         this.idx = j;
         el.playScrub.value = String(this.idx);
         this.renderFrame();
-        // Slide the resident window forward with the play head: evict the frame
-        // just passed, prefetch the next ones in. No-op for non-windowed sources.
-        this.pump();
       }, 1000 / this.fps);
     },
 
@@ -3648,30 +3578,13 @@ function createPlayback() {
       this.playing ? this.pause() : this.play();
     },
 
-    // Scrub to a frame. If it's resident, show it. For a windowed source the
-    // target may not be decoded yet: recentre the window on it (pump streams it
-    // in) and show the nearest decoded frame as a placeholder until it arrives —
-    // so the scrubber can reach every hour, not just the buffered ones. For a
-    // fully-loaded (non-windowed) source, snap to the nearest loaded frame.
+    // Scrub to a frame. Frames load in order and stay resident, so a frame ahead
+    // of the loaded set isn't renderable yet — snap to the nearest loaded one (and
+    // reflect that on the slider) until the chunked loader reaches it.
     seek(i) {
       if (!this.frames.length) return;
       this.pause();
       i = Math.max(0, Math.min(this.frames.length - 1, i | 0));
-      if (this.frames[i].loaded) {
-        this.idx = i;
-        el.playScrub.value = String(i);
-        this.renderFrame();
-        this.pump();
-        return;
-      }
-      if (this.provider && this.provider.windowed) {
-        this.idx = i;
-        el.playScrub.value = String(i);
-        const j = this.nearestLoaded(i);
-        if (j >= 0) { this.idx = j; this.renderFrame(); this.idx = i; }
-        this.pump(); // recentres the resident window on i and streams it in
-        return;
-      }
       const j = this.nearestLoaded(i);
       if (j < 0) return;
       this.idx = j;
@@ -3691,12 +3604,8 @@ function createPlayback() {
       // Models: the displayed forecast hour is now the source of truth for the
       // picker, dock and any sounding opened mid-loop.
       if (state.mode === 'models') setDisplayedFhour(f.fhour);
-      // Fully buffered → no suffix. A windowed run that doesn't all fit is shown
-      // as "streaming" (loadedCount only ever reaches the window size); a normal
-      // run shows its loaded/total progress.
-      const suffix = this.loadedCount >= this.frames.length ? ''
-        : this.provider.windowed ? ' · streaming'
-        : ` · ${this.loadedCount}/${this.frames.length} loaded`;
+      const suffix = this.loadedCount < this.frames.length
+        ? ` · ${this.loadedCount}/${this.frames.length} loaded` : '';
       el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}${suffix}`;
       el.dockTime.textContent = f.label;
     },
