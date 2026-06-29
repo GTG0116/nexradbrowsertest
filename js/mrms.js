@@ -150,10 +150,13 @@ export const MRMS_PRODUCTS = {
   QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 250, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
 };
 
-// Composite reflectivity shares the single-site radar reflectivity color table
-// (resolved at render time in app.js), so all reflectivity looks the same and a
-// user-loaded reflectivity .pal applies here too.
-MRMS_PRODUCTS.REFC.reflectivity = true;
+// The MRMS reflectivity products all share the single-site radar reflectivity
+// color table (resolved at render time in app.js), so every dBZ field looks the
+// same and a user-loaded reflectivity .pal applies to all of them — not just the
+// composite.
+for (const id of ['REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C']) {
+  MRMS_PRODUCTS[id].reflectivity = true;
+}
 
 // MRMS products grouped into the menu sections the picker renders, in the order
 // they appear. MRMS_ORDER is derived from these so anything listed here is part

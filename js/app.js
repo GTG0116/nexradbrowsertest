@@ -1412,10 +1412,12 @@ function writePalStore(store) {
   }
 }
 
-// Apply a parsed palette to a product's color scale (no UI side effects).
-function applyPal(targetId, pal, name) {
-  const p = PRODUCTS[targetId];
-  if (!p) return;
+// Velocity palettes mirror onto storm-relative velocity: SRV is derived from the
+// same VEL moment, so loading a velocity color table recolours both.
+const PAL_MIRRORS = { VEL: ['SRV'] };
+
+// Apply a parsed palette to a single product's color scale (no UI side effects).
+function applyPalToProduct(p, pal, name) {
   ensureDefaultColorTable(p);
   // A .pal lists its thresholds in its own `Units`, but the shader and point
   // sampler work in the product's NATIVE unit (e.g. m/s for velocity). When the
@@ -1436,6 +1438,17 @@ function applyPal(targetId, pal, name) {
   p.range = [p.scale.lo, p.scale.hi];
   p.dispOffset = 0;
   p.customPal = name;
+}
+
+// Apply a parsed palette to a target product, plus any mirrored products (e.g.
+// a velocity table also recolours storm-relative velocity).
+function applyPal(targetId, pal, name) {
+  const p = PRODUCTS[targetId];
+  if (!p) return;
+  applyPalToProduct(p, pal, name);
+  for (const mirrorId of PAL_MIRRORS[targetId] || []) {
+    if (PRODUCTS[mirrorId]) applyPalToProduct(PRODUCTS[mirrorId], pal, name);
+  }
 }
 
 function applyCustomColorTable(targetId, segments, name, units) {
