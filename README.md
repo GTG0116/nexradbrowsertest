@@ -270,9 +270,13 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   products combine cell-for-cell after resampling.
 - Composite reflectivity uses the **shared reflectivity color table** — the same
   one as MRMS and single-site radar — so a `.pal` loaded for single-site
-  reflectivity recolours all three at once; the other fields carry their own
-  meteorologically conventional color scales with imperial-unit readouts (°F,
-  mph, inches).
+  reflectivity recolours all of them at once. On the MRMS side every reflectivity
+  field (composite, low-level, lowest-altitude, and the 0 °C / −20 °C isotherm
+  reflectivities) borrows that table too, not just the composite. The other
+  fields carry their own meteorologically conventional color scales with
+  imperial-unit readouts (°F, mph, inches). A loaded **velocity** `.pal` likewise
+  recolours **storm-relative velocity**, since SRV is derived from the same VEL
+  moment.
 - **Forecast-hour selection**: a run (cycle) exposes its full set of forecast
   hours (F00–F18, out to F48 for the synoptic 00/06/12/18z runs), pickable from
   the right rail like radar elevation tilts.
