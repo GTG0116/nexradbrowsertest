@@ -366,15 +366,93 @@ export class OutlookController {
     if (!this.enabled || this.product !== 'spc_md') return;
     if (this.els.suppressClick && this.els.suppressClick()) return; // a map tool owns the click
     if (!this.map.getLayer('spc-outlook-fill')) return;
-    const feats = this.map.queryRenderedFeatures(e.point, { layers: ['spc-outlook-fill'] });
-    if (feats.length) this._openMd(feats[0]);
+    const mdFeats = this.map.queryRenderedFeatures(e.point, { layers: ['spc-outlook-fill'] });
+    const alertCtrl = this.els.alertController && this.els.alertController();
+    const alertIds = alertCtrl && alertCtrl.alertIdsAtPoint ? alertCtrl.alertIdsAtPoint(e.point, this.map) : [];
+    const items = [];
+    const seenMd = new Set();
+    for (const f of mdFeats) {
+      const p = f.properties || {};
+      const key = p.popupinfo || p.name || JSON.stringify(f.geometry || {});
+      if (seenMd.has(key)) continue;
+      seenMd.add(key);
+      items.push({ kind: 'md', feature: f, key });
+    }
+    for (const id of alertIds) items.push({ kind: 'alert', id });
+    if (items.length) this._openStack(items);
   }
 
-  async _openMd(feature) {
+  _openStack(items) {
+    if (this.els.closeAlerts) this.els.closeAlerts();
+    this._stack = items;
+    this._stackIndex = 0;
+    document.querySelector('.app')?.classList.add('alert-preview-open');
+    this._renderStackPreview();
+  }
+
+  _stackItem() {
+    return this._stack && this._stack[this._stackIndex];
+  }
+
+  _cycleStack(delta) {
+    if (!this._stack || this._stack.length < 2) return;
+    this._stackIndex = (this._stackIndex + delta + this._stack.length) % this._stack.length;
+    this._renderStackPreview();
+  }
+
+  _stackNavHTML() {
+    const multi = this._stack && this._stack.length > 1;
+    if (!multi) return { dots: '', nav: '' };
+    const dots = `<div class="apv-dots">${this._stack
+      .map((_, i) => `<span class="apv-dot${i === this._stackIndex ? ' on' : ''}"></span>`)
+      .join('')}</div>`;
+    const nav = `<div class="apv-nav">
+      <button class="apv-nav-btn" data-dir="-1" aria-label="Previous item">‹</button>
+      <button class="apv-nav-btn" data-dir="1" aria-label="Next item">›</button>
+    </div>`;
+    return { dots, nav };
+  }
+
+  _renderStackPreview() {
+    const item = this._stackItem();
+    if (!item) return this.closeMd();
+    if (item.kind === 'alert') return this._renderAlertStackPreview(item.id);
+    this._openMd(item.feature, true);
+  }
+
+  _renderAlertStackPreview(id) {
+    const alertCtrl = this.els.alertController && this.els.alertController();
+    const data = alertCtrl && alertCtrl.previewData && alertCtrl.previewData(id);
+    const wrap = this.els.previewWrap, card = this.els.previewCard;
+    if (!data || !wrap || !card) return;
+    const { dots, nav } = this._stackNavHTML();
+    const rows = data.rows.map(([k, v]) => `<div class="apv-row"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
+    card.innerHTML = `
+      <header class="apv-head" style="--ac:${data.color}">
+        <span class="apv-icon">⚠</span>
+        <div class="apv-htext">
+          <h3>${esc(data.title)}</h3>
+          <span class="apv-area">${esc(data.area)}</span>
+        </div>
+        <button class="apv-close" aria-label="Close">✕</button>
+      </header>
+      <div class="apv-body">${rows}${dots}</div>
+      <footer class="apv-foot">
+        ${nav}
+        <button class="apv-details">View full briefing →</button>
+      </footer>`;
+    wrap.hidden = false;
+    card.querySelector('.apv-close').addEventListener('click', () => this.closeMd());
+    card.querySelector('.apv-details').addEventListener('click', () => this._openStackBriefing());
+    card.querySelectorAll('.apv-nav-btn')
+      .forEach((b) => b.addEventListener('click', () => this._cycleStack(Number(b.dataset.dir))));
+  }
+
+  async _openMd(feature, stacked = false) {
     const p = feature.properties || {};
     const url = p.popupinfo || '';
     const name = p.name || 'Mesoscale Discussion';
-    if (this.els.closeAlerts) this.els.closeAlerts(); // MD and alerts share the chrome
+    if (!stacked && this.els.closeAlerts) this.els.closeAlerts(); // MD and alerts share the chrome
     const mine = (this._mdSeq = (this._mdSeq || 0) + 1);
     // Show the card immediately with a loading state, then fill in the detail.
     this._md = { number: (name.match(/\d+/) || [''])[0], url, loading: true };
@@ -400,8 +478,7 @@ export class OutlookController {
     if (md.hail) boxes.push(`<div class="hz"><span>HAIL</span><b>${esc(md.hail)}</b></div>`);
     if (!boxes.length) return '';
     return `<div class="md-peak-title">Most Probable Peak Intensity</div>
-      <div class="alert-hazards">${boxes.join('')}</div>
-      <div class="md-scale"><span>Min</span><div class="md-scale-bar"></div><span>Max</span></div>`;
+      <div class="alert-hazards">${boxes.join('')}</div>`;
   }
 
   _renderMdPreview(name) {
@@ -419,6 +496,7 @@ export class OutlookController {
       if (md.watchProb != null) rows.push(`<div class="apv-row"><span>Watch Prob.</span><b>${md.watchProb}%</b></div>`);
       body = rows.join('') + this._mdHazardsHTML(md);
     }
+    const stackChrome = this._stack ? this._stackNavHTML() : { dots: '', nav: '' };
     card.innerHTML = `
       <header class="apv-head" style="--ac:${ac}">
         <span class="apv-icon">▦</span>
@@ -428,14 +506,59 @@ export class OutlookController {
         </div>
         <button class="apv-close" aria-label="Close">✕</button>
       </header>
-      <div class="apv-body">${body}</div>
+      <div class="apv-body">${body}${stackChrome.dots}</div>
       <footer class="apv-foot">
+        ${stackChrome.nav}
         <button class="apv-details"${md.loading || md.error ? ' disabled' : ''}>View full briefing →</button>
       </footer>`;
     wrap.hidden = false;
     card.querySelector('.apv-close').addEventListener('click', () => this.closeMd());
     const det = card.querySelector('.apv-details');
-    if (det && !md.loading && !md.error) det.addEventListener('click', () => this._openMdBriefing());
+    if (det && !md.loading && !md.error) det.addEventListener('click', () => this._stack ? this._openStackBriefing() : this._openMdBriefing());
+    card.querySelectorAll('.apv-nav-btn')
+      .forEach((b) => b.addEventListener('click', () => this._cycleStack(Number(b.dataset.dir))));
+  }
+
+  _openStackBriefing() {
+    const item = this._stackItem();
+    if (!item) return;
+    if (this.els.previewWrap) this.els.previewWrap.hidden = true;
+    const app = document.querySelector('.app');
+    if (app) {
+      app.classList.remove('alert-preview-open');
+      app.classList.add('alert-mode');
+      app.classList.toggle('alert-split-mode', !!document.querySelector('.map-wrap.split'));
+    }
+    const nav = this._stack && this._stack.length > 1
+      ? `<div class="alert-nav">
+           <button class="alert-nav-btn" data-dir="-1" aria-label="Previous item">â€¹</button>
+           <span class="alert-nav-count">${this._stackIndex + 1} / ${this._stack.length} items here</span>
+           <button class="alert-nav-btn" data-dir="1" aria-label="Next item">â€º</button>
+         </div>`
+      : '';
+    let html = '';
+    if (item.kind === 'alert') {
+      const alertCtrl = this.els.alertController && this.els.alertController();
+      const a = alertCtrl && alertCtrl.alertById && alertCtrl.alertById(item.id);
+      html = a && alertCtrl.sectionHTML ? alertCtrl.sectionHTML(a, true) : '';
+    } else {
+      const md = this._md;
+      if (!md || md.error || md.loading) return;
+      html = this._renderMdBriefing(md);
+    }
+    if (this.els.detailPanel) {
+      this.els.detailPanel.innerHTML = nav + html;
+      this.els.detailPanel.scrollTop = 0;
+      this.els.detailPanel.querySelectorAll('.alert-nav-btn')
+        .forEach((b) => b.addEventListener('click', async () => {
+          this._stackIndex = (this._stackIndex + Number(b.dataset.dir) + this._stack.length) % this._stack.length;
+          const next = this._stackItem();
+          if (next && next.kind === 'md') await this._openMd(next.feature, true);
+          this._openStackBriefing();
+        }));
+    }
+    if (this.els.detailWrap) this.els.detailWrap.hidden = false;
+    setTimeout(() => this.map && this.map.resize(), 60);
   }
 
   _openMdBriefing() {
@@ -491,9 +614,11 @@ export class OutlookController {
   closeMd() {
     this._mdSeq = (this._mdSeq || 0) + 1; // cancel any in-flight fetch
     this._md = null;
+    this._stack = null;
+    this._stackIndex = 0;
     if (this.els.previewWrap) this.els.previewWrap.hidden = true;
     if (this.els.detailWrap) this.els.detailWrap.hidden = true;
     const app = document.querySelector('.app');
-    if (app) app.classList.remove('alert-mode', 'alert-split-mode');
+    if (app) app.classList.remove('alert-mode', 'alert-split-mode', 'alert-preview-open');
   }
 }

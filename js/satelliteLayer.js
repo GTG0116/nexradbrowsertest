@@ -141,9 +141,11 @@ function mercY(lat) {
   return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
 }
 
+export const SATELLITE_LAYER_ID = 'radarnexus-satellite';
+
 export function createSatelliteLayer() {
   return {
-    id: 'satellite',
+    id: SATELLITE_LAYER_ID,
     type: 'custom',
     renderingMode: '2d',
 
@@ -186,10 +188,13 @@ export function createSatelliteLayer() {
     // scene: from goes.loadScene; rgba: Uint8Array(W*H*4) from buildRGBA;
     // bbox: [w,s,e,n] from goes.sceneBBox.
     setScene(scene, rgba, bbox) {
-      const w = mercX(bbox[0]);
-      const e = mercX(bbox[2]);
-      const n = mercY(bbox[3]);
-      const s = mercY(bbox[1]);
+      const valid = bbox && bbox.every((v) => Number.isFinite(v)) &&
+        bbox[0] < bbox[2] && bbox[1] < bbox[3];
+      const bb = valid ? bbox : [-180, -85, 180, 85];
+      const w = mercX(bb[0]);
+      const e = mercX(bb[2]);
+      const n = mercY(Math.max(-85, Math.min(85, bb[3])));
+      const s = mercY(Math.max(-85, Math.min(85, bb[1])));
       const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
 
       this.pending = {

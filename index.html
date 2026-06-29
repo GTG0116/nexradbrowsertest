@@ -43,27 +43,34 @@
     <div id="mbxGate" class="mbx-gate" hidden>
       <div class="mbx-gate-card">
         <div class="mbx-gate-kicker">RadarNexus · setup</div>
-        <h2>Add your Mapbox token</h2>
+        <h2>Add a map key</h2>
         <p>
-          The basemap is drawn with Mapbox GL. To keep this viewer free to host,
-          RadarNexus uses <b>your own</b> Mapbox public access token — it stays in
-          this browser only (localStorage) and is never sent anywhere but Mapbox.
+          The basemap is drawn with your own public map key. Pick Mapbox or
+          MapTiler; the key stays in this browser only (localStorage) and is sent
+          only to the provider you choose.
         </p>
         <ol class="mbx-gate-steps">
-          <li>Create a free account at <a href="https://account.mapbox.com/auth/signup/" target="_blank" rel="noopener">mapbox.com</a>.</li>
-          <li>Copy your <b>default public token</b> from <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener">account → tokens</a> (it starts with <code>pk.</code>).</li>
-          <li>Paste it below. The free tier covers ~50k map loads/month.</li>
+          <li>Mapbox keys come from <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener">account tokens</a> and start with <code>pk.</code>.</li>
+          <li>MapTiler keys come from <a href="https://cloud.maptiler.com/account/keys/" target="_blank" rel="noopener">Cloud keys</a>.</li>
+          <li>Paste the public key below.</li>
         </ol>
+        <label class="field mbx-provider-field">
+          <span>Provider</span>
+          <select id="mbxGateProvider">
+            <option value="mapbox">Mapbox</option>
+            <option value="maptiler">MapTiler</option>
+          </select>
+        </label>
         <input
           type="text"
           id="mbxGateInput"
           class="mbx-gate-input"
-          placeholder="pk.eyJ1Ijoi…"
+          placeholder="pk.eyJ1Ijoi..."
           autocomplete="off"
           spellcheck="false"
         />
         <div id="mbxGateError" class="mbx-gate-error"></div>
-        <button id="mbxGateSave" class="mbx-gate-save">Save token &amp; launch</button>
+        <button id="mbxGateSave" class="mbx-gate-save">Save key &amp; launch</button>
       </div>
     </div>
 
@@ -152,18 +159,18 @@
             <div id="map"></div>
             <div id="map2" hidden></div>
 
-            <!-- Floating time readout in the upper-left corner. By default it
-                 shows the time of the selected product's frame (radar scan, MRMS
-                 / satellite image, or model forecast hour + valid time); the
-                 "Now" button switches it to the live wall clock, and the tz
-                 button toggles UTC ↔ the viewer's local time zone. -->
-            <div id="timeBar" class="time-bar">
-              <span id="clock" class="clock">--- -- --:--:-- UTC</span>
-              <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
-              <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+            <div id="mapHud" class="map-hud">
+              <!-- Time + legend share the same top HUD so frame time, clock mode,
+                   and product scale read as one control surface. -->
+              <div id="timeBar" class="time-bar">
+                <span id="clock" class="clock">--- -- --:--:-- UTC</span>
+                <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
+                <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+              </div>
+              <div id="legend" class="legend"></div>
             </div>
 
-            <!-- Map tools: draw / measure / storm track / METARs / split view -->
+            <!-- Map tools: draw / measure / storm track / METARs -->
             <div id="mapTools" class="map-tools">
               <button id="toolDraw" class="map-tool" title="Draw (freehand)">✎</button>
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area">📏</button>
@@ -171,9 +178,14 @@
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
               <button id="toolWeather" class="map-tool" title="Local current conditions">☼</button>
               <button id="toolLocate" class="map-tool" title="Show my live location">📍</button>
-              <button id="toolSplit" class="map-tool" title="Split screen (compare products)">⊟</button>
               <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
-              <button id="toolClear" class="map-tool" title="Clear drawings">✕</button>
+            </div>
+            <div id="drawToolPopup" class="tool-popover" hidden>
+              <div class="tool-popover-head">
+                <span id="drawToolPopupTitle">Draw</span>
+                <button id="toolClear" class="pal-btn ghost" type="button">Clear drawings</button>
+              </div>
+              <div id="drawStyleControls" class="mapstyle-controls"></div>
             </div>
 
             <div id="mapReadout" class="map-readout"></div>
@@ -206,7 +218,6 @@
             <div id="progress" class="progress"></div>
             <div id="decoding" class="decoding">DECODING</div>
           </div>
-          <div id="legend" class="legend"></div>
         </section>
 
         <!-- Right rail: products & metadata -->
@@ -238,6 +249,10 @@
               <span>Playback loop</span>
               <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
             </div>
+            <div class="toggle-field" id="splitField">
+              <span>Split screen</span>
+              <button id="toolSplit" class="alerts-toggle" title="Compare products in a synced split screen">OFF</button>
+            </div>
             <label class="field opacity-field" id="playFramesField">
               <span>Playback frames <b id="playFramesVal">5</b></span>
               <input type="range" id="playFrames" min="2" max="20" value="5" />
@@ -245,6 +260,7 @@
             <div class="pal-row">
               <label class="pal-btn" for="palInput">⤓ Load .pal</label>
               <input type="file" id="palInput" accept=".pal,.txt" hidden />
+              <button id="palCreate" class="pal-btn" type="button">Create</button>
               <button id="palReset" class="pal-btn ghost">Reset</button>
             </div>
             <div id="palName" class="pal-name"></div>
@@ -252,6 +268,13 @@
 
           <section class="panel" id="basemapPanel">
             <h2 class="panel-title">Map settings</h2>
+            <label class="field">
+              <span>Map provider</span>
+              <select id="mapProviderSelect">
+                <option value="mapbox">Mapbox</option>
+                <option value="maptiler">MapTiler</option>
+              </select>
+            </label>
             <label class="field">
               <span>Map style</span>
               <select id="basemapSelect">
@@ -266,6 +289,13 @@
               <span>Range rings</span>
               <button id="ringsToggle" class="alerts-toggle active" title="Toggle range rings">ON</button>
             </div>
+            <label class="field">
+              <span>Radar site icons</span>
+              <select id="siteMarkerSelect">
+                <option value="dot">Dots</option>
+                <option value="pill">Pills with ID</option>
+              </select>
+            </label>
             <div class="toggle-field">
               <span>Remember view &amp; settings</span>
               <button id="persistToggle" class="alerts-toggle active" title="Save map position, last product and settings between visits">ON</button>
@@ -277,10 +307,6 @@
             <details class="panel-details" id="alertStyleDetails">
               <summary>Customize alert appearance</summary>
               <div id="alertStyleControls" class="alertstyle-controls"></div>
-            </details>
-            <details class="panel-details" id="drawStyleDetails">
-              <summary>Draw tool style</summary>
-              <div id="drawStyleControls" class="mapstyle-controls"></div>
             </details>
             <details class="panel-details" id="keybindDetails">
               <summary>Keyboard shortcuts</summary>
@@ -441,6 +467,26 @@
       <div id="alertDetail" class="alert-detail" hidden>
         <button id="alertClose" class="alert-close" title="Close (Esc)">✕</button>
         <div id="alertDetailPanel" class="alert-detail-panel scroll"></div>
+      </div>
+
+      <div id="palCreator" class="pal-creator" hidden>
+        <div class="pal-creator-card">
+          <button id="palCreatorClose" class="weather-picker-close" title="Close color-table creator">✕</button>
+          <h2 class="panel-title">Create color table</h2>
+          <label class="field">
+            <span>Name</span>
+            <input type="text" id="palCreatorName" class="mbx-gate-input" value="Custom table" />
+          </label>
+          <label class="field">
+            <span>Product</span>
+            <select id="palCreatorProduct"></select>
+          </label>
+          <div id="palCreatorStops" class="pal-stop-list"></div>
+          <div class="pal-creator-actions">
+            <button id="palAddStop" class="pal-btn" type="button">Add stop</button>
+            <button id="palSaveCustom" class="pal-btn" type="button">Save table</button>
+          </div>
+        </div>
       </div>
 
       <footer class="footer">

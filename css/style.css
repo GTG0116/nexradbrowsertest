@@ -614,12 +614,95 @@ input[type='range']::-moz-range-thumb {
   word-break: break-all;
 }
 
-/* ---------------- Legend ---------------- */
-.legend {
+.pal-creator {
+  position: fixed;
+  inset: 0;
+  z-index: 3900;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(2, 6, 14, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.pal-creator-card {
+  position: relative;
+  width: min(520px, calc(100vw - 36px));
+  max-height: min(720px, calc(100vh - 36px));
+  overflow: auto;
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: var(--panel);
-  padding: 12px 16px;
+  background: linear-gradient(180deg, rgba(18, 30, 54, 0.96), rgba(9, 16, 30, 0.96));
+  box-shadow: var(--glow), 0 24px 64px rgba(0, 0, 0, 0.55);
+  padding: 18px;
+}
+.pal-stop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.pal-stop-row {
+  display: grid;
+  grid-template-columns: 1fr 42px 32px;
+  align-items: center;
+  gap: 8px;
+}
+.pal-stop-row input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  background: rgba(8, 16, 32, 0.8);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  color: var(--ink);
+  font: 13px 'JetBrains Mono', monospace;
+  padding: 8px 9px;
+}
+.pal-stop-remove {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.pal-stop-remove:hover {
+  color: #ff8a8a;
+  border-color: #ff8a8a;
+}
+.pal-creator-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ---------------- Map HUD: time + legend ---------------- */
+.map-hud {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  z-index: 650;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: min(760px, calc(100% - 112px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.map-hud > * {
+  pointer-events: auto;
+}
+.legend {
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: rgba(8, 14, 26, 0.84);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 10px 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  flex: 1 1 360px;
+  min-width: 240px;
 }
 .legend-title {
   font-size: 12px;
@@ -645,22 +728,20 @@ input[type='range']::-moz-range-thumb {
   margin-top: 5px;
 }
 
-/* ---------------- Time bar (floats over the map, upper-left) ---------------- */
+/* ---------------- Time bar (integrated into the map HUD) ---------------- */
 .time-bar {
-  position: absolute;
-  top: calc(10px + env(safe-area-inset-top, 0px));
-  left: calc(10px + env(safe-area-inset-left, 0px));
-  z-index: 640;
+  position: static;
   display: flex;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--panel-edge);
-  border-radius: 999px;
-  background: rgba(8, 14, 26, 0.82);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  padding: 5px 8px 5px 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  border-radius: 10px;
+  background: rgba(8, 14, 26, 0.84);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 10px 10px 10px 12px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  min-width: max-content;
 }
 .time-bar .clock {
   font-family: 'JetBrains Mono', monospace;
@@ -995,8 +1076,7 @@ input[type='range']::-moz-range-thumb {
 /* ---------------- Alert briefing (full-screen) ---------------- */
 .app.alert-mode .topbar,
 .app.alert-mode .rail,
-.app.alert-mode .stage > .legend,
-.app.alert-mode .time-bar,
+.app.alert-mode .map-hud,
 .app.alert-mode .footer {
   display: none;
 }
@@ -1405,20 +1485,6 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
   margin: 8px 0 5px;
 }
-.md-scale {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: -6px 0 14px;
-  font-size: 10px;
-  color: var(--ink-dim);
-}
-.md-scale-bar {
-  flex: 1;
-  height: 10px;
-  border-radius: 5px;
-  background: linear-gradient(90deg, #f4e7c1, #e8b04e, #e2772e, #d8392a, #a3174a, #e600e6);
-}
 .md-concern {
   margin: 4px 0 14px;
   padding: 10px 12px;
@@ -1595,18 +1661,38 @@ input[type='range']::-moz-range-thumb {
     border: none;
     border-radius: 0;
   }
-  /* Float the legend over the top of the map, clear of the status bar / notch. */
-  .legend {
-    position: absolute;
-    /* Sits below the floating time pill so the two don't overlap at the top. */
-    top: calc(8px + env(safe-area-inset-top, 0px) + 44px);
-    left: 50%;
-    right: auto;
-    transform: translateX(-50%);
-    width: min(440px, calc(100vw - 16px));
-    z-index: 650;
+  .map-hud {
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    /* The floating tool column is hidden on mobile (it lives in the dock), so the
+       HUD no longer has to reserve room for it on the right — use nearly the full
+       width. The old 92px reserve left the centred clock too narrow, so its right
+       edge ("…UTC") spilled past the time-bar border on narrow phones. */
+    width: min(560px, calc(100vw - 24px));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .map-hud .legend {
+    width: 100%;
+    min-width: 0;
     margin: 0;
+    /* The HUD stacks vertically on mobile, so the base `flex: 1 1 360px` would
+       treat 360px as the legend's *height* (main axis is now vertical) — that was
+       the tall, mostly-empty legend box. Size it to its content instead. */
+    flex: 0 0 auto;
     transition: opacity 0.2s ease;
+  }
+  .map-hud .time-bar {
+    justify-content: center;
+    min-width: 0;
+    width: 100%;
+    /* Never let the clock + toggles overflow the bar; they wrap instead. */
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .map-tools,
+  .tool-popover {
+    top: calc(116px + env(safe-area-inset-top, 0px));
   }
   /* The on-screen zoom buttons collide with the floating UI / bottom dock;
      pinch-zoom covers it on touch, so drop the control corners entirely
@@ -1668,6 +1754,33 @@ input[type='range']::-moz-range-thumb {
 @media (max-width: 520px) {
   .product-grid {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Phone-only HUD/tool fixes. Scoped below 760px so the iPad/desktop tier (which
+   reuses the dock UI but has the room to keep tools top-right) is untouched. */
+@media (max-width: 759.98px) {
+  /* Shrink the clock a touch so the UTC date/time can't spill past the time-bar's
+     right edge on narrow phones. */
+  .map-hud .time-bar .clock {
+    font-size: 12px;
+    letter-spacing: 0;
+  }
+  /* The floating tool column is hidden on phones (tools live in the dock), so the
+     draw/measure popover's old right:58px anchor pointed at nothing — leaving its
+     colour/width controls stranded off to the side. Re-dock it as a centred card
+     just above the bottom dock, within thumb reach and clear of the top HUD. */
+  .tool-popover {
+    top: auto;
+    right: 12px;
+    left: 12px;
+    /* Clear the bottom dock (≈90px tall with the safe-area inset) and sit above it
+       in the stack so its controls are fully tappable. */
+    bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-width: 360px;
+    margin: 0 auto;
+    z-index: 720;
   }
 }
 
@@ -1789,14 +1902,27 @@ input[type='range']::-moz-range-thumb {
     width: 460px;
     max-width: 60vw;
   }
-  /* Keep the floating legend a compact, centered card rather than a full-bleed
-     bar across a wide monitor. */
-  .legend {
+  /* Keep the legend compact inside the top HUD on wide monitors. */
+  .map-hud {
+    width: min(820px, calc(100vw - 150px));
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .map-hud .time-bar,
+  .map-hud .legend {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+  .map-hud .legend {
     font-size: 12px;
-    left: 50%;
-    right: auto;
-    transform: translateX(-50%);
-    width: min(440px, 60vw);
+    padding-top: 9px;
+    padding-bottom: 8px;
+  }
+  .map-tools,
+  .tool-popover {
+    top: calc(70px + env(safe-area-inset-top, 0px));
   }
 }
 
@@ -2685,6 +2811,42 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--glow);
 }
 
+.tool-popover {
+  position: absolute;
+  top: 12px;
+  right: 58px;
+  z-index: 620;
+  width: 230px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: rgba(8, 14, 26, 0.9);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  padding: 10px;
+}
+.tool-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink);
+  font: 700 11px 'JetBrains Mono', monospace;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.tool-popover .mapstyle-controls {
+  padding: 0;
+}
+.tool-popover.measure-only .mapstyle-controls {
+  display: none;
+}
+.tool-popover .pal-btn {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  font-size: 10px;
+}
+
 /* METAR station plots (HTML markers). */
 .metar-plot {
   pointer-events: auto;
@@ -2831,8 +2993,7 @@ input[type='range']::-moz-range-thumb {
    footer, playback bar) so the track + town labels read cleanly. The storm card
    stays — it's the control surface for the tool. */
 body.storm-active .mobile-dock,
-body.storm-active .legend,
-body.storm-active .time-bar,
+body.storm-active .map-hud,
 body.storm-active .footer,
 body.storm-active .playback-bar {
   display: none !important;
@@ -3582,6 +3743,9 @@ body.storm-active .playback-bar {
     box-shadow 220ms var(--ease-out);
   will-change: transform, opacity;
 }
+.map-hud .weather-card {
+  transform: translateY(var(--wx-swipe-y, 0));
+}
 .weather-card.wx-swipe-down { animation: wxSwipeDownIn 360ms var(--ease-out); }
 .weather-card.wx-swipe-up { animation: wxSwipeUpIn 360ms var(--ease-out); }
 /* Keyframes override `transform`, so they too must carry translateX(-50%) or the
@@ -3767,6 +3931,9 @@ body.storm-active .playback-bar {
   text-decoration: none;
 }
 .mbx-gate-card a:hover { text-decoration: underline; }
+.mbx-provider-field {
+  margin: 10px 0;
+}
 .mbx-gate-input {
   width: 100%;
   font-family: 'JetBrains Mono', monospace;

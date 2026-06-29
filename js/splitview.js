@@ -12,7 +12,7 @@
 
 import { createRadarLayer } from './radarLayer.js';
 import { createGridLayer } from './gridLayer.js';
-import { createSatelliteLayer } from './satelliteLayer.js';
+import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { PRODUCTS, PRODUCT_ORDER, reflectivityProduct } from './products.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel, modelSupports } from './models.js';
@@ -25,7 +25,7 @@ const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
 
 // Layer-stack helpers — kept in sync with app.js. Two anchors: the label anchor
 // (first admin/boundary line) for annotations + our redrawn borders, and the data
-// anchor (first road layer) for the data layer, so the basemap's roads, borders
+// anchor (first road/transportation layer) for the data layer, so the basemap's roads, borders
 // and labels all draw on top of the radar/satellite/grid data.
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
@@ -41,7 +41,8 @@ function firstLabelLayerId(map) {
 function dataLayerAnchor(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
-    if ((ly.type === 'line' || ly.type === 'symbol') && ly['source-layer'] === 'road')
+    if ((ly.type === 'line' || ly.type === 'symbol') &&
+        (ly['source-layer'] === 'road' || ly['source-layer'] === 'transportation'))
       return ly.id;
   }
   for (const ly of layers) {
@@ -72,7 +73,7 @@ export class SplitView {
   enable() {
     if (this.active) return;
     this.active = true;
-    const { state, MAPBOX_TOKEN, BASEMAPS } = this.ctx;
+    const { state, MAPBOX_TOKEN, basemapStyleUrl } = this.ctx;
     const wrap = document.getElementById('mapWrap');
     wrap.classList.add('split');
     const cont = document.getElementById('map2');
@@ -81,7 +82,7 @@ export class SplitView {
     const main = state.map;
     const map = new mapboxgl.Map({
       container: 'map2',
-      style: (BASEMAPS[state.basemap] || BASEMAPS.dark).url,
+      style: basemapStyleUrl(state.basemap),
       center: main.getCenter(),
       zoom: main.getZoom(),
       bearing: main.getBearing(),
@@ -475,10 +476,10 @@ export class SplitView {
   _ensureLayer(kind, factory) {
     const map = this.map;
     if (!this.layers[kind]) this.layers[kind] = factory();
-    const layerId = { radar: 'radar', mrms: 'mrms', models: 'models', sat: 'satellite' }[kind];
+    const layerId = { radar: 'radar', mrms: 'mrms', models: 'models', sat: SATELLITE_LAYER_ID }[kind];
     if (!map.getLayer(layerId)) {
       // Drop other data layers so only the active product draws.
-      for (const other of ['radar', 'mrms', 'models', 'satellite'])
+      for (const other of ['radar', 'mrms', 'models', SATELLITE_LAYER_ID])
         if (other !== layerId && map.getLayer(other)) map.removeLayer(other);
       // Data sits beneath the basemap roads/borders so they draw on top of it.
       map.addLayer(this.layers[kind], dataLayerAnchor(map));
@@ -487,7 +488,7 @@ export class SplitView {
   }
 
   _clearData() {
-    for (const id of ['radar', 'mrms', 'models', 'satellite'])
+    for (const id of ['radar', 'mrms', 'models', SATELLITE_LAYER_ID])
       if (this.map.getLayer(id)) this.map.removeLayer(id);
   }
 

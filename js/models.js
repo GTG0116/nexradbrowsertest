@@ -439,11 +439,13 @@ function iceProduct(id, name, src, hiMM) {
 }
 
 // Wind speed at a pressure level (magnitude of U/V), with wind + height overlays
-// at the same level. `hi` is the layout/contour interval for the height field.
+// at the same level. `interval` is the contour interval for the height field.
 function isotachProduct(id, mb) {
+  const interval = mb <= 300 ? 120 : (mb <= 500 ? 60 : 30);
   return {
     ...gridProduct(id, `${mb} mb Winds`, ISOTACH_SCALE, 10, 'm/s', { unit: 'kt', factor: MS_TO_KT }),
     combine: 'mag', sources: () => [prs('UGRD', mb), prs('VGRD', mb)],
+    overlays: { level: `${mb} mb`, file: 'prs', interval },
   };
 }
 
@@ -452,6 +454,22 @@ function isotachProduct(id, mb) {
 // same level (the classic "field + wind + height" upper-air chart).
 function aloftProduct(base, mb, interval) {
   return { ...base, overlays: { level: `${mb} mb`, file: 'prs', interval } };
+}
+
+function withMslpOverlay(base) {
+  return { ...base, overlays: { ...(base.overlays || {}), mslp: true, mslpInterval: 400 } };
+}
+
+function withWindContours(base, intervalMph = 10) {
+  return {
+    ...base,
+    overlays: {
+      ...(base.overlays || {}),
+      windContours: true,
+      windContourInterval: intervalMph / MS_TO_MPH,
+      windContourFactor: MS_TO_MPH,
+    },
+  };
 }
 
 // Combine helpers operate element-wise: (arrays, i) → value, where `arrays` is
@@ -522,7 +540,7 @@ const feelsLike = (a, i) => {
 };
 
 export const MODEL_PRODUCTS = {
-  REFC: {
+  REFC: withMslpOverlay({
     id: 'REFC',
     name: 'Composite Reflectivity',
     unit: 'dBZ',
@@ -530,26 +548,26 @@ export const MODEL_PRODUCTS = {
     varName: 'REFC', level: 'entire atmosphere',
     reflectivity: true,
     dispUnit: 'dBZ', dispFactor: 1, dispOffset: 0,
-  },
-  TMP: { ...TMP_PROD, varName: 'TMP', level: '2 m above ground' },
-  WIND: {
+  }),
+  TMP: withMslpOverlay({ ...TMP_PROD, varName: 'TMP', level: '2 m above ground' }),
+  WIND: withWindContours(withMslpOverlay({
     ...WIND_PROD, combine: 'mag',
     sources: () => [
       { varName: 'UGRD', level: '10 m above ground' },
       { varName: 'VGRD', level: '10 m above ground' },
     ],
-  },
-  GUST: { ...GUST_PROD, varName: 'GUST', level: 'surface' },
+  })),
+  GUST: withWindContours(withMslpOverlay({ ...GUST_PROD, varName: 'GUST', level: 'surface' })),
   RH: { ...RH_PROD, varName: 'RH', level: '2 m above ground' },
-  DPT: { ...DPT_PROD, varName: 'DPT', level: '2 m above ground' },
-  FEELS: {
+  DPT: withMslpOverlay({ ...DPT_PROD, varName: 'DPT', level: '2 m above ground' }),
+  FEELS: withMslpOverlay({
     ...gridProduct('FEELS', 'Feels Like (Heat Index/Wind Chill)', TMP_SCALE, TMP_SCALE.lo, 'K', { unit: '°F', ...K_TO_F }),
     combine: feelsLike,
     sources: () => [
       sfc('TMP', '2 m above ground'), sfc('RH', '2 m above ground'),
       sfc('UGRD', '10 m above ground'), sfc('VGRD', '10 m above ground'),
     ],
-  },
+  }),
   TCDC: { ...CLOUD_PROD, varName: 'TCDC', level: 'entire atmosphere' },
   QPF1: {
     ...gridProduct('QPF1', '1 hr Precip', precipScale(50), 0.1, 'mm', { unit: 'in', factor: MM_TO_IN }),
@@ -1282,16 +1300,53 @@ function recenterGlobal(grid) {
   return { ...grid, lon1, values };
 }
 
-// Wind + geopotential-height fields for an upper-air overlay, at the product's
-// overlay level. Returned as raw value arrays (the geometry matches the main
-// grid, since everything resamples to the same lat/lon target).
+const MSLP_SOURCES = [
+  sfc('PRMSL', 'mean sea level'),
+  sfc('MSLMA', 'mean sea level'),
+  sfc('MSLET', 'mean sea level'),
+  sfc('PRES', 'mean sea level'),
+];
+
+async function loadFirstAvailableSource(model, run, fhour, sources, idxCache) {
+  let lastErr = null;
+  for (const src of sources) {
+    try {
+      return await loadSource(model, run, fhour, src, idxCache);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('no overlay source available');
+}
+
+// Wind + geopotential-height fields for upper-air overlays and optional MSLP
+// fields for surface products. Returned as raw value arrays (the geometry matches
+// the main grid, since everything resamples to the same lat/lon target).
 async function loadOverlays(model, run, fhour, ov, idxCache) {
-  const [u, v, h] = await Promise.all([
-    loadSource(model, run, fhour, { varName: 'UGRD', level: ov.level, file: ov.file }, idxCache),
-    loadSource(model, run, fhour, { varName: 'VGRD', level: ov.level, file: ov.file }, idxCache),
-    loadSource(model, run, fhour, { varName: 'HGT', level: ov.level, file: ov.file }, idxCache),
-  ]);
-  return { u: u.values, v: v.values, hgt: h.values, interval: ov.interval, level: ov.level };
+  const out = {};
+  if (ov.level) {
+    const [u, v, h] = await Promise.all([
+      loadSource(model, run, fhour, { varName: 'UGRD', level: ov.level, file: ov.file }, idxCache),
+      loadSource(model, run, fhour, { varName: 'VGRD', level: ov.level, file: ov.file }, idxCache),
+      loadSource(model, run, fhour, { varName: 'HGT', level: ov.level, file: ov.file }, idxCache),
+    ]);
+    out.u = u.values;
+    out.v = v.values;
+    out.hgt = h.values;
+    out.interval = ov.interval;
+    out.level = ov.level;
+  }
+  if (ov.mslp) {
+    try {
+      const p = await loadFirstAvailableSource(model, run, fhour, MSLP_SOURCES, idxCache);
+      out.mslp = p.values;
+      out.mslpInterval = ov.mslpInterval || 400;
+    } catch (_) {
+      // MSLP is a helpful overlay, not the selected field. Some experimental
+      // feeds omit it, so keep the base product usable when no pressure record exists.
+    }
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 // Download + decode one forecast hour of a model run into a lat/lon grid of
@@ -1315,7 +1370,17 @@ export async function loadModel(modelKey, productId, run, fhour, onProgress) {
       grids.push(grid);
     }
     grid = combineGrids(grids, product.combine);
-    if (product.overlays) grid.overlays = await loadOverlays(model, run, fhour, product.overlays, idxCache);
+    if (product.overlays) {
+      grid.overlays = await loadOverlays(model, run, fhour, product.overlays, idxCache);
+      if (product.overlays.windContours) {
+        grid.overlays = {
+          ...(grid.overlays || {}),
+          windSpeed: grid.values,
+          windContourInterval: product.overlays.windContourInterval,
+          windContourFactor: product.overlays.windContourFactor,
+        };
+      }
+    }
   }
   grid.product = product;
   grid.model = model;

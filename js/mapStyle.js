@@ -53,7 +53,8 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function adminSource(map) {
   const layers = map.getStyle().layers || [];
-  const admin = layers.find((l) => l['source-layer'] === 'admin' && l.source);
+  const admin = layers.find((l) =>
+    (l['source-layer'] === 'admin' || l['source-layer'] === 'boundary') && l.source);
   return admin && admin.source;
 }
 
@@ -61,7 +62,8 @@ function adminSource(map) {
 // (Highways live in the same `road` source-layer as ordinary roads in Mapbox's
 // styles, so they're covered by the single Roads control.)
 function isRoadLayer(ly) {
-  return ly.type === 'line' && ly['source-layer'] === 'road';
+  return ly.type === 'line' &&
+    (ly['source-layer'] === 'road' || ly['source-layer'] === 'transportation' || /road|transport/i.test(ly.id));
 }
 function isRiverLayer(ly) {
   return ly.type === 'line' && (ly['source-layer'] === 'waterway' || /waterway|river/i.test(ly.id));
@@ -126,6 +128,9 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
   // repeated live changes (and is re-read fresh on each style load).
   if (fresh || !map.__nativeTextSize) map.__nativeTextSize = {};
   const textNatives = map.__nativeTextSize;
+  // Generic boundary widths (MapTiler etc.) are captured the same way; re-read on
+  // a fresh style load so a basemap switch doesn't reuse the old style's widths.
+  if (fresh || !map.__nativeBorderWidth) map.__nativeBorderWidth = {};
 
   // Remember a layer's stock line width the first time we see it on this style
   // load, then drive its width as native × multiplier (and optionally recolour).
@@ -159,10 +164,32 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
   styleBoundaries(map, anchor, o);
 }
 
+// The Mapbox admin layer IDs we hand-tune for the classic look. They only exist
+// on Mapbox vector styles; MapTiler/OpenMapTiles names its boundaries differently
+// (and the colour/width controls did nothing there until the generic pass below).
+const MAPBOX_ADMIN_LAYERS = new Set([
+  'admin-0-boundary-bg', 'admin-0-boundary', 'admin-0-boundary-disputed',
+  'admin-1-boundary-bg', 'admin-1-boundary',
+]);
+
+// Is this a country/state administrative *line* layer (any provider)? Catches
+// Mapbox's `admin-*` ids and OpenMapTiles' `boundary` source-layer (MapTiler).
+function isBoundaryLayer(ly) {
+  if (ly.type !== 'line' || ly.id === 'county-outline') return false;
+  const sl = ly['source-layer'] || '';
+  return /^(admin|boundary|administrative)$/i.test(sl) || /admin|boundary|border/i.test(ly.id);
+}
+
 // Recolour/resize the basemap's own country/state borders (and add county lines
 // from the same admin source). See the long note in app.js: the native admin
 // lines already sit above the radar/roads and below the labels, so restyling
 // them in place gives one consistent look on every basemap.
+//
+// Mapbox's stock styles get the hand-tuned per-level look (halo backings,
+// dashes); every other provider (notably MapTiler, whose boundary layer IDs
+// aren't the Mapbox `admin-*` set, so the old hardcoded repaints were silent
+// no-ops) gets a generic pass that recolours each boundary line and scales its
+// native width by the multiplier — so the colour/width controls finally work.
 function styleBoundaries(map, anchor, o) {
   const col = o.borderColor || '#ffffff';
   const mult = o.borderWidth;
@@ -199,6 +226,24 @@ function styleBoundaries(map, anchor, o) {
     'line-color': col, 'line-opacity': 0.85, 'line-dasharray': [3, 2],
     'line-width': w(3, 0.5, 7, 1, 11, 1.5),
   });
+
+  // Generic pass for any boundary line layer not in the Mapbox set above — i.e.
+  // every MapTiler/OpenMapTiles boundary. Capture each layer's stock width once
+  // (so the multiplier scales the native value without compounding on repeated
+  // live slider changes), drive width as native × multiplier, and recolour.
+  const bNatives = map.__nativeBorderWidth || (map.__nativeBorderWidth = {});
+  for (const ly of map.getStyle().layers || []) {
+    if (!isBoundaryLayer(ly) || MAPBOX_ADMIN_LAYERS.has(ly.id)) continue;
+    const id = ly.id;
+    if (!(id in bNatives)) {
+      const nw = map.getPaintProperty(id, 'line-width');
+      bNatives[id] = nw == null ? 1 : nw;
+    }
+    map.setPaintProperty(id, 'line-width', scaleLineWidth(bNatives[id], mult));
+    map.setPaintProperty(id, 'line-color', col);
+    map.setLayoutProperty(id, 'visibility', 'visible');
+  }
+
   // County (admin_level 2) lines aren't drawn by the stock styles; add our own
   // once, then keep its paint in sync on later calls.
   if (map.getLayer('county-outline')) {
@@ -207,15 +252,18 @@ function styleBoundaries(map, anchor, o) {
   } else {
     const source = adminSource(map);
     if (!source) return;
+    const adminLayer = (map.getStyle().layers || []).find((l) =>
+      l.source === source && (l['source-layer'] === 'admin' || l['source-layer'] === 'boundary'));
     map.addLayer(
       {
-        id: 'county-outline', type: 'line', source, 'source-layer': 'admin',
+        id: 'county-outline', type: 'line', source,
+        'source-layer': adminLayer && adminLayer['source-layer'] ? adminLayer['source-layer'] : 'admin',
         filter: [
           'all',
-          ['==', ['get', 'admin_level'], 2],
-          ['==', ['get', 'maritime'], 'false'],
-          ['==', ['get', 'disputed'], 'false'],
-          ['match', ['get', 'worldview'], ['all', 'US'], true, false],
+          ['match', ['get', 'admin_level'], [2, '2', 6, '6'], true, false],
+          ['any', ['!', ['has', 'maritime']], ['==', ['get', 'maritime'], 'false'], ['==', ['get', 'maritime'], 0]],
+          ['any', ['!', ['has', 'disputed']], ['==', ['get', 'disputed'], 'false'], ['==', ['get', 'disputed'], 0]],
+          ['any', ['!', ['has', 'worldview']], ['match', ['get', 'worldview'], ['all', 'US'], true, false]],
         ],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         minzoom: 5,

@@ -82,6 +82,23 @@ const VEL_STOPS = [
   s(40, [255, 160, 0]),
 ];
 
+// Storm-relative velocity (m/s native, shown in kt) — green inbound, red
+// outbound, grey near zero. Built from VEL with the mean wind removed
+// (js/dealias.js stormRelativeSweep), so it shares VEL's moment + plumbing.
+const SRV_STOPS = [
+  s(-33, [0, 224, 0]),
+  s(-25, [0, 160, 0]),
+  s(-16, [0, 96, 0]),
+  s(-8, [0, 200, 200]),
+  s(-1, [80, 110, 110]),
+  s(0, [110, 110, 110]),
+  s(1, [110, 80, 80]),
+  s(8, [200, 0, 0]),
+  s(16, [160, 0, 0]),
+  s(25, [128, 0, 0]),
+  s(33, [255, 160, 0]),
+];
+
 // Spectrum width (m/s).
 const SW_STOPS = [
   s(0, [0, 0, 60]),
@@ -139,6 +156,7 @@ const PHI_STOPS = [
 // physical values stay native, so colours are unaffected. value_shown =
 // value*factor + offset.
 const MS_TO_MPH = 2.2369363;
+const MS_TO_KT = 1.9438445;
 
 function product(id, name, unit, moment, stops, disp) {
   const scale = makeScale(stopsToSegments(stops));
@@ -162,6 +180,9 @@ function product(id, name, unit, moment, stops, disp) {
 export const PRODUCTS = {
   REF: product('REF', 'Reflectivity', 'dBZ', 'REF', REF_STOPS),
   VEL: product('VEL', 'Velocity', 'm/s', 'VEL', VEL_STOPS, { unit: 'mph', factor: MS_TO_MPH }),
+  // Storm-relative velocity reads the VEL moment (it's derived from it), then
+  // applies its own storm-relative colour scale and knot display.
+  SRV: product('SRV', 'Storm Rel. Velocity', 'm/s', 'VEL', SRV_STOPS, { unit: 'kt', factor: MS_TO_KT }),
   SW: product('SW', 'Spectrum Width', 'm/s', 'SW', SW_STOPS, { unit: 'mph', factor: MS_TO_MPH }),
   RHO: product('RHO', 'Correlation Coeff.', 'ρHV', 'RHO', CC_STOPS),
   ZDR: product('ZDR', 'Differential Refl.', 'dB', 'ZDR', ZDR_STOPS),
@@ -172,6 +193,7 @@ export const PRODUCTS = {
 const UNIT_DECIMALS = {
   mph: 0, in: 2, '°F': 0, '°C': 0, dBZ: 0, ρHV: 2, dB: 1, '°': 0, '%': 0, 'm/s': 1,
   kt: 0, 'J/kg': 0, 'm²/s²': 0, '°C/km': 1, '10⁻⁵/s': 0, m: 0, 'flash/km²': 1,
+  'kg/m²': 0, kft: 0,
 };
 export function unitDecimals(unit) {
   return unit in UNIT_DECIMALS ? UNIT_DECIMALS[unit] : 1;
@@ -210,7 +232,7 @@ export function displayFactorFor(nativeUnit, dispUnit) {
   return f == null ? null : f;
 }
 
-export const PRODUCT_ORDER = ['REF', 'VEL', 'SW', 'RHO', 'ZDR', 'PHI'];
+export const PRODUCT_ORDER = ['REF', 'VEL', 'SRV', 'SW', 'RHO', 'ZDR', 'PHI'];
 
 // The reflectivity color table is shared across single-site radar, MRMS and the
 // weather models, so they all draw dBZ identically — and a user-loaded

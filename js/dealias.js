@@ -145,6 +145,77 @@ function despokeAzimuthal(infos) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Storm-relative velocity (SRV), derived from the *Level II* velocity field — so
+// it's full super-resolution (250 m gates, 0.5° beams), unlike the coarse 16-level
+// Level III SRM product. We estimate the laminar (environmental) wind's radial
+// component with a single-tilt VAD least-squares fit — Vr(az) ≈ a·sin(az) +
+// b·cos(az) over the whole sweep — then subtract that fitted sinusoid from every
+// gate. Removing the broad inbound/outbound couplet of the mean flow leaves the
+// storm-relative perturbation, which makes mesocyclone/TVS couplets pop the way an
+// operator-set SRM does. Built from the already-dealiased VEL so folded gates can't
+// bias the fit. Result re-encodes the VEL moment block in place (the SRV product
+// reads moment 'VEL'), so the GL layer and point sampler consume it unchanged.
+const srvCache = new WeakMap();
+
+export function stormRelativeSweep(sweep) {
+  if (!sweep) return sweep;
+  if (srvCache.has(sweep)) return srvCache.get(sweep);
+  const out = computeStormRelative(sweep);
+  srvCache.set(sweep, out);
+  return out;
+}
+
+function computeStormRelative(sweep) {
+  const velRadials = sweep.radials.filter((r) => r.moments.VEL);
+  if (!velRadials.length) return sweep;
+  const SC = velRadials[0].moments.VEL.scale || 1;
+  const OFF2 = 2 - VMIN * SC; // value v -> code = round(v*SC + OFF2) >= 2
+
+  // VAD fit: accumulate the normal-equation sums for Vr ≈ a·sin(az) + b·cos(az)
+  // over a sub-sample of valid gates (every STRIDE'th gate is plenty for a stable
+  // sweep-wide mean). cos(elevation) is absorbed into a/b and cancels on subtract.
+  const STRIDE = 4;
+  let Sss = 0, Scc = 0, Ssc = 0, Svs = 0, Svc = 0;
+  for (const r of velRadials) {
+    const m = r.moments.VEL;
+    const az = (r.azimuth * Math.PI) / 180;
+    const s = Math.sin(az), c = Math.cos(az);
+    const raw = m.raw, off = m.offset, sc = m.scale || 1, gc = m.gateCount;
+    for (let g = 0; g < gc; g += STRIDE) {
+      const code = raw[g];
+      if (code < 2) continue;
+      const v = (code - off) / sc;
+      Sss += s * s; Scc += c * c; Ssc += s * c;
+      Svs += v * s; Svc += v * c;
+    }
+  }
+  const det = Sss * Scc - Ssc * Ssc;
+  let a = 0, b = 0;
+  if (Math.abs(det) > 1e-6) {
+    a = (Svs * Scc - Svc * Ssc) / det;
+    b = (Svc * Sss - Svs * Ssc) / det;
+  }
+
+  const radials = sweep.radials.map((r) => {
+    const m = r.moments.VEL;
+    if (!m) return r;
+    const az = (r.azimuth * Math.PI) / 180;
+    const mean = a * Math.sin(az) + b * Math.cos(az);
+    const raw = m.raw, off = m.offset, sc = m.scale || 1, gc = m.gateCount;
+    const newRaw = new Uint16Array(gc);
+    for (let g = 0; g < gc; g++) {
+      const code = raw[g];
+      if (code < 2) { newRaw[g] = 0; continue; }
+      const v = (code - off) / sc - mean;
+      const nc = Math.round(v * SC + OFF2);
+      newRaw[g] = nc < 2 ? 2 : nc > 65535 ? 65535 : nc;
+    }
+    return { ...r, moments: { ...r.moments, VEL: { ...m, raw: newRaw, offset: OFF2, scale: SC } } };
+  });
+  return { ...sweep, radials };
+}
+
 function computeDealias(sweep) {
   const velRadials = sweep.radials.filter((r) => r.moments.VEL);
   if (!velRadials.length) return sweep;

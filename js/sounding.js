@@ -2,22 +2,10 @@
 // storm-relative hodograph, and the severe-weather parameters meteorologists
 // read off a profile (CAPE, shear, SRH, STP/SCP, …).
 //
-// Why a different data path than the rest of the app: every other source here
-// decodes raw bytes straight from an open S3 bucket. A *point* sounding can't
-// work that way — GRIB2 complex packing with spatial differencing can't be
-// subset to one grid cell, so pulling ~40 pressure-level fields to read a single
-// column would mean downloading the entire ~130 MB wrfprs file per tap. Instead
-// we ask Open-Meteo's CORS-enabled NWP endpoint for just that column — one small
-// JSON request — and do all of the meteorology (parcel theory, Bunkers storm
-// motion, helicity, composites) here in the browser, exactly as the rest of the
-// app does its own science.
-//
 // The profile follows whichever model is selected for the active forecast hour.
-// Only HRRR and GFS publish browser-reachable pressure-level columns via
-// Open-Meteo; for the regional CONUS models (NAM / NAM Nest / RAP) we instead
-// build the column straight from the model's own GRIB2 — Range-fetching and
-// point-sampling each pressure-level field (see models.js loadModelColumn) — so
-// the sounding reflects the actual selected model rather than a HRRR stand-in.
+// Supported models build the column from their own GRIB2 data: the browser
+// Range-fetches pressure-level fields, samples the requested grid point, then
+// computes parcel theory, Bunkers storm motion, helicity and composites locally.
 
 import { loadModelColumn } from './models.js';
 
@@ -25,22 +13,15 @@ const KT2MS = 0.514444;
 const MS2KT = 1.943844;
 const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
-const pad2 = (n) => String(n).padStart(2, '0');
-
-// The pressure levels Open-Meteo serves (hPa), surface → top.
-const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
-  500, 450, 400, 350, 300, 250, 200, 150, 100, 50];
-
-// The sounding source for each in-app model: HRRR/GFS use Open-Meteo's
-// pressure-level column (`id` is the Open-Meteo model); the regional models use
-// their own GRIB2 (`native: true`). `label` names the model shown in the panel —
-// now always the model actually used, since nothing borrows HRRR anymore.
+// The sounding source for each in-app model. `native: true` means the column is
+// decoded in-browser from the model's own GRIB2. `label` names the model shown
+// in the panel.
 // `unavailable: true` marks models that publish no usable column for a sounding
 // (the AI models carry no per-level humidity, GraphCast no surface at all), so
 // the panel shows a short notice instead of a misleading profile.
 const SOUNDING_SOURCE = {
-  hrrr:     { id: 'gfs_hrrr',   label: 'HRRR',     native: false },
-  gfs:      { id: 'gfs_global', label: 'GFS',      native: false },
+  hrrr:     { label: 'HRRR',     native: true },
+  gfs:      { label: 'GFS',      native: true },
   nam:      { label: 'NAM',      native: true },
   namnest:  { label: 'NAM Nest', native: true },
   rap:      { label: 'RAP',      native: true },
@@ -53,80 +34,11 @@ export function soundingModel(modelKey) {
   return SOUNDING_SOURCE[modelKey] || SOUNDING_SOURCE.hrrr;
 }
 
-// ---------------------------------------------------------------------------
-// Data fetch — one Open-Meteo request pinned to the grid's valid hour (UTC),
-// for whichever model is selected on the active forecast hour.
-// ---------------------------------------------------------------------------
-export async function fetchSounding(lat, lon, validTime, modelKey = 'hrrr') {
-  const model = soundingModel(modelKey);
-  const perLevel = ['temperature', 'dewpoint', 'geopotential_height', 'windspeed', 'winddirection'];
-  const hourly = [];
-  for (const p of LEVELS) for (const v of perLevel) hourly.push(`${v}_${p}hPa`);
-  hourly.push('temperature_2m', 'dewpoint_2m', 'surface_pressure',
-    'wind_speed_10m', 'wind_direction_10m', 'cape', 'convective_inhibition', 'lifted_index');
-
-  const d = validTime;
-  const hour = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:00`;
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}` +
-    `&longitude=${lon.toFixed(4)}&models=${model.id}&timezone=GMT&wind_speed_unit=kn` +
-    `&temperature_unit=celsius&start_hour=${hour}&end_hour=${hour}&hourly=${hourly.join(',')}`;
-
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`sounding HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.reason || 'sounding request failed');
-  const h = data.hourly;
-  if (!h || !Array.isArray(h.time) || !h.time.length || h.temperature_500hPa[0] == null)
-    throw new Error(`${model.label} point data is not available for this valid time (recent / forecast hours only).`);
-
-  const profile = buildProfile(data, lat, lon, validTime);
-  profile.modelLabel = model.label;
-  return profile;
-}
-
-// Turn the raw Open-Meteo response into a clean, sorted profile plus the derived
-// severe parameters.
-function buildProfile(data, lat, lon, validTime) {
-  const h = data.hourly;
-  const sfcZ = data.elevation;        // station/grid elevation (m MSL)
-  const sfcP = h.surface_pressure[0]; // hPa
-
-  const levels = [];
-  // Surface (2 m / 10 m), drawn as the bottom of the profile.
-  pushLevel(levels, sfcP, sfcZ, h.temperature_2m[0], h.dewpoint_2m[0],
-    h.wind_speed_10m[0], h.wind_direction_10m[0]);
-  for (const p of LEVELS) {
-    if (p >= sfcP) continue; // below ground for this column
-    pushLevel(levels, p,
-      h[`geopotential_height_${p}hPa`][0], h[`temperature_${p}hPa`][0],
-      h[`dewpoint_${p}hPa`][0], h[`windspeed_${p}hPa`][0], h[`winddirection_${p}hPa`][0]);
-  }
-  // Sort surface → top (descending pressure) and tag height AGL.
-  levels.sort((a, b) => b.p - a.p);
-  for (const lv of levels) lv.zAGL = lv.z - sfcZ;
-
-  const profile = {
-    lat, lon, validTime, sfcZ, sfcP, levels,
-    cape: num(h.cape[0]), cin: num(h.convective_inhibition[0]), li: num(h.lifted_index[0]),
-  };
-  profile.params = computeParams(profile);
-  return profile;
-}
-
-function pushLevel(arr, p, z, T, Td, spdKt, dir) {
-  if (z == null || T == null) return;
-  if (Td != null && Td > T) Td = T; // guard against tiny super-saturation
-  const spd = spdKt == null ? 0 : spdKt * KT2MS; // m/s
-  const u = dir == null ? 0 : -spd * Math.sin(dir * D2R);
-  const v = dir == null ? 0 : -spd * Math.cos(dir * D2R);
-  arr.push({ p, z, T, Td: Td == null ? T - 30 : Td, spdKt: spdKt || 0, dir: dir || 0, u, v });
-}
-
 const num = (x) => (x == null ? NaN : x);
 
 // ---------------------------------------------------------------------------
-// Native GRIB2 column (NAM / NAM Nest / RAP) — same profile shape as the
-// Open-Meteo path, built from the model's own data via models.js.
+// Native GRIB2 column: same profile shape for every supported model, built from
+// the model's own data via models.js.
 // ---------------------------------------------------------------------------
 
 // Dew point (°C) from temperature (°C) and relative humidity (%).

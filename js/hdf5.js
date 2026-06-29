@@ -569,17 +569,20 @@ export class HDF5File {
     };
     visit(btreeAddr);
 
-    const hasShuffle = filters.some((f) => f.id === 2);
-    const hasDeflate = filters.some((f) => f.id === 1);
     const rowStride = []; // element strides for the full array
     rowStride[rank - 1] = 1;
     for (let d = rank - 2; d >= 0; d--) rowStride[d] = rowStride[d + 1] * dims[d + 1];
 
     // Process chunks (await inflation as needed).
     for (const lf of leaves) {
+      const applied = (id) => filters.some((f, i) => f.id === id && !(lf.filterMask & (1 << i)));
       let raw = this.bytes.subarray(lf.addr, lf.addr + lf.chunkSize);
-      if (hasDeflate) raw = await inflate(raw);
-      if (hasShuffle) raw = unshuffle(raw, elsize);
+      // Fletcher32 is stored after the compressed chunk bytes. Chrome's
+      // DecompressionStream rejects those valid trailing checksum bytes, so strip
+      // them before deflate instead of depending on browser-specific tolerance.
+      if (applied(3) && raw.length >= 4) raw = raw.subarray(0, raw.length - 4);
+      if (applied(1)) raw = await inflate(raw);
+      if (applied(2)) raw = unshuffle(raw, elsize);
       this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed);
     }
   }

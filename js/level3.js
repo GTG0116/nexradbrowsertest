@@ -39,10 +39,13 @@ const BUCKET = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 const HUNDREDTHS_IN_PER_MM = 100 / 25.4; // ≈ 3.937
 const L3_DECODE = {
   135: { space: 1000, mask: 0x7f, offset: 2, scale: 1 }, // EET: height = (code&0x7f) - 2 kft
+  134: { space: 1000 },                                  // DVL  — Digital VIL, kg/m² (offset/scale from the PDB)
   170: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DAA  — 1-hr QPE (offset/scale from the PDB)
   173: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DUA  — user-selectable accumulation (3-hr in the DU3 feed)
   172: { space: 250, scaleMul: HUNDREDTHS_IN_PER_MM },  // DTA  — storm-total QPE
 };
+// (Storm-relative velocity is NOT a Level III product here — it's derived from the
+// full-resolution Level II velocity field; see js/dealias.js stormRelativeSweep.)
 
 // Decode one Level III file into a synthetic single-tilt "sweep" the radar layer
 // can draw, plus the site location and the value transform. Returns null if the
@@ -73,8 +76,6 @@ export function decodeLevel3(bytes) {
   const hb = (H) => (H - 1) * 2;
   const lat = i32(hb(11)) / 1000;
   const lon = i32(hb(13)) / 1000;
-  const offset = dec.offset != null ? dec.offset : f32(hb(33));
-  const scale = (dec.scale != null ? dec.scale : f32(hb(31))) * (dec.scaleMul || 1);
 
   // Symbology block sits right after the 102-byte PDB and is bzip2-compressed.
   const symStart = start + 18 + 102;
@@ -83,6 +84,9 @@ export function decodeLevel3(bytes) {
     : u8.subarray(symStart);
   const sd = new DataView(sym.buffer, sym.byteOffset, sym.length);
   const s16 = (o) => sd.getInt16(o, false);
+
+  const offset = dec.offset != null ? dec.offset : f32(hb(33));
+  const scale = (dec.scale != null ? dec.scale : f32(hb(31))) * (dec.scaleMul || 1);
 
   // Symbology header (10 B) + one layer header (6 B) → first packet at byte 16.
   // Packet 16 header: code, firstBin, numBins, iCenter, jCenter, scale, nRadials.
@@ -122,7 +126,13 @@ const QPE_SCALE = seg([
   [0.2, [120, 200, 255]], [5, [0, 120, 240]], [15, [0, 200, 120]], [30, [230, 220, 0]],
   [60, [255, 120, 0]], [100, [220, 0, 0]], [150, [180, 0, 90]], [250, [255, 0, 255]],
 ]);
-
+// Vertically integrated liquid (kg/m²): light blue/green at low VIL through
+// yellow/orange/red to magenta at the high values that flag hail potential.
+const VIL_SCALE = seg([
+  [0.1, [120, 200, 255]], [5, [0, 150, 230]], [10, [0, 200, 130]], [20, [120, 215, 70]],
+  [30, [235, 225, 60]], [40, [240, 160, 50]], [50, [225, 70, 50]], [65, [180, 30, 90]],
+  [80, [240, 90, 240]],
+]);
 const MM_TO_IN = 0.0393700787;
 
 // Single-site Level III products, keyed by the id used in the radar product
@@ -135,11 +145,12 @@ const l3 = (id, name, bucketCode, msgCode, unit, scale, disp) =>
 
 export const L3_PRODUCTS = {
   ET: l3('ET', 'Echo Tops', 'EET', 135, 'kft', ETOPS_SCALE, { unit: 'kft', factor: 1 }),
+  VIL: l3('VIL', 'Vert. Int. Liquid', 'DVL', 134, 'kg/m²', VIL_SCALE, { unit: 'kg/m²', factor: 1 }),
   PR1: l3('PR1', '1-hr Precip', 'DAA', 170, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
   PR3: l3('PR3', '3-hr Precip', 'DU3', 173, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
   PRT: l3('PRT', 'Storm Total Precip', 'DTA', 172, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
 };
-export const L3_ORDER = ['ET', 'PR1', 'PR3', 'PRT'];
+export const L3_ORDER = ['ET', 'VIL', 'PR1', 'PR3', 'PRT'];
 
 export function isL3Product(id) {
   return Object.prototype.hasOwnProperty.call(L3_PRODUCTS, id);

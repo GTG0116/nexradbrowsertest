@@ -673,6 +673,51 @@ export class AlertsController {
     this.openPreview(ids[0], ids);
   }
 
+  alertIdsAtPoint(point, map = this.map) {
+    if (!map || !point) return [];
+    const layers = ['alerts-fill', 'alerts-line'].filter((id) => map.getLayer && map.getLayer(id));
+    if (!layers.length) return [];
+    let feats = [];
+    try {
+      feats = map.queryRenderedFeatures(point, { layers });
+    } catch (_) {
+      return [];
+    }
+    return [...new Set(feats.map((f) => f.properties && f.properties.id).filter(Boolean))];
+  }
+
+  alertById(id) {
+    return this.alerts.find((a) => a.id === id) || null;
+  }
+
+  previewData(id) {
+    const a = this.alertById(id);
+    if (!a) return null;
+    const p = a.feature.properties;
+    const params = p.parameters || {};
+    const expiry = p.ends || p.expires;
+    const until = untilText(expiry);
+    const rows = [
+      ['Expires', `${fmtClock(expiry)}${until ? ` (${until})` : ''}`],
+    ];
+    const tor = firstParam(params, 'tornadoDetection');
+    const torThreat = firstParam(params, 'tornadoDamageThreat');
+    const hail = firstParam(params, 'maxHailSize');
+    const wind = firstParam(params, 'maxWindGust');
+    if (tor) {
+      const t = String(tor).replace(/\b\w/g, (m) => m.toUpperCase());
+      rows.push(['Tornado', `${t}${torThreat ? ` · ${String(torThreat).toUpperCase()}` : ''}`]);
+    }
+    if (hail) rows.push(['Hail', `${hail}${/in/i.test(hail) ? '' : ' in'}`]);
+    if (wind) rows.push(['Wind', String(wind)]);
+    return {
+      color: a.cls.color,
+      title: a.cls.display,
+      area: (p.areaDesc || '').split(';')[0],
+      rows,
+    };
+  }
+
   // Register a second map that should show the same alert polygons, and prime it
   // with the current features. Safe to call again after the mirror's style is
   // reloaded (e.g. a basemap switch rebuilds its empty `alerts` source) — it

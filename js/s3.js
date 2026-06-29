@@ -387,7 +387,7 @@ export const RADARS = [
   ['KLBB', 'Lubbock, TX', 33.654, -101.814],
   ['KLCH', 'Lake Charles, LA', 30.125, -93.216],
   ['KLGX', 'Langley Hill, WA', 47.117, -124.107],
-  ['KLIX', 'New Orleans, LA', 30.337, -89.825],
+  ['KHDC', 'Hammond, LA', 30.520, -90.418],
   ['KLNX', 'North Platte, NE', 41.958, -100.576],
   ['KLOT', 'Chicago, IL', 41.604, -88.085],
   ['KLRX', 'Elko, NV', 40.74, -116.803],

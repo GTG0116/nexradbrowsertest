@@ -6,11 +6,15 @@
 //                     a constant size and Mapbox declutters them as you zoom).
 //   • height lines  — geopotential-height contours from marching squares, plus
 //                     decameter labels placed along the lines.
+//   • MSLP lines    — sea-level pressure contours, labelled in hPa, for selected
+//                     surface model fields, plus H/L pressure-center markers.
+//   • wind lines    — wind-speed contours for surface wind and gust products.
 //
-// Overlay data rides on `grid.overlays = { u, v, hgt, interval, level }`, with
-// the value arrays sharing the main grid's lat/lon geometry.
+// Overlay data rides on `grid.overlays = { u, v, hgt, interval, level, mslp,
+// windSpeed }`, with the value arrays sharing the main grid's lat/lon geometry.
 
 const KT = 1.9438445; // m/s → knots
+const MS_TO_MPH = 2.2369363;
 const BARB_STRIDE_DEG = 0.6; // target spacing between plotted barbs
 const CONTOUR_STRIDE_DEG = 0.2; // height field is downsampled to this before contouring
 
@@ -79,9 +83,9 @@ export function ensureBarbImages(map) {
 
 // Average the height field down to ~CONTOUR_STRIDE_DEG spacing (it is smooth, so
 // this both speeds up contouring and de-noises the lines).
-function downsample(grid) {
+function downsample(grid, values) {
   const { ni, nj, di, dj, lon1, lat1 } = grid;
-  const v = grid.overlays.hgt;
+  const v = values;
   const sx = Math.max(1, Math.round(CONTOUR_STRIDE_DEG / di));
   const sy = Math.max(1, Math.round(CONTOUR_STRIDE_DEG / dj));
   const w = Math.floor(ni / sx), h = Math.floor(nj / sy);
@@ -182,20 +186,19 @@ function chain(segs) {
   return lines;
 }
 
-// Build LineString features (with decameter labels) for all height contours.
-function contourGeoJSON(grid) {
-  const d = downsample(grid);
-  const interval = grid.overlays.interval || 60;
+// Build LineString features for a contour field.
+function contourGeoJSON(grid, values, interval, labelFor, minLevel = null) {
+  const d = downsample(grid, values);
   let lo = Infinity, hi = -Infinity;
   for (const val of d.v) if (!Number.isNaN(val)) { if (val < lo) lo = val; if (val > hi) hi = val; }
   const features = [];
   if (!(hi > lo)) return { type: 'FeatureCollection', features };
-  const first = Math.ceil(lo / interval) * interval;
+  const first = Math.ceil(Math.max(lo, minLevel == null ? lo : minLevel) / interval) * interval;
   for (let level = first; level <= hi; level += interval) {
     const segs = [];
     for (let j = 0; j < d.h - 1; j++)
       for (let i = 0; i < d.w - 1; i++) cellSegments(d, i, j, level, segs);
-    const label = String(Math.round(level / 10)); // decameters
+    const label = labelFor(level);
     for (const line of chain(segs)) {
       if (line.length < 4) continue; // drop tiny scraps
       features.push({
@@ -204,6 +207,76 @@ function contourGeoJSON(grid) {
         geometry: { type: 'LineString', coordinates: line },
       });
     }
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function heightContourGeoJSON(grid) {
+  return contourGeoJSON(grid, grid.overlays.hgt, grid.overlays.interval || 60,
+    (level) => String(Math.round(level / 10))); // decameters
+}
+
+function mslpContourGeoJSON(grid) {
+  return contourGeoJSON(grid, grid.overlays.mslp, grid.overlays.mslpInterval || 400,
+    (level) => String(Math.round(level / 100))); // Pa → hPa
+}
+
+function windContourGeoJSON(grid) {
+  const factor = grid.overlays.windContourFactor || MS_TO_MPH;
+  const interval = grid.overlays.windContourInterval || (10 / factor);
+  return contourGeoJSON(grid, grid.overlays.windSpeed, interval,
+    (level) => String(Math.round(level * factor)), 10 / factor);
+}
+
+function pressureCenterGeoJSON(grid) {
+  const d = downsample(grid, grid.overlays.mslp);
+  const features = [];
+  if (d.w < 5 || d.h < 5) return { type: 'FeatureCollection', features };
+
+  const radius = Math.max(4, Math.round(1.4 / Math.max(d.di, d.dj)));
+  const candidates = [];
+  const idx = (i, j) => j * d.w + i;
+  for (let j = radius; j < d.h - radius; j++) {
+    if (j % 2) continue;
+    for (let i = radius; i < d.w - radius; i += 2) {
+      const val = d.v[idx(i, j)];
+      if (!Number.isFinite(val)) continue;
+      let isHigh = true, isLow = true, ringMax = -Infinity, ringMin = Infinity;
+      for (let y = j - radius; y <= j + radius; y++) {
+        for (let x = i - radius; x <= i + radius; x++) {
+          if (x === i && y === j) continue;
+          const other = d.v[idx(x, y)];
+          if (!Number.isFinite(other)) continue;
+          if (other >= val) isHigh = false;
+          if (other <= val) isLow = false;
+          if (other > ringMax) ringMax = other;
+          if (other < ringMin) ringMin = other;
+        }
+      }
+      const lon = d.lon1 + i * d.di;
+      const lat = d.lat1 - j * d.dj;
+      if (isHigh && val >= 101600 && val - ringMin >= 150)
+        candidates.push({ kind: 'H', val, lon, lat, score: val - ringMin });
+      if (isLow && val <= 101000 && ringMax - val >= 150)
+        candidates.push({ kind: 'L', val, lon, lat, score: ringMax - val });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const picked = [];
+  const farEnough = (a) => picked.every((b) => Math.hypot((a.lon - b.lon) * Math.cos(a.lat * Math.PI / 180), a.lat - b.lat) >= 7);
+  for (const c of candidates) {
+    if (!farEnough(c)) continue;
+    picked.push(c);
+    if (picked.length >= 12) break;
+  }
+
+  for (const c of picked) {
+    features.push({
+      type: 'Feature',
+      properties: { kind: c.kind, pressure: Math.round(c.val / 100) },
+      geometry: { type: 'Point', coordinates: [c.lon, c.lat] },
+    });
   }
   return { type: 'FeatureCollection', features };
 }
@@ -243,6 +316,9 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 export function setupModelOverlayLayers(map, anchor) {
   ensureBarbImages(map);
   if (!map.getSource('hgt-contours')) map.addSource('hgt-contours', { type: 'geojson', data: EMPTY });
+  if (!map.getSource('mslp-contours')) map.addSource('mslp-contours', { type: 'geojson', data: EMPTY });
+  if (!map.getSource('wind-contours')) map.addSource('wind-contours', { type: 'geojson', data: EMPTY });
+  if (!map.getSource('pressure-centers')) map.addSource('pressure-centers', { type: 'geojson', data: EMPTY });
   if (!map.getSource('wind-barbs')) map.addSource('wind-barbs', { type: 'geojson', data: EMPTY });
 
   if (!map.getLayer('hgt-contours'))
@@ -260,6 +336,36 @@ export function setupModelOverlayLayers(map, anchor) {
       },
       paint: { 'text-color': '#0b1020', 'text-halo-color': 'rgba(255,255,255,0.85)', 'text-halo-width': 1.4 },
     }, anchor);
+  if (!map.getLayer('mslp-contours'))
+    map.addLayer({
+      id: 'mslp-contours', type: 'line', source: 'mslp-contours',
+      layout: { visibility: 'none', 'line-join': 'round' },
+      paint: { 'line-color': 'rgba(20,70,130,0.88)', 'line-width': 1.2 },
+    }, anchor);
+  if (!map.getLayer('mslp-labels'))
+    map.addLayer({
+      id: 'mslp-labels', type: 'symbol', source: 'mslp-contours',
+      layout: {
+        visibility: 'none', 'symbol-placement': 'line', 'text-field': ['get', 'label'],
+        'text-size': 11, 'symbol-spacing': 240, 'text-allow-overlap': false,
+      },
+      paint: { 'text-color': '#17467f', 'text-halo-color': 'rgba(255,255,255,0.88)', 'text-halo-width': 1.5 },
+    }, anchor);
+  if (!map.getLayer('wind-contours'))
+    map.addLayer({
+      id: 'wind-contours', type: 'line', source: 'wind-contours',
+      layout: { visibility: 'none', 'line-join': 'round' },
+      paint: { 'line-color': 'rgba(20,20,24,0.72)', 'line-width': 1, 'line-dasharray': [2, 1.4] },
+    }, anchor);
+  if (!map.getLayer('wind-contour-labels'))
+    map.addLayer({
+      id: 'wind-contour-labels', type: 'symbol', source: 'wind-contours',
+      layout: {
+        visibility: 'none', 'symbol-placement': 'line', 'text-field': ['get', 'label'],
+        'text-size': 10.5, 'symbol-spacing': 220, 'text-allow-overlap': false,
+      },
+      paint: { 'text-color': '#111318', 'text-halo-color': 'rgba(255,255,255,0.82)', 'text-halo-width': 1.2 },
+    }, anchor);
   if (!map.getLayer('wind-barbs'))
     map.addLayer({
       id: 'wind-barbs', type: 'symbol', source: 'wind-barbs',
@@ -269,22 +375,58 @@ export function setupModelOverlayLayers(map, anchor) {
         'icon-size': 1,
       },
     }, anchor);
+  if (!map.getLayer('pressure-centers'))
+    map.addLayer({
+      id: 'pressure-centers', type: 'symbol', source: 'pressure-centers',
+      layout: {
+        visibility: 'none',
+        'text-field': ['format',
+          ['get', 'kind'], { 'font-scale': 1 },
+          '\n', {},
+          ['concat', ['to-string', ['get', 'pressure']], ' mb'], { 'font-scale': 0.42 },
+        ],
+        'text-size': 30,
+        'text-line-height': 0.82,
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-allow-overlap': true, 'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': ['match', ['get', 'kind'], 'H', '#c92a2a', 'L', '#1864ab', '#111318'],
+        'text-halo-color': 'rgba(255,255,255,0.9)', 'text-halo-width': 2,
+      },
+    }, anchor);
 }
 
 // Show overlays for a grid that carries `.overlays`, or hide them otherwise.
 export function renderModelOverlays(map, grid) {
   if (!grid || !grid.overlays) { clearModelOverlays(map); return; }
   setupModelOverlayLayers(map, firstAnchor(map));
-  map.getSource('hgt-contours').setData(contourGeoJSON(grid));
-  map.getSource('wind-barbs').setData(barbGeoJSON(grid));
-  for (const id of ['hgt-contours', 'hgt-labels', 'wind-barbs'])
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
+  const hasHeight = !!grid.overlays.hgt;
+  const hasWind = !!(grid.overlays.u && grid.overlays.v);
+  const hasMslp = !!grid.overlays.mslp;
+  const hasWindContours = !!grid.overlays.windSpeed;
+
+  map.getSource('hgt-contours').setData(hasHeight ? heightContourGeoJSON(grid) : EMPTY);
+  map.getSource('wind-barbs').setData(hasWind ? barbGeoJSON(grid) : EMPTY);
+  map.getSource('mslp-contours').setData(hasMslp ? mslpContourGeoJSON(grid) : EMPTY);
+  map.getSource('pressure-centers').setData(hasMslp ? pressureCenterGeoJSON(grid) : EMPTY);
+  map.getSource('wind-contours').setData(hasWindContours ? windContourGeoJSON(grid) : EMPTY);
+
+  for (const id of ['hgt-contours', 'hgt-labels'])
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasHeight ? 'visible' : 'none');
+  if (map.getLayer('wind-barbs')) map.setLayoutProperty('wind-barbs', 'visibility', hasWind ? 'visible' : 'none');
+  for (const id of ['mslp-contours', 'mslp-labels'])
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasMslp ? 'visible' : 'none');
+  if (map.getLayer('pressure-centers')) map.setLayoutProperty('pressure-centers', 'visibility', hasMslp ? 'visible' : 'none');
+  for (const id of ['wind-contours', 'wind-contour-labels'])
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasWindContours ? 'visible' : 'none');
 }
 
 export function clearModelOverlays(map) {
-  for (const id of ['hgt-contours', 'hgt-labels', 'wind-barbs'])
+  for (const id of ['hgt-contours', 'hgt-labels', 'wind-barbs', 'mslp-contours', 'mslp-labels',
+    'pressure-centers', 'wind-contours', 'wind-contour-labels'])
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
-  for (const id of ['hgt-contours', 'wind-barbs'])
+  for (const id of ['hgt-contours', 'wind-barbs', 'mslp-contours', 'pressure-centers', 'wind-contours'])
     if (map.getSource(id)) map.getSource(id).setData(EMPTY);
 }
 
