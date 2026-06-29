@@ -60,6 +60,10 @@ const MIN_SPOKE_GATES = 18;
 // unmistakable signature of a fold error and we snap the gate back into line. A
 // few passes let a correction propagate across a rare run of adjacent spokes.
 const DESPOKE_PASSES = 3;
+const MEDIAN_DESPOKE_PASSES = 2;
+const MEDIAN_DESPOKE_RADIUS = 4;
+const MEDIAN_DESPOKE_MIN_NEIGHBORS = 4;
+const MEDIAN_DESPOKE_MIN_GAIN = 0.35;
 
 // Dealias a sweep's VEL moment, memoised per sweep object. Returns the original
 // sweep unchanged when there's no velocity data or no Nyquist information.
@@ -156,6 +160,49 @@ function despokeAzimuthal(infos) {
 // operator-set SRM does. Built from the already-dealiased VEL so folded gates can't
 // bias the fit. Result re-encodes the VEL moment block in place (the SRV product
 // reads moment 'VEL'), so the GL layer and point sampler consume it unchanged.
+// Catch wider streaks than the immediate-neighbour pass can see. For each gate,
+// compare the radial to a median built from several azimuth neighbours at the
+// same range. If snapping by a whole 2*VN interval lands much closer to that
+// neighbourhood, correct it. Genuine compact couplets survive because their
+// neighbours share the same co-interval, so the suggested fold is zero.
+function despokeAzimuthalMedian(infos) {
+  const n = infos.length;
+  if (n < MEDIAN_DESPOKE_MIN_NEIGHBORS + 1) return;
+  const scratch = [];
+  for (let pass = 0; pass < MEDIAN_DESPOKE_PASSES; pass++) {
+    let corrected = 0;
+    for (let i = 0; i < n; i++) {
+      const cur = infos[i];
+      if (!cur.canUnfold) continue;
+      const { vals, folds, twoVN } = cur;
+      for (let g = 0; g < vals.length; g++) {
+        const v = vals[g];
+        if (!Number.isFinite(v)) continue;
+        scratch.length = 0;
+        for (let off = -MEDIAN_DESPOKE_RADIUS; off <= MEDIAN_DESPOKE_RADIUS; off++) {
+          if (off === 0) continue;
+          const nb = infos[(i + off + n) % n];
+          if (g >= nb.vals.length) continue;
+          const nv = nb.vals[g];
+          if (Number.isFinite(nv)) scratch.push(nv);
+        }
+        if (scratch.length < MEDIAN_DESPOKE_MIN_NEIGHBORS) continue;
+        scratch.sort((a, b) => a - b);
+        const mid = scratch.length >> 1;
+        const med = scratch.length & 1 ? scratch[mid] : (scratch[mid - 1] + scratch[mid]) / 2;
+        const fold = Math.round((med - v) / twoVN);
+        if (fold === 0) continue;
+        const correctedV = v + fold * twoVN;
+        if (Math.abs(correctedV - med) > Math.abs(v - med) - twoVN * MEDIAN_DESPOKE_MIN_GAIN) continue;
+        vals[g] = correctedV;
+        folds[g] += fold;
+        corrected++;
+      }
+    }
+    if (!corrected) break;
+  }
+}
+
 const srvCache = new WeakMap();
 
 export function stormRelativeSweep(sweep) {
@@ -291,6 +338,7 @@ function computeDealias(sweep) {
 
   // Phase 2 — pull any remaining mis-folded beams back into azimuthal continuity.
   despokeAzimuthal(infos);
+  despokeAzimuthalMedian(infos);
 
   // Phase 3 — re-encode each rebuilt VEL block from the corrected values.
   const rebuilt = new Map();

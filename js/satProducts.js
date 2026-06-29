@@ -189,19 +189,31 @@ function subsolarPoint(date) {
   return { decl, sinDecl: Math.sin(decl), cosDecl: Math.cos(decl), subLon };
 }
 
+function normalizeCrop(scene, crop) {
+  const W = scene.width, H = scene.height;
+  if (!crop) return { x: 0, y: 0, width: W, height: H };
+  const x0 = Math.max(0, Math.min(W - 1, Math.floor(crop.x || 0)));
+  const y0 = Math.max(0, Math.min(H - 1, Math.floor(crop.y || 0)));
+  const x1 = Math.max(x0 + 1, Math.min(W, Math.ceil((crop.x || 0) + (crop.width || W))));
+  const y1 = Math.max(y0 + 1, Math.min(H, Math.ceil((crop.y || 0) + (crop.height || H))));
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
 // Render GeoColor: daytime true colour crossfaded with a night-time IR cloud
 // rendering by solar elevation, evaluated per pixel from the scene's geostationary
 // navigation and scan time.
-function buildGeoColor(scene, recipe, out) {
+function buildGeoColor(scene, recipe, out, crop = null) {
   const W = scene.width, H = scene.height, ch = scene.channels;
+  const c = normalizeCrop(scene, crop);
+  const CW = c.width;
   const ir = ch[recipe.ir.band];
   const sun = subsolarPoint(scene.time);
   const D2R = Math.PI / 180;
   const comp = (spec, i) => stretch(ch[spec.band][i], spec.lo, spec.hi, spec.gamma);
-  for (let row = 0; row < H; row++) {
+  for (let row = c.y; row < c.y + c.height; row++) {
     const yy = scene.yOffset + row * scene.yScale;
-    for (let col = 0; col < W; col++) {
-      const i = row * W + col, o = i * 4;
+    for (let col = c.x; col < c.x + c.width; col++) {
+      const i = row * W + col, o = ((row - c.y) * CW + (col - c.x)) * 4;
       const r0 = comp(recipe.r, i), b0 = comp(recipe.b, i);
       const bt = ir ? ir[i] : NaN;
       if (Number.isNaN(r0) && Number.isNaN(b0) && Number.isNaN(bt)) { out[o + 3] = 0; continue; }
@@ -243,7 +255,8 @@ function buildGeoColor(scene, recipe, out) {
 // single IR channels.
 export function buildRGBA(scene, productId, opts = {}) {
   const W = scene.width, H = scene.height;
-  const out = new Uint8Array(W * H * 4);
+  const crop = normalizeCrop(scene, opts.crop);
+  const out = new Uint8Array(crop.width * crop.height * 4);
   const ch = scene.channels;
 
   // ---- single channel ----
@@ -253,22 +266,26 @@ export function buildRGBA(scene, productId, opts = {}) {
     const data = ch[band];
     const isVis = meta.type === 'vis';
     const enhanceIR = opts.enhanceIR && !isVis;
-    for (let i = 0; i < W * H; i++) {
-      const v = data[i];
-      const o = i * 4;
-      if (Number.isNaN(v)) { out[o + 3] = 0; continue; }
-      if (isVis) {
-        const t = clamp01(Math.sqrt(clamp01(v))); // sqrt gamma for the eye
-        const g = (t * 255) | 0;
-        out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
-      } else if (enhanceIR) {
-        const c = rampColor(rampForBand(band), v);
-        out[o] = c[0] | 0; out[o + 1] = c[1] | 0; out[o + 2] = c[2] | 0; out[o + 3] = 255;
-      } else {
-        // IR brightness temperature: invert so cold cloud tops are white.
-        const t = stretch(v, 313, 183, 1);
-        const g = (clamp01(t) * 255) | 0;
-        out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
+    for (let row = crop.y; row < crop.y + crop.height; row++) {
+      const srcBase = row * W;
+      const dstBase = (row - crop.y) * crop.width;
+      for (let col = crop.x; col < crop.x + crop.width; col++) {
+        const v = data[srcBase + col];
+        const o = (dstBase + (col - crop.x)) * 4;
+        if (Number.isNaN(v)) { out[o + 3] = 0; continue; }
+        if (isVis) {
+          const t = clamp01(Math.sqrt(clamp01(v))); // sqrt gamma for the eye
+          const g = (t * 255) | 0;
+          out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
+        } else if (enhanceIR) {
+          const c = rampColor(rampForBand(band), v);
+          out[o] = c[0] | 0; out[o + 1] = c[1] | 0; out[o + 2] = c[2] | 0; out[o + 3] = 255;
+        } else {
+          // IR brightness temperature: invert so cold cloud tops are white.
+          const t = stretch(v, 313, 183, 1);
+          const g = (clamp01(t) * 255) | 0;
+          out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
+        }
       }
     }
     return out;
@@ -277,7 +294,7 @@ export function buildRGBA(scene, productId, opts = {}) {
   // ---- RGB composite ----
   const recipe = SAT_RGB[productId.replace(/^RGB_/, '')];
   if (!recipe) return out;
-  if (recipe.geocolor) return buildGeoColor(scene, recipe, out);
+  if (recipe.geocolor) return buildGeoColor(scene, recipe, out, crop);
   const comp = (spec, i) => {
     if (!spec) return 0;
     if (spec.diff) {
@@ -286,25 +303,30 @@ export function buildRGBA(scene, productId, opts = {}) {
     }
     return stretch(ch[spec.band][i], spec.lo, spec.hi, spec.gamma);
   };
-  for (let i = 0; i < W * H; i++) {
-    const o = i * 4;
-    let r, g, b;
-    if (recipe.green === 'synthetic') {
-      r = comp(recipe.r, i);
-      b = comp(recipe.b, i);
-      const veg = comp(recipe.veg, i);
-      // CIMSS true-colour synthetic green.
-      g = 0.45 * r + 0.45 * b + 0.1 * veg;
-    } else {
-      r = comp(recipe.r, i);
-      g = comp(recipe.g, i);
-      b = comp(recipe.b, i);
+  for (let row = crop.y; row < crop.y + crop.height; row++) {
+    const srcBase = row * W;
+    const dstBase = (row - crop.y) * crop.width;
+    for (let col = crop.x; col < crop.x + crop.width; col++) {
+      const i = srcBase + col;
+      const o = (dstBase + (col - crop.x)) * 4;
+      let r, g, b;
+      if (recipe.green === 'synthetic') {
+        r = comp(recipe.r, i);
+        b = comp(recipe.b, i);
+        const veg = comp(recipe.veg, i);
+        // CIMSS true-colour synthetic green.
+        g = 0.45 * r + 0.45 * b + 0.1 * veg;
+      } else {
+        r = comp(recipe.r, i);
+        g = comp(recipe.g, i);
+        b = comp(recipe.b, i);
+      }
+      if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) { out[o + 3] = 0; continue; }
+      out[o] = (clamp01(r) * 255) | 0;
+      out[o + 1] = (clamp01(g) * 255) | 0;
+      out[o + 2] = (clamp01(b) * 255) | 0;
+      out[o + 3] = 255;
     }
-    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) { out[o + 3] = 0; continue; }
-    out[o] = (clamp01(r) * 255) | 0;
-    out[o + 1] = (clamp01(g) * 255) | 0;
-    out[o + 2] = (clamp01(b) * 255) | 0;
-    out[o + 3] = 255;
   }
   return out;
 }

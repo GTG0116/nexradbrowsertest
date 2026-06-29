@@ -189,6 +189,7 @@ export class MapTools {
   // ---- Tool activation ----
   setTool(tool) {
     if (this.tool === tool) tool = null; // toggle off
+    if (this._cancelPointerGesture) this._cancelPointerGesture();
     this._cancelDraft();
     this.tool = tool;
     const canvas = this.map.getCanvas();
@@ -261,54 +262,87 @@ export class MapTools {
       }
     });
 
-    // Touch: freehand draw and drag-measure on the canvas directly so we get
-    // every move (Mapbox swallows touch pans before its own move events).
+    // Touch/pen: own the pointer on the canvas so a draw/measure gesture cannot
+    // leak into page selection or Mapbox's pan handlers when the finger drifts.
     const canvas = map.getCanvas();
-    let touchDrawing = false;
-    let touchMeasuring = false;
-    const llFromTouch = (t) => {
+    let pointerDrawing = false;
+    let pointerMeasuring = false;
+    let activePointerId = null;
+    const llFromClient = (clientX, clientY) => {
       const rect = canvas.getBoundingClientRect();
-      return map.unproject([t.clientX - rect.left, t.clientY - rect.top]);
+      return map.unproject([clientX - rect.left, clientY - rect.top]);
     };
-    canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) return;
-      const ll = llFromTouch(e.touches[0]);
+    this._cancelPointerGesture = () => {
+      if (activePointerId != null && canvas.releasePointerCapture) {
+        try { canvas.releasePointerCapture(activePointerId); } catch (_) { /* already released */ }
+      }
+      drawing = false;
+      measuring = false;
+      pointerDrawing = false;
+      pointerMeasuring = false;
+      activePointerId = null;
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      if (activePointerId != null) return;
+      if (this.tool !== 'draw' && this.tool !== 'measure') return;
+      e.preventDefault();
+      e.stopPropagation();
+      activePointerId = e.pointerId;
+      if (canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* browser already released it */ }
+      }
+      const ll = llFromClient(e.clientX, e.clientY);
       const pt = [ll.lng, ll.lat];
       if (this.tool === 'draw') {
-        e.preventDefault();
-        touchDrawing = true;
+        pointerDrawing = true;
         this.draft = { kind: 'draw', coords: [pt] };
       } else if (this.tool === 'measure') {
-        e.preventDefault();
-        touchMeasuring = true;
+        pointerMeasuring = true;
         this.draft = { kind: 'measure', coords: [pt, pt] };
         this._renderMeasureLabels();
         this._refresh();
       }
     }, { passive: false });
-    canvas.addEventListener('touchmove', (e) => {
-      const ll = llFromTouch(e.touches[0]);
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'mouse') return;
+      if (e.pointerId !== activePointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const ll = llFromClient(e.clientX, e.clientY);
       const pt = [ll.lng, ll.lat];
-      if (this.tool === 'draw' && touchDrawing) {
-        e.preventDefault();
+      if (this.tool === 'draw' && pointerDrawing) {
         this.draft.coords.push(pt);
         this._refresh();
-      } else if (this.tool === 'measure' && touchMeasuring) {
-        e.preventDefault();
+      } else if (this.tool === 'measure' && pointerMeasuring) {
         this.draft.coords[1] = pt;
         this._renderMeasureLabels();
         this._refresh();
       }
     }, { passive: false });
-    canvas.addEventListener('touchend', () => {
-      if (this.tool === 'draw' && touchDrawing) {
-        touchDrawing = false;
-        this._commitDraft();
-      } else if (this.tool === 'measure' && touchMeasuring) {
-        touchMeasuring = false;
-        this._commitMeasure();
+    const endPointer = (e, commit) => {
+      if (e.pointerType === 'mouse') return;
+      if (e.pointerId !== activePointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (canvas.releasePointerCapture) {
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
       }
-    });
+      activePointerId = null;
+      if (commit && this.tool === 'draw' && pointerDrawing) {
+        pointerDrawing = false;
+        this._commitDraft();
+      } else if (commit && this.tool === 'measure' && pointerMeasuring) {
+        pointerMeasuring = false;
+        this._commitMeasure();
+      } else if (pointerDrawing || pointerMeasuring) {
+        pointerDrawing = false;
+        pointerMeasuring = false;
+        this._cancelDraft();
+      }
+    };
+    canvas.addEventListener('pointerup', (e) => endPointer(e, true), { passive: false });
+    canvas.addEventListener('pointercancel', (e) => endPointer(e, false), { passive: false });
 
     // Storm track still places discrete points by click/tap.
     map.on('click', (e) => {

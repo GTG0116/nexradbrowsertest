@@ -397,29 +397,49 @@ export function setupModelOverlayLayers(map, anchor) {
     }, anchor);
 }
 
-// Show overlays for a grid that carries `.overlays`, or hide them otherwise.
-export function renderModelOverlays(map, grid) {
-  if (!grid || !grid.overlays) { clearModelOverlays(map); return; }
-  setupModelOverlayLayers(map, firstAnchor(map));
+export function prepareModelOverlayData(grid) {
+  if (!grid || !grid.overlays) return null;
   const hasHeight = !!grid.overlays.hgt;
   const hasWind = !!(grid.overlays.u && grid.overlays.v);
   const hasMslp = !!grid.overlays.mslp;
   const hasWindContours = !!grid.overlays.windSpeed;
 
-  map.getSource('hgt-contours').setData(hasHeight ? heightContourGeoJSON(grid) : EMPTY);
-  map.getSource('wind-barbs').setData(hasWind ? barbGeoJSON(grid) : EMPTY);
-  map.getSource('mslp-contours').setData(hasMslp ? mslpContourGeoJSON(grid) : EMPTY);
-  map.getSource('pressure-centers').setData(hasMslp ? pressureCenterGeoJSON(grid) : EMPTY);
-  map.getSource('wind-contours').setData(hasWindContours ? windContourGeoJSON(grid) : EMPTY);
+  return {
+    hasHeight,
+    hasWind,
+    hasMslp,
+    hasWindContours,
+    hgt: hasHeight ? heightContourGeoJSON(grid) : EMPTY,
+    windBarbs: hasWind ? barbGeoJSON(grid) : EMPTY,
+    mslp: hasMslp ? mslpContourGeoJSON(grid) : EMPTY,
+    pressureCenters: hasMslp ? pressureCenterGeoJSON(grid) : EMPTY,
+    windContours: hasWindContours ? windContourGeoJSON(grid) : EMPTY,
+  };
+}
+
+export function showPreparedModelOverlays(map, data) {
+  if (!data) { clearModelOverlays(map); return; }
+  setupModelOverlayLayers(map, firstAnchor(map));
+
+  map.getSource('hgt-contours').setData(data.hgt || EMPTY);
+  map.getSource('wind-barbs').setData(data.windBarbs || EMPTY);
+  map.getSource('mslp-contours').setData(data.mslp || EMPTY);
+  map.getSource('pressure-centers').setData(data.pressureCenters || EMPTY);
+  map.getSource('wind-contours').setData(data.windContours || EMPTY);
 
   for (const id of ['hgt-contours', 'hgt-labels'])
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasHeight ? 'visible' : 'none');
-  if (map.getLayer('wind-barbs')) map.setLayoutProperty('wind-barbs', 'visibility', hasWind ? 'visible' : 'none');
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasHeight ? 'visible' : 'none');
+  if (map.getLayer('wind-barbs')) map.setLayoutProperty('wind-barbs', 'visibility', data.hasWind ? 'visible' : 'none');
   for (const id of ['mslp-contours', 'mslp-labels'])
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasMslp ? 'visible' : 'none');
-  if (map.getLayer('pressure-centers')) map.setLayoutProperty('pressure-centers', 'visibility', hasMslp ? 'visible' : 'none');
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasMslp ? 'visible' : 'none');
+  if (map.getLayer('pressure-centers')) map.setLayoutProperty('pressure-centers', 'visibility', data.hasMslp ? 'visible' : 'none');
   for (const id of ['wind-contours', 'wind-contour-labels'])
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', hasWindContours ? 'visible' : 'none');
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasWindContours ? 'visible' : 'none');
+}
+
+// Show overlays for a grid that carries `.overlays`, or hide them otherwise.
+export function renderModelOverlays(map, grid) {
+  showPreparedModelOverlays(map, prepareModelOverlayData(grid));
 }
 
 export function clearModelOverlays(map) {

@@ -19,7 +19,8 @@ import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from '
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, loadModel, forecastHours,
   modelSupports, defaultProductFor } from './models.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
-import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays } from './modelOverlays.js';
+import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
+  prepareModelOverlayData, showPreparedModelOverlays } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
@@ -640,11 +641,14 @@ const state = {
   sat: {
     satKey: 'goes19',
     sectorKey: 'conus',
+    conusView: 0,
     productId: 'C13',
     enhanceIR: true,
     scenes: [],
     sceneKey: null,
     scene: null,
+    displayMeta: null,
+    _bbox: null,
     layer: null,
   },
   // MRMS state.
@@ -665,6 +669,7 @@ const state = {
     fhour: 0,
     grid: null,
     displayGrid: null,
+    overlayData: null,
     layer: null,
   },
 };
@@ -1197,6 +1202,7 @@ function makeRadarProductButton(id, active) {
     if (routeProductToPane(id)) return;
     ensureLiveForSwitch();
     const wasL3 = isL3Product(state.productId);
+    cancelFrameWarm();
     state.productId = id;
     document
       .querySelectorAll('.product-btn')
@@ -1728,6 +1734,7 @@ async function loadVolumeList() {
     buildVolumeList();
     setStatus(`${vols.length} scans available`);
     if (!vols.length) return;
+    scheduleFrameWarm();
     const latest = vols[vols.length - 1].key;
     if (state._forceLatest || !state.volume || state.live) {
       state._forceLatest = false;
@@ -1764,6 +1771,7 @@ async function loadL3List() {
     buildVolumeList();
     setStatus(`${frames.length} frames available`);
     if (!frames.length) { clearRadarSource(state.map); drawRings(null, 0); state.l3.decoded = null; return; }
+    scheduleFrameWarm();
     // Load the newest frame on an explicit refresh, in LIVE, or whenever the
     // current key isn't in this list (a product switch leaves volumeKey on the
     // previous product's frame).
@@ -1930,6 +1938,7 @@ function displaySweep(sweep, site) {
   // setupOverlays() repaints it once the style is ready.
   if (!map || !state.styleReady) {
     updateInspect();
+    updateDock();
     return;
   }
 
@@ -1939,6 +1948,7 @@ function displaySweep(sweep, site) {
     clearRadarSource(map);
     drawRings(null, 0);
     syncSplit();
+    updateDock();
     return;
   }
 
@@ -1947,6 +1957,7 @@ function displaySweep(sweep, site) {
     drawRings(null, 0);
     updateInspect();
     syncSplit();
+    updateDock();
     return;
   }
 
@@ -1955,6 +1966,7 @@ function displaySweep(sweep, site) {
   drawRings(site, maxR);
   updateInspect();
   syncSplit();
+  updateDock();
 }
 
 // Show or hide the single-site radar overlay in a non-radar mode. Draws the
@@ -2011,6 +2023,7 @@ function applyModePanels() {
 function setMode(mode) {
   if (state.mode === mode) return;
   if (state.playback && state.playback.active) state.playback.stop();
+  cancelFrameWarm();
   state.mode = mode;
   if (mode !== 'satellite') clearSatellite();
   if (mode !== 'mrms') clearMrms();
@@ -2056,6 +2069,62 @@ function satProviderName() {
   return sat && sat.family === 'himawari' ? 'Himawari' : 'GOES';
 }
 
+function selectedConusView() {
+  const idx = Math.max(0, Math.min(CONUS_VIEWS.length - 1, Number(state.sat.conusView) || 0));
+  return CONUS_VIEWS[idx] || CONUS_VIEWS[0];
+}
+
+function satelliteCrop(scene) {
+  if (!scene || state.sat.sectorKey !== 'conus' || !state.sat.conusView) return null;
+  const view = selectedConusView();
+  if (!view || !view[1]) return null;
+  const [w, s, e, n] = view[1];
+  let minC = Infinity, minR = Infinity, maxC = -Infinity, maxR = -Infinity;
+  const take = (lat, lon) => {
+    const p = lonLatToColRow(scene, lat, lon);
+    if (!p) return;
+    if (p.col < minC) minC = p.col;
+    if (p.col > maxC) maxC = p.col;
+    if (p.row < minR) minR = p.row;
+    if (p.row > maxR) maxR = p.row;
+  };
+  for (let i = 0; i <= 12; i++) {
+    const a = i / 12;
+    take(s + (n - s) * a, w);
+    take(s + (n - s) * a, e);
+    take(s, w + (e - w) * a);
+    take(n, w + (e - w) * a);
+  }
+  if (!Number.isFinite(minC) || !Number.isFinite(minR)) return null;
+  const pad = 2;
+  const x0 = Math.max(0, Math.floor(minC) - pad);
+  const y0 = Math.max(0, Math.floor(minR) - pad);
+  const x1 = Math.min(scene.width, Math.ceil(maxC) + pad);
+  const y1 = Math.min(scene.height, Math.ceil(maxR) + pad);
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0, bbox: [w, s, e, n] };
+}
+
+function croppedSatMeta(scene, crop) {
+  const meta = satSceneMeta(scene);
+  if (!crop) return meta;
+  return {
+    ...meta,
+    width: crop.width,
+    height: crop.height,
+    xOffset: scene.xOffset + crop.x * scene.xScale,
+    yOffset: scene.yOffset + crop.y * scene.yScale,
+  };
+}
+
+function buildSatPayload(scene) {
+  const crop = satelliteCrop(scene);
+  const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR, crop });
+  const meta = croppedSatMeta(scene, crop);
+  const bbox = crop && crop.bbox ? crop.bbox : sceneBBox(meta);
+  return { meta, rgba, bbox, crop };
+}
+
 function rebuildSectorSelect() {
   const sectors = sectorsForSatellite(state.sat.satKey);
   el.sectorSelect.innerHTML = '';
@@ -2078,33 +2147,41 @@ function initSatSelects() {
   CONUS_VIEWS.forEach(([name], i) => {
     const o = document.createElement('option');
     o.value = String(i); o.textContent = name;
+    if (i === state.sat.conusView) o.selected = true;
     el.conusViewSelect.appendChild(o);
   });
 
   el.satSelect.addEventListener('change', () => {
+    cancelFrameWarm();
     state.sat.satKey = el.satSelect.value;
     const sectors = sectorsForSatellite(state.sat.satKey);
     if (!sectors[state.sat.sectorKey]) state.sat.sectorKey = Object.keys(sectors)[0];
     rebuildSectorSelect();
     state.sat._centered = false;
-    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat._bbox = null;
+    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
     clearSatellite();
     loadSatScenes();
     saveSettings();
   });
   el.sectorSelect.addEventListener('change', () => {
+    cancelFrameWarm();
     state.sat.sectorKey = el.sectorSelect.value;
     state.sat._centered = false;
-    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat._bbox = null;
+    state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
     clearSatellite();
     applyModePanels();
     loadSatScenes();
     saveSettings();
   });
   el.conusViewSelect.addEventListener('change', () => {
+    cancelFrameWarm();
+    state.sat.conusView = +el.conusViewSelect.value || 0;
+    state.sat._bbox = null;
     const v = CONUS_VIEWS[+el.conusViewSelect.value];
     if (v && state.map) state.map.fitBounds([[v[1][0], v[1][1]], [v[1][2], v[1][3]]], { padding: 12, animate: true });
-  });
+    if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
+    saveSettings();
+    });
   el.irEnhanceToggle.addEventListener('click', () => {
     state.sat.enhanceIR = !state.sat.enhanceIR;
     el.irEnhanceToggle.classList.toggle('active', state.sat.enhanceIR);
@@ -2126,6 +2203,7 @@ function buildSatProductButtons() {
     btn.addEventListener('click', async () => {
       if (routeProductToPane(id)) return;
       ensureLiveForSwitch();
+      cancelFrameWarm();
       state.sat.productId = id;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       buildSatLegend();
@@ -2172,6 +2250,7 @@ async function loadSatScenes() {
     buildSatList();
     setStatus(`${scenes.length} ${satProviderName()} scenes`);
     if (!scenes.length) return;
+    scheduleFrameWarm();
     const latest = scenes[scenes.length - 1].key;
     if (state._forceLatest || !state.sat.scene || state.live) {
       state._forceLatest = false;
@@ -2199,9 +2278,11 @@ async function loadSatScene(key) {
     setStatus(`rendering ${satProviderName()}…`, true);
     el.decoding.classList.add('show');
     state.sat.scene = scene;
+    state.sat.displayMeta = null;
     state.sat._bbox = null;
     if (!state.sat._centered) {
-      const bb = sceneBBox(scene);
+      const bb = state.sat.sectorKey === 'conus' && state.sat.conusView
+        ? selectedConusView()[1] : sceneBBox(scene);
       state.map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 16, animate: false });
       state.sat._centered = true;
     }
@@ -2234,9 +2315,10 @@ function renderSatellite() {
   if (!map || !state.styleReady) return;
   const scene = state.sat.scene;
   if (!scene) { clearSatellite(); return; }
-  const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
-  const bbox = state.sat._bbox || (state.sat._bbox = sceneBBox(scene));
-  drawSatScene(scene, rgba, bbox);
+  const payload = buildSatPayload(scene);
+  state.sat.displayMeta = payload.meta;
+  state.sat._bbox = payload.bbox;
+  drawSatScene(payload.meta, payload.rgba, payload.bbox);
   syncSplit();
   updateDock();
 }
@@ -2299,10 +2381,11 @@ function updateSatInfo() {
   const sat = SATELLITES[s.satKey];
   const sec = SECTORS[s.sectorKey];
   const t = s.scene && s.scene.time;
+  const grid = s.displayMeta || s.scene;
   el.satInfo.innerHTML = `
     <div class="meta-row"><span>Satellite</span><b>${sat.label}</b></div>
     <div class="meta-row"><span>Sector</span><b>${sec.label}</b></div>
-    <div class="meta-row"><span>Grid</span><b>${s.scene ? s.scene.width + '×' + s.scene.height : '—'}</b></div>
+    <div class="meta-row"><span>Grid</span><b>${grid ? grid.width + '×' + grid.height : '—'}</b></div>
     <div class="meta-row"><span>Scan time</span><b>${t ? p2(t.getUTCHours()) + ':' + p2(t.getUTCMinutes()) + 'Z' : '—'}</b></div>
     <div class="meta-row"><span>Refresh</span><b>${sec.refresh}</b></div>`;
 }
@@ -2354,6 +2437,7 @@ function buildMrmsProductButtons() {
       btn.addEventListener('click', () => {
         if (routeProductToPane(id)) return;
         ensureLiveForSwitch(); // load the new product's latest frame, stay live
+        cancelFrameWarm();
         state.mrms.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
         buildMrmsLegend();
@@ -2394,6 +2478,7 @@ async function loadMrmsList() {
     buildMrmsList();
     setStatus(`${frames.length} MRMS frames`);
     if (!frames.length) return;
+    scheduleFrameWarm();
     const latest = frames[frames.length - 1].key;
     if (state._forceLatest || !state.mrms.grid || state.live) {
       state._forceLatest = false;
@@ -2561,6 +2646,7 @@ function buildModelProductButtons() {
       btn.addEventListener('click', () => {
         if (routeProductToPane(id)) return;
         ensureLiveForSwitch();
+        cancelFrameWarm();
         state.models.productId = id;
         document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
         buildModelLegend();
@@ -2679,7 +2765,9 @@ async function loadModelFrame() {
     if (seq !== modelLoadSeq || state.mode !== 'models') return;
     setStatus(`decoding ${modelName()}…`, true);
     el.decoding.classList.add('show');
+    grid._overlayData = prepareModelOverlayData(grid);
     state.models.grid = grid;
+    state.models.overlayData = grid._overlayData;
     renderModels();
     setStatus(`${modelName()} ${run.label} F${p2(fhour)} · ${grid.product.name}`);
   } catch (e) {
@@ -2701,6 +2789,7 @@ function setModelSource(map) {
 
 function clearModels() {
   state.models.displayGrid = null;
+  state.models.overlayData = null;
   if (state.models.layer) state.models.layer.clear();
   if (state.map && state.styleReady) clearModelOverlays(state.map);
   clearModelCityValues();
@@ -2748,13 +2837,19 @@ function sampleGridRaw(grid, lat, lon) {
 function placeLabelLayers(map) {
   const layers = (map.getStyle() && map.getStyle().layers) || [];
   return layers
-    .filter((ly) =>
-      ly.type === 'symbol' &&
-      ly['source-layer'] === 'place_label' &&
-      ly.layout &&
-      ly.layout['text-field'] &&
-      ly.id !== MODEL_CITY_VALUE_LAYER &&
-      (!map.getLayoutProperty || map.getLayoutProperty(ly.id, 'visibility') !== 'none'))
+    .filter((ly) => {
+      if (ly.type !== 'symbol' || !ly.layout || !ly.layout['text-field']) return false;
+      if (ly.id === MODEL_CITY_VALUE_LAYER) return false;
+      if (map.getLayoutProperty && map.getLayoutProperty(ly.id, 'visibility') === 'none') return false;
+      const sl = String(ly['source-layer'] || '').toLowerCase();
+      const id = String(ly.id || '').toLowerCase();
+      const place = /(^|[_-])(place|settlement|city|town|village|hamlet)([_-]|$)/.test(sl) ||
+        /(^|[_-])(place|settlement|city|town|village|hamlet)([_-]|$)/.test(id) ||
+        sl === 'place' || sl === 'place_label' || sl === 'settlement';
+      const nonCity = /road|shield|highway|airport|aeroway|poi|transit|station|water|marine/.test(sl) ||
+        /road|shield|highway|airport|aeroway|poi|transit|station|water|marine/.test(id);
+      return place && !nonCity;
+    })
     .map((ly) => ly.id);
 }
 
@@ -2847,7 +2942,8 @@ function renderModels() {
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
   // Model products may carry wind/height, wind-speed, or MSLP overlays; others clear them.
-  renderModelOverlays(map, grid);
+  state.models.overlayData = grid._overlayData || prepareModelOverlayData(grid);
+  showPreparedModelOverlays(map, state.models.overlayData);
   renderModelCityValues();
   syncSplit();
   updateDock();
@@ -2860,7 +2956,7 @@ function drawModelPayload(payload) {
   if (!map || !state.styleReady) return;
   if (payload && payload.grid) state.models.displayGrid = payload.grid;
   setModelSource(map);
-  clearModelOverlays(map);
+  showPreparedModelOverlays(map, payload && (payload.overlays || prepareModelOverlayData(payload.grid)));
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
@@ -3674,6 +3770,20 @@ const MODEL_PLAYBACK_CONCURRENCY = 4;
 // dimension after pooling; phones pool harder to fit a tighter memory budget.
 const MODEL_PLAYBACK_TARGET_DIM = 900;
 const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 600;
+const FRAME_WARM_START_DELAY = 1800;
+const FRAME_WARM_IDLE_TIMEOUT = 3000;
+const FRAME_WARM_FRAME_PAUSE = 220;
+let frameWarmTimer = null;
+
+function waitForFrameWarmSlot() {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => resolve(), { timeout: FRAME_WARM_IDLE_TIMEOUT });
+    } else {
+      setTimeout(resolve, FRAME_WARM_FRAME_PAUSE);
+    }
+  });
+}
 
 // Max-pool a model grid down by an integer factor for playback: a coarser grid
 // (values + geometry) that draws and samples the same, at a fraction of the
@@ -3690,24 +3800,46 @@ function poolGridForPlayback(grid) {
   const { ni, nj, values, di, dj } = grid;
   const no = Math.ceil(ni / factor);
   const mo = Math.ceil(nj / factor);
-  const out = new Float32Array(no * mo);
-  for (let oy = 0; oy < mo; oy++) {
-    for (let ox = 0; ox < no; ox++) {
-      let best = -Infinity;
-      for (let r = 0; r < factor; r++) {
-        const sy = oy * factor + r;
-        if (sy >= nj) break;
-        const base = sy * ni + ox * factor;
-        for (let c = 0; c < factor; c++) {
-          if (ox * factor + c >= ni) break;
-          const v = values[base + c];
-          if (v > best) best = v;
+  const poolValues = (src, mode = 'max') => {
+    if (!src) return null;
+    const out = new Float32Array(no * mo);
+    for (let oy = 0; oy < mo; oy++) {
+      for (let ox = 0; ox < no; ox++) {
+        let best = -Infinity;
+        let sum = 0;
+        let n = 0;
+        for (let r = 0; r < factor; r++) {
+          const sy = oy * factor + r;
+          if (sy >= nj) break;
+          const base = sy * ni + ox * factor;
+          for (let c = 0; c < factor; c++) {
+            if (ox * factor + c >= ni) break;
+            const v = src[base + c];
+            if (!Number.isFinite(v)) continue;
+            if (mode === 'max') {
+              if (v > best) best = v;
+            } else {
+              sum += v;
+              n++;
+            }
+          }
         }
+        out[oy * no + ox] = mode === 'max'
+          ? (best === -Infinity ? NaN : best)
+          : (n ? sum / n : NaN);
       }
-      out[oy * no + ox] = best === -Infinity ? NaN : best;
+    }
+    return out;
+  };
+  const out = poolValues(values, 'max');
+  let overlays = grid.overlays || null;
+  if (overlays) {
+    overlays = { ...overlays };
+    for (const key of ['u', 'v', 'hgt', 'mslp', 'windSpeed']) {
+      if (overlays[key]) overlays[key] = poolValues(overlays[key], 'mean');
     }
   }
-  return { ...grid, ni: no, nj: mo, values: out, di: di * factor, dj: dj * factor };
+  return { ...grid, ni: no, nj: mo, values: out, di: di * factor, dj: dj * factor, overlays };
 }
 
 // A short key identifying the current playback context; when it changes (site,
@@ -3717,7 +3849,7 @@ function playbackContextKey() {
   if (m === 'radar') return `radar:${state.site}`;
   if (m === 'mrms') return `mrms:${state.mrms.productId}`;
   if (m === 'satellite')
-    return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.productId}:${state.sat.enhanceIR}`;
+    return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.conusView}:${state.sat.productId}:${state.sat.enhanceIR}`;
   if (m === 'models')
     return `models:${state.models.modelKey}:${state.models.productId}:${state.models.runKey}`;
   return m;
@@ -3746,29 +3878,32 @@ async function buildRadarPlaybackFrames(n) {
 // Build the per-mode playback provider against the current state. `frames` are
 // ordered oldest→newest; `ck` is a globally-unique cache key per frame. Every
 // source loops the same user-chosen number of frames (state.playbackFrames).
-async function buildPlaybackProvider() {
-  const n = state.playbackFrames;
+async function buildPlaybackProvider(opts = {}) {
+  const allFrames = !!opts.allFrames;
+  const n = allFrames ? Infinity : state.playbackFrames;
   if (state.mode === 'radar') {
     // Level III products loop their own per-frame files (already in state.volumes).
     if (isL3Product(state.productId)) {
+      const frames = allFrames ? state.volumes : state.volumes.slice(-n);
       return {
-        frames: state.volumes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+        frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
         async load(f) { return (await loadLevel3(state.site, state.productId, f.key)).decoded; },
         render(d) { displaySweep(d.sweep, { lat: d.lat, lon: d.lon }); },
         idle() { renderRadar(); },
       };
     }
-    const frames = await buildRadarPlaybackFrames(n);
+    const frames = allFrames ? state.volumes : await buildRadarPlaybackFrames(n);
     return {
-      frames: frames.map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) { return await decodeVolume(await fetchVolume(f.key)); },
       render(vol) { displaySweep(pickSweep(vol.sweeps), vol.site); },
       idle() { displaySweep(currentSweep(), state.volume && state.volume.site); },
     };
   }
   if (state.mode === 'mrms') {
+    const frames = allFrames ? state.mrms.frames : state.mrms.frames.slice(-n);
     return {
-      frames: state.mrms.frames.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
         const grid = await loadMrms(state.mrms.productId, f.key);
         return prepareGridTexture(grid, resolveGridProduct(grid.product));
@@ -3778,12 +3913,12 @@ async function buildPlaybackProvider() {
     };
   }
   if (state.mode === 'satellite') {
+    const frames = allFrames ? state.sat.scenes : state.sat.scenes.slice(-n);
     return {
-      frames: state.sat.scenes.slice(-n).map((v) => ({ label: v.label, ck: v.key, key: v.key })),
+      frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
         const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
-        const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR });
-        const payload = { meta: satSceneMeta(scene), rgba, bbox: sceneBBox(scene) };
+        const payload = buildSatPayload(scene);
         // Playback only needs the prebuilt RGBA per frame, not the channels — drop
         // the worker's cached decode so a long loop can't pin many full-disk files.
         if (f.key !== state.sat.sceneKey) evictScene(f.key);
@@ -3811,19 +3946,23 @@ async function buildPlaybackProvider() {
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
-      frames: hours.map((fh) => ({ label: 'F' + p2(fh), ck: `${run.key}#${fh}`, fhour: fh, run })),
+      frames: hours.map((fh) => ({
+        label: 'F' + p2(fh),
+        time: new Date(run.time.getTime() + fh * 3600 * 1000),
+        ck: `${run.key}#${fh}`,
+        fhour: fh,
+        run,
+      })),
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
-        // The loop draws only the coloured fill (barb/contour overlays are hidden
-        // while playing), so drop the heavy overlay arrays before pooling; they can
-        // be several times the grid's own size.
-        if (grid.overlays) grid.overlays = null;
         // Down-pool for playback so hundreds of resident frames fit in memory; the
         // pooled grid is what both the GPU fill and the scrubbed-hour readout use.
         // The full-res `grid` here is transient and GC'd after this returns.
         const pooled = poolGridForPlayback(grid);
         const payload = prepareGridTexture(pooled, resolveGridProduct(grid.product));
         payload.grid = pooled;
+        payload.overlays = prepareModelOverlayData(pooled);
+        pooled._overlayData = payload.overlays;
         return payload;
       },
       render(payload) { drawModelPayload(payload); },
@@ -3843,6 +3982,24 @@ async function buildPlaybackProvider() {
   return { frames: [] };
 }
 
+function scheduleFrameWarm() {
+  if (!state.playback || state.playback.active) return;
+  if (state.mode === 'models') return;
+  if (frameWarmTimer) clearTimeout(frameWarmTimer);
+  frameWarmTimer = setTimeout(() => {
+    frameWarmTimer = null;
+    if (state.playback && !state.playback.active) state.playback.warmAll();
+  }, FRAME_WARM_START_DELAY);
+}
+
+function cancelFrameWarm() {
+  if (frameWarmTimer) {
+    clearTimeout(frameWarmTimer);
+    frameWarmTimer = null;
+  }
+  if (state.playback) state.playback.warmSeq++;
+}
+
 function createPlayback() {
   return {
     active: false,
@@ -3857,10 +4014,44 @@ function createPlayback() {
     cache: new Map(),
     cacheCtx: null,
     loadingIdx: new Set(),
+    warming: false,
+    warmSeq: 0,
     provider: null,
+
+    async warmAll() {
+      const ctx = playbackContextKey();
+      const seq = ++this.warmSeq;
+      try {
+        const provider = await buildPlaybackProvider();
+        if (!provider.frames || !provider.frames.length || this.active || this.warmSeq !== seq) return;
+        if (ctx !== this.cacheCtx) { this.cache.clear(); this.cacheCtx = ctx; }
+        this.warming = true;
+
+        // Warm only the selected playback-window length, one frame at a time,
+        // and yield to browser idle time between frames so panning/zooming stays
+        // responsive while the cache fills.
+        for (const fr of provider.frames) {
+          if (this.active || this.warmSeq !== seq || playbackContextKey() !== ctx) return;
+          if (this.cache.has(fr.ck)) continue;
+          await waitForFrameWarmSlot();
+          if (this.active || this.warmSeq !== seq || playbackContextKey() !== ctx) return;
+          try {
+            const payload = await provider.load(fr);
+            if (this.active || this.warmSeq !== seq || playbackContextKey() !== ctx) return;
+            this.cache.set(fr.ck, payload);
+          } catch (e) {
+            console.warn('background frame warm failed:', e.message || e);
+          }
+          await new Promise((r) => setTimeout(r, FRAME_WARM_FRAME_PAUSE));
+        }
+      } finally {
+        if (this.warmSeq === seq) this.warming = false;
+      }
+    },
 
     async start() {
       if (this.active) return;
+      this.warmSeq++;
       const provider = await buildPlaybackProvider();
       if (!provider.frames || !provider.frames.length) {
         setStatus('no frames to play back');
@@ -4297,6 +4488,17 @@ function fmtDate(d, local = state.tzLocal) {
 // The valid/scan time (Date) of the frame currently shown for the active mode,
 // plus a short tag describing it. Returns null when nothing is loaded yet.
 function productTime() {
+  const pb = state.playback;
+  if (pb && pb.active && pb.frames && pb.frames[pb.idx]) {
+    const f = pb.frames[pb.idx];
+    if (f.time) {
+      const tag = state.mode === 'models'
+        ? `F${String(currentModelFhour()).padStart(2, '0')}`
+        : state.mode === 'satellite' ? 'sat'
+        : state.mode === 'mrms' ? 'mrms' : 'scan';
+      return { time: f.time, tag };
+    }
+  }
   if (state.mode === 'satellite') {
     const f = state.sat.scenes.find((x) => x.key === state.sat.sceneKey);
     const t = (f && f.time) || (state.sat.scene && state.sat.scene.time) || null;
@@ -4915,6 +5117,8 @@ function setupDockTools() {
   }
 
   function setDockTool(id) {
+    const prev = current();
+    if (prev && prev.id !== id) clearOtherTools(null);
     state.dockTool = id;
     const t = current();
     el.dockToolBtn.textContent = t.icon;
@@ -5745,6 +5949,7 @@ function saveSettings() {
         sat: {
           satKey: state.sat.satKey,
           sectorKey: state.sat.sectorKey,
+          conusView: state.sat.conusView,
           productId: state.sat.productId,
           enhanceIR: state.sat.enhanceIR,
         },
@@ -5821,6 +6026,8 @@ function applyStoredSettings(s) {
   if (s.sat && typeof s.sat === 'object') {
     if (typeof s.sat.satKey === 'string') state.sat.satKey = s.sat.satKey;
     if (typeof s.sat.sectorKey === 'string') state.sat.sectorKey = s.sat.sectorKey;
+    if (typeof s.sat.conusView === 'number')
+      state.sat.conusView = Math.max(0, Math.min(CONUS_VIEWS.length - 1, s.sat.conusView | 0));
     if (typeof s.sat.productId === 'string') state.sat.productId = s.sat.productId;
     if (typeof s.sat.enhanceIR === 'boolean') state.sat.enhanceIR = s.sat.enhanceIR;
     const satSectors = sectorsForSatellite(state.sat.satKey);
@@ -6116,6 +6323,8 @@ function init() {
     el.playFrames.addEventListener('input', () => {
       state.playbackFrames = Number(el.playFrames.value);
       el.playFramesVal.textContent = state.playbackFrames;
+      cancelFrameWarm();
+      scheduleFrameWarm();
       saveSettings();
     });
   }

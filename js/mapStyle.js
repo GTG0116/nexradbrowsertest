@@ -109,7 +109,13 @@ function scaleLineWidth(value, mult) {
 function isTownLabelLayer(ly) {
   if (ly.type !== 'symbol') return false;
   const sl = ly['source-layer'] || '';
-  return /settlement|place/i.test(sl) || /settlement|place/i.test(ly.id);
+  const id = ly.id || '';
+  const place = /(^|[_-])(place|settlement|city|town|village|hamlet)([_-]|$)/i.test(sl) ||
+    /(^|[_-])(place|settlement|city|town|village|hamlet)([_-]|$)/i.test(id) ||
+    /^(place|place_label|settlement)$/i.test(sl);
+  const nonCity = /road|shield|highway|airport|aeroway|poi|transit|station|water|marine/i.test(sl) ||
+    /road|shield|highway|airport|aeroway|poi|transit|station|water|marine/i.test(id);
+  return place && !nonCity;
 }
 
 // Apply every basemap customisation to one map. `opts` is a normalised
