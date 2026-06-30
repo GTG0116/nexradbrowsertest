@@ -15,7 +15,7 @@
       name="description"
       content="RadarNexus — live WSR-88D NEXRAD radar, GOES/Himawari satellite and NWP models decoded entirely in your browser and draped over an interactive map."
     />
-    <meta name="theme-color" content="#03060f" />
+    <meta name="theme-color" content="#efe7da" />
     <!-- Brand icons (favicon + iOS/Android web-app icon), generated from the
          RadarNexus storm mark in logo/. -->
     <link rel="icon" type="image/png" sizes="32x32" href="logo/favicon-32.png" />
@@ -26,10 +26,13 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="site.webmanifest" />
     <link rel="preconnect" href="https://unidata-nexrad-level2.s3.amazonaws.com" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&display=swap"
       rel="stylesheet"
     />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
     <link
       href="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.css"
       rel="stylesheet"
@@ -75,31 +78,29 @@
     </div>
 
     <div class="app">
-      <!-- Top bar -->
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark">
-            <img src="logo/Logo1.png" alt="RadarNexus" />
-          </div>
-          <div class="brand-text">
-            <p>browser-native weather scope</p>
-          </div>
-        </div>
-        <div class="topbar-status">
-          <div id="status" class="status">initializing…</div>
-        </div>
-      </header>
-
       <main class="layout">
-        <!-- Left rail: source -->
-        <aside class="rail rail-left">
+        <!-- Desktop sidebar: brand, source switching, layout, picker, product,
+             secondary controls, opacity and active alerts — everything has a
+             home. Below ~760px this is hidden in favor of the bottom dock +
+             settings sheet (see applyResponsiveLayout in app.js). -->
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-brand">
+            <div class="brand-mark">
+              <img src="logo/icon-512.png" alt="RadarNexus" />
+            </div>
+            <div class="brand-text">
+              <div class="brand-word">Radar<span class="brand-accent">Nexus</span></div>
+              <p id="status" class="status">browser-native weather scope</p>
+            </div>
+          </div>
+
           <section class="panel" id="sourcePanel">
             <h2 class="panel-title">Source</h2>
             <div class="mode-switch" id="modeSwitch">
-              <button class="mode-btn active" data-mode="radar">RADAR</button>
-              <button class="mode-btn" data-mode="satellite">SAT</button>
-              <button class="mode-btn" data-mode="mrms">MRMS</button>
-              <button class="mode-btn" data-mode="models">MODELS</button>
+              <button class="mode-btn active" data-mode="radar"><i data-lucide="radar" class="lucide sm"></i>RADAR</button>
+              <button class="mode-btn" data-mode="satellite"><i data-lucide="satellite" class="lucide sm"></i>SAT</button>
+              <button class="mode-btn" data-mode="mrms"><i data-lucide="layers-3" class="lucide sm"></i>MRMS</button>
+              <button class="mode-btn" data-mode="models"><i data-lucide="line-chart" class="lucide sm"></i>MODELS</button>
             </div>
             <label class="field" id="siteField">
               <span>Radar site</span>
@@ -129,19 +130,33 @@
               <span>Model</span>
               <select id="modelSelect"></select>
             </label>
-            <label class="field">
-              <span>UTC date</span>
-              <input type="date" id="dateInput" />
-            </label>
-            <div class="btn-row">
-              <button id="refreshBtn" class="ghost-btn">↻ Refresh</button>
-              <button id="liveBtn" class="ghost-btn live">○ LIVE</button>
+          </section>
+
+          <section class="panel" id="layoutPanel">
+            <h2 class="panel-title">Layout</h2>
+            <div class="layout-switch" id="layoutSwitch">
+              <button type="button" class="layout-btn active" data-layout="single" title="Single view"><i data-lucide="square" class="lucide sm"></i></button>
+              <button type="button" class="layout-btn" data-layout="split2" title="Split view (compare products)"><i data-lucide="columns-2" class="lucide sm"></i></button>
             </div>
           </section>
 
-          <section class="panel grow" id="volumePanel">
-            <h2 class="panel-title" id="volumeTitle">Volume scans</h2>
-            <div id="volumeList" class="vol-list scroll"></div>
+          <section class="panel" id="productPanel">
+            <h2 class="panel-title">Product</h2>
+            <div id="productButtons" class="product-grid"></div>
+            <label class="field opacity-field">
+              <span>Overlay opacity <b id="opacityVal">85%</b></span>
+              <input type="range" id="opacity" min="20" max="100" value="85" />
+            </label>
+          </section>
+
+          <section class="panel" id="tiltPanel">
+            <h2 class="panel-title">Elevation tilt</h2>
+            <div id="tiltList" class="tilt-list scroll"></div>
+          </section>
+
+          <section class="panel" id="fhourPanel" hidden>
+            <h2 class="panel-title">Forecast hour</h2>
+            <div id="fhourList" class="tilt-list scroll"></div>
           </section>
 
           <section class="panel grow" id="alertsPanel">
@@ -151,7 +166,31 @@
             </h2>
             <div id="alertList" class="alert-list scroll"></div>
           </section>
+
+          <button id="settingsBtn" class="settings-btn" type="button">
+            <i data-lucide="settings-2" class="lucide sm"></i>
+            Settings &amp; data
+          </button>
+          <div class="sidebar-foot">Data · NOAA Open Data (AWS S3)<br />Decoded client-side · browser-native</div>
         </aside>
+
+        <!-- The panels below are overflow controls not shown directly in the
+             sidebar (scan browsing, display toggles, map/outlook settings,
+             metadata). On desktop they live in the settings drawer (the same
+             sheet component reused — see layoutDesktopDrawer in app.js); on
+             mobile they're distributed into the swipe sheet pages as before. -->
+        <section class="panel grow" id="volumePanel" hidden>
+          <h2 class="panel-title" id="volumeTitle">Volume scans</h2>
+          <label class="field">
+            <span>UTC date</span>
+            <input type="date" id="dateInput" />
+          </label>
+          <div class="btn-row">
+            <button id="refreshBtn" class="ghost-btn">↻ Refresh</button>
+            <button id="liveBtn" class="ghost-btn live">○ LIVE</button>
+          </div>
+          <div id="volumeList" class="vol-list scroll"></div>
+        </section>
 
         <!-- Center: the interactive map -->
         <section class="stage">
@@ -160,25 +199,30 @@
             <div id="map2" hidden></div>
 
             <div id="mapHud" class="map-hud">
-              <!-- Time + legend share the same top HUD so frame time, clock mode,
-                   and product scale read as one control surface. -->
-              <div id="timeBar" class="time-bar">
-                <span id="clock" class="clock">--- -- --:--:-- UTC</span>
-                <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
-                <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+              <!-- Breadcrumb + clock stack top-left; the legend centers itself
+                   independently (see CSS) so neither crowds the other. -->
+              <div class="hud-left">
+                <div id="breadcrumb" class="breadcrumb">
+                  <span id="breadcrumbIcon"><i data-lucide="radar" class="lucide sm"></i></span><span id="breadcrumbText">—</span>
+                </div>
+                <div id="timeBar" class="time-bar">
+                  <span id="clock" class="clock">--- -- --:--:-- UTC</span>
+                  <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
+                  <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
+                </div>
               </div>
               <div id="legend" class="legend"></div>
             </div>
 
             <!-- Map tools: draw / measure / storm track / METARs -->
             <div id="mapTools" class="map-tools">
-              <button id="toolDraw" class="map-tool" title="Draw (freehand)">✎</button>
-              <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area">📏</button>
-              <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)">➤</button>
-              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)">⛅</button>
-              <button id="toolWeather" class="map-tool" title="Local current conditions">☼</button>
-              <button id="toolLocate" class="map-tool" title="Show my live location">📍</button>
-              <button id="toolExport" class="map-tool" title="Export / share image">⤓</button>
+              <button id="toolDraw" class="map-tool" title="Draw (freehand)"><i data-lucide="pencil" class="lucide sm"></i></button>
+              <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area"><i data-lucide="ruler" class="lucide sm"></i></button>
+              <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><i data-lucide="navigation" class="lucide sm"></i></button>
+              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)"><i data-lucide="cloud-sun" class="lucide sm"></i></button>
+              <button id="toolWeather" class="map-tool" title="Local current conditions"><i data-lucide="sun" class="lucide sm"></i></button>
+              <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="locate-fixed" class="lucide sm"></i></button>
+              <button id="toolExport" class="map-tool" title="Export / share image"><i data-lucide="download" class="lucide sm"></i></button>
             </div>
             <div id="drawToolPopup" class="tool-popover" hidden>
               <div class="tool-popover-head">
@@ -220,53 +264,50 @@
           </div>
         </section>
 
-        <!-- Right rail: products & metadata -->
-        <aside class="rail rail-right">
-          <section class="panel" id="productPanel">
-            <h2 class="panel-title">Product</h2>
-            <div id="productButtons" class="product-grid"></div>
-            <label class="field opacity-field">
-              <span>Overlay opacity <b id="opacityVal">85%</b></span>
-              <input type="range" id="opacity" min="20" max="100" value="85" />
-            </label>
-            <div class="toggle-field" id="dealiasField">
-              <span>Dealias velocity</span>
-              <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
-            </div>
-            <label class="field opacity-field" id="smoothField">
-              <span>Smoothing <b id="smoothVal">None</b></span>
-              <input type="range" id="smooth" min="0" max="3" value="0" step="1" title="Smooth the plotted radar / satellite / model data — none, low, medium or high" />
-            </label>
-            <div class="toggle-field" id="radarOverlayField" hidden>
-              <span>Radar overlay</span>
-              <button id="radarOverlayToggle" class="alerts-toggle" title="Overlay the single-site radar on this source">OFF</button>
-            </div>
-            <div class="toggle-field" id="modelCityValuesField" hidden>
-              <span>City values</span>
-              <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled model values above city labels">ON</button>
-            </div>
-            <div class="toggle-field" id="loopField">
-              <span>Playback loop</span>
-              <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
-            </div>
-            <div class="toggle-field" id="splitField">
-              <span>Split screen</span>
-              <button id="toolSplit" class="alerts-toggle" title="Compare products in a synced split screen">OFF</button>
-            </div>
-            <label class="field opacity-field" id="playFramesField">
-              <span>Playback frames <b id="playFramesVal">5</b></span>
-              <input type="range" id="playFrames" min="2" max="20" value="5" />
-            </label>
-            <div class="pal-row">
-              <label class="pal-btn" for="palInput">⤓ Load .pal</label>
-              <input type="file" id="palInput" accept=".pal,.txt" hidden />
-              <button id="palCreate" class="pal-btn" type="button">Create</button>
-              <button id="palReset" class="pal-btn ghost">Reset</button>
-            </div>
-            <div id="palName" class="pal-name"></div>
-          </section>
+        <!-- Display toggles overflow (not in the sidebar's trimmed Product
+             panel): dealias, smoothing, radar overlay, city values, loop,
+             legacy split toggle (kept as the Layout switch's underlying
+             control), playback frame count and the .pal color-table tools. -->
+        <section class="panel" id="displayPanel" hidden>
+          <h2 class="panel-title">Display options</h2>
+          <div class="toggle-field" id="dealiasField">
+            <span>Dealias velocity</span>
+            <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
+          </div>
+          <label class="field opacity-field" id="smoothField">
+            <span>Smoothing <b id="smoothVal">None</b></span>
+            <input type="range" id="smooth" min="0" max="3" value="0" step="1" title="Smooth the plotted radar / satellite / model data — none, low, medium or high" />
+          </label>
+          <div class="toggle-field" id="radarOverlayField" hidden>
+            <span>Radar overlay</span>
+            <button id="radarOverlayToggle" class="alerts-toggle" title="Overlay the single-site radar on this source">OFF</button>
+          </div>
+          <div class="toggle-field" id="modelCityValuesField" hidden>
+            <span>City values</span>
+            <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled model values above city labels">ON</button>
+          </div>
+          <div class="toggle-field" id="loopField">
+            <span>Playback loop</span>
+            <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
+          </div>
+          <div class="toggle-field" id="splitField">
+            <span>Split screen</span>
+            <button id="toolSplit" class="alerts-toggle" title="Compare products in a synced split screen">OFF</button>
+          </div>
+          <label class="field opacity-field" id="playFramesField">
+            <span>Playback frames <b id="playFramesVal">5</b></span>
+            <input type="range" id="playFrames" min="2" max="20" value="5" />
+          </label>
+          <div class="pal-row">
+            <label class="pal-btn" for="palInput">⤓ Load .pal</label>
+            <input type="file" id="palInput" accept=".pal,.txt" hidden />
+            <button id="palCreate" class="pal-btn" type="button">Create</button>
+            <button id="palReset" class="pal-btn ghost">Reset</button>
+          </div>
+          <div id="palName" class="pal-name"></div>
+        </section>
 
-          <section class="panel" id="basemapPanel">
+        <section class="panel" id="basemapPanel" hidden>
             <h2 class="panel-title">Map settings</h2>
             <label class="field">
               <span>Map provider</span>
@@ -314,53 +355,42 @@
             </details>
           </section>
 
-          <section class="panel" id="spcPanel">
-            <h2 class="panel-title spc-title">
-              Outlooks
-              <button id="spcToggle" class="alerts-toggle" title="Toggle forecast outlook overlay">OFF</button>
-            </h2>
-            <div class="spc-controls">
-              <label class="field">
-                <span>Outlook</span>
-                <select id="outlookSelect"></select>
-              </label>
-              <label class="field">
-                <span>Detail</span>
-                <select id="outlookDetail"></select>
-              </label>
-            </div>
-            <label class="field opacity-field" id="spcOpacityField">
-              <span>Outlook opacity <b id="spcOpacityVal">30%</b></span>
-              <input type="range" id="spcOpacity" min="5" max="90" value="30" title="Adjust the outlook fill shading opacity" />
+        <section class="panel" id="spcPanel" hidden>
+          <h2 class="panel-title spc-title">
+            Outlooks
+            <button id="spcToggle" class="alerts-toggle" title="Toggle forecast outlook overlay">OFF</button>
+          </h2>
+          <div class="spc-controls">
+            <label class="field">
+              <span>Outlook</span>
+              <select id="outlookSelect"></select>
             </label>
-            <div id="spcStatus" class="spc-status"></div>
-            <div id="spcLegend" class="spc-legend"></div>
-          </section>
+            <label class="field">
+              <span>Detail</span>
+              <select id="outlookDetail"></select>
+            </label>
+          </div>
+          <label class="field opacity-field" id="spcOpacityField">
+            <span>Outlook opacity <b id="spcOpacityVal">30%</b></span>
+            <input type="range" id="spcOpacity" min="5" max="90" value="30" title="Adjust the outlook fill shading opacity" />
+          </label>
+          <div id="spcStatus" class="spc-status"></div>
+          <div id="spcLegend" class="spc-legend"></div>
+        </section>
 
-          <section class="panel" id="tiltPanel">
-            <h2 class="panel-title">Elevation tilt</h2>
-            <div id="tiltList" class="tilt-list scroll"></div>
-          </section>
+        <section class="panel" id="satOptsPanel" hidden>
+          <h2 class="panel-title">Satellite options</h2>
+          <div class="toggle-field">
+            <span>IR / WV color enhancement</span>
+            <button id="irEnhanceToggle" class="alerts-toggle active" title="Colorize infrared & water-vapor channels">ON</button>
+          </div>
+          <div id="satInfo" class="meta" style="margin-top:8px"></div>
+        </section>
 
-          <section class="panel" id="fhourPanel" hidden>
-            <h2 class="panel-title">Forecast hour</h2>
-            <div id="fhourList" class="tilt-list scroll"></div>
-          </section>
-
-          <section class="panel" id="satOptsPanel" hidden>
-            <h2 class="panel-title">Satellite options</h2>
-            <div class="toggle-field">
-              <span>IR / WV color enhancement</span>
-              <button id="irEnhanceToggle" class="alerts-toggle active" title="Colorize infrared & water-vapor channels">ON</button>
-            </div>
-            <div id="satInfo" class="meta" style="margin-top:8px"></div>
-          </section>
-
-          <section class="panel grow" id="metaPanel">
-            <h2 class="panel-title">Volume metadata</h2>
-            <div id="meta" class="meta"></div>
-          </section>
-        </aside>
+        <section class="panel grow" id="metaPanel" hidden>
+          <h2 class="panel-title">Volume metadata</h2>
+          <div id="meta" class="meta"></div>
+        </section>
       </main>
 
       <!-- ============================================================= -->
@@ -489,10 +519,6 @@
         </div>
       </div>
 
-      <footer class="footer">
-        <span>Data: NOAA Open Data (AWS S3) · <code>nexrad-level2</code> · <code>goes</code> · <code>mrms-pds</code></span>
-        <span>Decoded client-side · Level II · NetCDF-4/HDF5 · GRIB2</span>
-      </footer>
     </div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.js"></script>

@@ -227,13 +227,13 @@ export class ExportTool {
 // Banner painting helpers
 // ---------------------------------------------------------------------------
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
-const SANS = "'Space Grotesk', system-ui, sans-serif";
+const SANS = "'Manrope', system-ui, sans-serif";
 
 // Header: "◆ RadarNexus" wordmark on the left, title + sub stacked in the middle,
 // scan time on the right. Everything is measured and clipped so the three blocks
 // never overlap, whatever the image width. `u` is the base text unit (~px).
 function drawHeader(ctx, cap, W, H, u, padX) {
-  const AZURE = '#2bb8f5';
+  const AZURE = '#e2643f';
   // Brand accent bar down the left edge.
   ctx.fillStyle = AZURE;
   ctx.fillRect(0, 0, Math.max(2, Math.round(u * 0.22)), H);
@@ -521,7 +521,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
       if (y > bottom) return;
       ctx.textAlign = 'left';
       if (i === 0) {
-        ctx.fillStyle = b.color || '#2bb8f5';
+        ctx.fillStyle = b.color || '#e2643f';
         ctx.fillText('•', x0 + pad, y);
       }
       ctx.fillStyle = '#cdd6e0';

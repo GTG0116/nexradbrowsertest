@@ -1,26 +1,31 @@
-/* RadarNexus — a radar-operations console aesthetic built on the logo's palette:
-   a near-black field, deep-navy glass panels, and a high-contrast jump to the
-   bright azure "Nexus" blue for every highlight, glow and active state. Monospace
-   data readouts and a slow rotating sweep keep the scope feel. The wide gap
-   between the deep navy and the electric azure is deliberate — it's what gives
-   the UI its punch. */
+/* RadarNexus "Field" — a warm, human paper theme: cream/paper field, white
+   floating cards, and a coral/amber accent in place of the old dark "ops
+   console" navy-on-azure look. Editorial display type (Bricolage Grotesque)
+   for headings/wordmark, Manrope for body copy, JetBrains Mono for data
+   readouts/labels — the same type system as the approved design prototype
+   (RadarNexus Field.dc.html). */
 
 :root {
-  --bg: #03060f;
-  --bg-2: #060c1c;
-  --panel: #0c1a36;
-  --panel-edge: #1d4a93;
-  --ink: #dceaff;
-  --ink-dim: #7f9bc6;
-  /* Two-tone blue system: --accent is the bright "Nexus" azure (primary
-     highlight), --accent-2 the deeper electric blue, --accent-bright a near-cyan
-     glint for the strongest accents and glows. */
-  --accent: #2bb8f5;
-  --accent-2: #2f6bff;
-  --accent-bright: #5fd4ff;
-  --warn: #ff9d3c;
-  --glow: 0 0 24px rgba(43, 184, 245, 0.32);
-  --glow-strong: 0 0 30px rgba(95, 212, 255, 0.45);
+  --bg: #efe7da;
+  --bg-2: #efe7da;
+  --panel: #fcf8f1;
+  --panel-edge: #e3d8c6;
+  --panel-soft: #f1e9db;
+  --ink: #2a2520;
+  --ink-dim: #8a7f72;
+  --ink-faint: #a3947f;
+  /* Warm coral/amber accent system: --accent is the primary coral, --accent-2
+     the deep clay/rust used for "live"/urgent states, --accent-bright a pale
+     peach glint for soft fills. */
+  --accent: #e2643f;
+  --accent-2: #d23f1c;
+  --accent-bright: #ffd9c2;
+  --accent-soft: #fbe4da;
+  --accent-border: #f0c0ad;
+  --accent-ink: #9c3517;
+  --warn: #d99030;
+  --glow: 0 8px 22px -10px rgba(0, 0, 0, 0.5);
+  --glow-strong: 0 14px 34px -12px rgba(0, 0, 0, 0.55);
   --radius: 14px;
   /* Motion system: shared durations + easing so every transition feels of a
      piece. --ease-out matches the bottom sheet's existing curve. */
@@ -51,10 +56,10 @@ body {
 }
 
 body {
-  background: radial-gradient(1200px 800px at 70% -10%, #0d1830 0%, var(--bg) 55%),
-    var(--bg);
+  background: var(--bg);
   color: var(--ink);
-  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-family: 'Manrope', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
@@ -63,99 +68,92 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 14px;
+  height: 100dvh;
+}
+
+/* ---------------- Sidebar (desktop) ---------------- */
+/* "Everything has a home": one continuous left column carries source
+   switching, layout, the site/satellite/model picker, product, secondary
+   (tilt/forecast-hour), opacity and active alerts. Below ~760px this is
+   hidden in favor of the bottom dock + sheet. */
+.sidebar {
+  width: 340px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 16px;
+  overflow-y: auto;
+  background: #fff;
+  border-right: 1px solid var(--panel-edge);
+  z-index: 30;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
   gap: 12px;
 }
-
-/* ---------------- Top bar ---------------- */
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 18px;
-  border: 1px solid var(--panel-edge);
-  border-radius: var(--radius);
-  background: linear-gradient(135deg, #10254a 0%, #0a1226 60%, #0b1f3e 100%);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(95, 212, 255, 0.08);
-  position: relative;
-  overflow: hidden;
-}
-/* A thin azure light line along the top edge ties the bar to the accent. */
-.topbar::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--accent) 22%, var(--accent-bright) 50%, var(--accent) 78%, transparent);
-  opacity: 0.7;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-/* Logo1 is the wide RadarNexus wordmark on a black field. The chip carries that
-   same black, sized to the logo's aspect ratio so it hugs the wordmark; height
-   drives its width. flex-shrink:0 keeps the topbar from squeezing it. */
 .brand-mark {
+  width: 44px;
   height: 44px;
-  aspect-ratio: 1691 / 930;
-  flex-shrink: 0;
-  border-radius: 11px;
-  border: 1px solid rgba(95, 212, 255, 0.5);
+  flex: none;
+  border-radius: 13px;
+  overflow: hidden;
   display: grid;
   place-items: center;
-  position: relative;
-  overflow: hidden;
   background: #000;
-  box-shadow: var(--glow), inset 0 0 0 1px rgba(43, 184, 245, 0.12);
 }
 .brand-mark img {
-  width: 100%;
-  height: 100%;
+  width: 122%;
+  height: 122%;
   object-fit: cover;
   display: block;
 }
-/* A faint sweeping sheen across the mark keeps the live-scope feel without the
-   old spinning ring. */
-.brand-mark::after {
-  content: '';
-  position: absolute;
-  inset: -40%;
-  background: conic-gradient(
-    from 0deg,
-    transparent 0deg,
-    rgba(95, 212, 255, 0.18) 28deg,
-    transparent 70deg
-  );
-  animation: spin 4.5s linear infinite;
-  pointer-events: none;
+.brand-word {
+  font-family: 'Bricolage Grotesque', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  color: var(--ink);
 }
-
-.brand-text p {
-  margin: 0;
-  font-size: 11px;
-  letter-spacing: 2px;
-  color: var(--ink-dim);
-  text-transform: uppercase;
-}
-
-.topbar-status {
-  text-align: right;
-  font-family: 'JetBrains Mono', monospace;
-}
+.brand-accent { color: var(--accent); }
 .status {
-  font-size: 13px;
-  color: var(--accent);
+  margin: 4px 0 0;
+  font: 600 10px/1 'JetBrains Mono', monospace;
+  color: var(--ink-faint);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.status.busy::after {
-  content: ' ▮';
-  animation: blink 1s steps(2) infinite;
+.status.busy { color: var(--accent-ink); }
+
+.settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 11px;
+  border-radius: 13px;
+  background: var(--panel-soft);
+  border: 1px solid var(--panel-edge);
+  color: var(--ink-dim);
+  font: 700 12px 'JetBrains Mono', monospace;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: 0.12s;
 }
+.settings-btn:hover { color: var(--ink); border-color: var(--accent); }
+.sidebar-foot {
+  padding-top: 2px;
+  font: 500 10px/1.5 'JetBrains Mono', monospace;
+  color: var(--ink-faint);
+}
+
 .clock {
   font-size: 12px;
   color: var(--ink-dim);
@@ -165,23 +163,14 @@ body {
 /* ---------------- Layout ---------------- */
 .layout {
   flex: 1;
-  display: grid;
-  grid-template-columns: 280px 1fr 280px;
-  gap: 12px;
-  min-height: 0;
-}
-
-.rail {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
   min-height: 0;
 }
 
 .panel {
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--panel-soft);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -189,6 +178,11 @@ body {
   /* Fixed-content panels (Source, Product, etc.) must keep their full height so
      their controls — like the radar-site picker — never get squeezed away. */
   flex-shrink: 0;
+}
+.sidebar .panel {
+  border: none;
+  background: none;
+  padding: 0;
 }
 .panel.grow {
   flex: 1 1 0;
@@ -198,11 +192,16 @@ body {
 .panel-title {
   margin: 0 0 12px;
   font-size: 11px;
-  letter-spacing: 3px;
+  letter-spacing: 2px;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--ink-faint);
+  font-family: 'JetBrains Mono', monospace;
+}
+.mobile-sheet .panel-title {
   border-bottom: 1px solid var(--panel-edge);
   padding-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 3px;
 }
 
 /* ---------------- Fields ---------------- */
@@ -222,10 +221,10 @@ body {
 }
 select,
 input[type='date'] {
-  background: rgba(8, 16, 32, 0.8);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   color: var(--ink);
-  border-radius: 9px;
+  border-radius: 10px;
   padding: 9px 10px;
   min-height: 40px;
   line-height: 1.2;
@@ -242,6 +241,10 @@ input[type='date'] {
   width: 100%;
   min-width: 0;
 }
+.sidebar select,
+.sidebar input[type='date'] {
+  background: var(--panel);
+}
 input[type='date'] {
   -webkit-appearance: none;
   appearance: none;
@@ -257,7 +260,7 @@ input[type='date']::-webkit-calendar-picker-indicator {
 }
 select:focus,
 input:focus {
-  border-color: var(--accent-2);
+  border-color: var(--accent);
 }
 
 .btn-row {
@@ -266,10 +269,10 @@ input:focus {
 }
 .ghost-btn {
   flex: 1;
-  background: rgba(10, 20, 40, 0.6);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   color: var(--ink);
-  border-radius: 9px;
+  border-radius: 10px;
   padding: 9px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
@@ -278,45 +281,68 @@ input:focus {
 }
 .ghost-btn:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .ghost-btn.live.active {
   color: #fff;
-  border-color: var(--warn);
-  background: rgba(255, 100, 40, 0.18);
-  box-shadow: 0 0 16px rgba(255, 120, 40, 0.3);
+  border-color: var(--accent-2);
+  background: var(--accent-2);
+  box-shadow: 0 4px 14px -6px rgba(210, 63, 28, 0.6);
 }
 
 /* ---------------- Source mode switch ---------------- */
 .mode-switch {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 12px;
-  background: rgba(10, 20, 40, 0.6);
-  border: 1px solid var(--panel-edge);
-  border-radius: 9px;
-  padding: 3px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 0;
 }
 .mode-btn {
-  flex: 1;
-  background: transparent;
-  border: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-soft);
+  border: 1px solid var(--panel-edge);
   color: var(--ink-dim);
-  border-radius: 6px;
-  padding: 7px 4px;
+  border-radius: 13px;
+  padding: 12px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.5px;
   cursor: pointer;
-  transition: 0.14s;
+  transition: 0.12s;
 }
 .mode-btn:hover { color: var(--ink); }
 .mode-btn.active {
-  background: linear-gradient(180deg, rgba(47, 107, 255, 0.32) 0%, rgba(43, 184, 245, 0.18) 100%);
-  color: #eaf6ff;
-  box-shadow: var(--glow), inset 0 0 0 1px rgba(95, 212, 255, 0.45);
-  text-shadow: 0 0 10px rgba(95, 212, 255, 0.6);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 6px 16px -7px var(--accent);
+}
+
+/* ---------------- Layout switch (single / split) ---------------- */
+.layout-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.layout-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px;
+  border-radius: 11px;
+  cursor: pointer;
+  border: 1px solid var(--panel-edge);
+  background: var(--panel-soft);
+  color: var(--ink-dim);
+}
+.layout-btn.active {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 5px 14px -6px var(--accent);
 }
 
 /* ---------------- Volume list ---------------- */
@@ -373,7 +399,7 @@ button {
   color: var(--ink);
 }
 .vol-btn.active {
-  background: rgba(43, 184, 245, 0.12);
+  background: rgba(226, 100, 63, 0.12);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -452,7 +478,7 @@ button {
   color: var(--accent-2) !important;
 }
 .site-tip .mapboxgl-popup-content {
-  background: rgba(8, 16, 32, 0.95);
+  background: var(--panel);
   color: var(--ink);
   border: 1px solid var(--panel-edge);
   border-radius: 6px;
@@ -606,7 +632,7 @@ input[type='range']::-moz-range-thumb {
 .pal-btn {
   flex: 1;
   text-align: center;
-  background: rgba(10, 20, 40, 0.6);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   color: var(--ink);
   border-radius: 9px;
@@ -669,7 +695,7 @@ input[type='range']::-moz-range-thumb {
 .pal-stop-row input[type='number'] {
   width: 100%;
   min-width: 0;
-  background: rgba(8, 16, 32, 0.8);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 8px;
   color: var(--ink);
@@ -695,75 +721,99 @@ input[type='range']::-moz-range-thumb {
   margin-top: 14px;
 }
 
-/* ---------------- Map HUD: time + legend ---------------- */
+/* ---------------- Map HUD: breadcrumb + time (left) and legend (centered) ---------------- */
+/* The HUD wrapper itself isn't positioned — its two children float
+   independently against #mapWrap so the breadcrumb/clock can stack top-left
+   while the legend stays centered, the way the approved design lays it out.
+   On mobile (media query further down) they collapse back into one stacked
+   column. */
 .map-hud {
-  position: absolute;
-  top: calc(12px + env(safe-area-inset-top, 0px));
-  left: 50%;
+  position: static;
   z-index: 650;
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-  width: min(760px, calc(100% - 112px));
-  transform: translateX(-50%);
   pointer-events: none;
 }
 .map-hud > * {
   pointer-events: auto;
 }
-.legend {
-  border: 1px solid var(--panel-edge);
-  border-radius: 10px;
-  background: rgba(8, 14, 26, 0.84);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+.hud-left {
+  position: absolute;
+  top: calc(18px + env(safe-area-inset-top, 0px));
+  left: 18px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.hud-left > * { pointer-events: auto; }
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 10px 14px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(95, 212, 255, 0.08);
-  flex: 1 1 360px;
-  min-width: 240px;
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: var(--glow);
+  font: 700 12px 'JetBrains Mono', monospace;
+  color: var(--ink);
+  width: max-content;
+}
+.breadcrumb .lucide { color: var(--accent); }
+.legend {
+  position: absolute;
+  top: calc(18px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  width: clamp(230px, 26vw, 400px);
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: var(--glow);
+  padding: 11px 15px;
 }
 .legend-title {
-  font-size: 12px;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  color: var(--ink);
-  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  font: 700 10px 'JetBrains Mono', monospace;
+  color: var(--ink-dim);
+  margin-bottom: 6px;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
 }
 .legend-title span {
   color: var(--ink-dim);
 }
 .legend-bar {
-  height: 14px;
-  border-radius: 7px;
-  border: 1px solid var(--panel-edge);
+  height: 12px;
+  border-radius: 6px;
+  border: none;
 }
 .legend-ticks {
   display: flex;
   justify-content: space-between;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: var(--ink-dim);
-  margin-top: 5px;
+  font: 600 9px 'JetBrains Mono', monospace;
+  color: var(--ink-faint);
+  margin-top: 4px;
 }
 
-/* ---------------- Time bar (integrated into the map HUD) ---------------- */
+/* ---------------- Time bar (clock chip, under the breadcrumb) ---------------- */
 .time-bar {
   position: static;
   display: flex;
   align-items: center;
-  gap: 8px;
-  border: 1px solid var(--panel-edge);
-  border-radius: 10px;
-  background: rgba(8, 14, 26, 0.84);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  padding: 10px 10px 10px 12px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  gap: 9px;
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: var(--glow);
+  padding: 9px 13px;
   min-width: max-content;
 }
 .time-bar .clock {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--ink);
   margin: 0;
@@ -772,13 +822,14 @@ input[type='range']::-moz-range-thumb {
 .tz-toggle {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
-  letter-spacing: 1px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--ink-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: transparent;
   border: 1px solid var(--panel-edge);
-  border-radius: 999px;
-  padding: 3px 10px;
+  border-radius: 7px;
+  padding: 3px 8px;
   cursor: pointer;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
@@ -786,9 +837,9 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink);
 }
 .tz-toggle.active {
-  color: var(--accent);
+  color: #fff;
   border-color: var(--accent);
-  background: rgba(80, 200, 255, 0.08);
+  background: var(--accent);
 }
 
 /* ---------------- Product grid ---------------- */
@@ -864,7 +915,7 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  background: rgba(10, 20, 40, 0.5);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 9px;
   padding: 9px 10px;
@@ -885,10 +936,9 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
 }
 .product-btn.active {
-  border-color: var(--accent-bright);
-  background: linear-gradient(160deg, rgba(47, 107, 255, 0.22) 0%, rgba(43, 184, 245, 0.14) 100%);
-  color: #eaf6ff;
-  box-shadow: var(--glow), inset 0 0 0 1px rgba(95, 212, 255, 0.3);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 /* ---------------- Tilt list ---------------- */
@@ -899,7 +949,7 @@ input[type='range']::-moz-range-thumb {
   max-height: 130px;
 }
 .tilt-btn {
-  background: rgba(10, 20, 40, 0.5);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 8px;
   padding: 6px 10px;
@@ -916,7 +966,7 @@ input[type='range']::-moz-range-thumb {
 .tilt-btn.active {
   color: var(--accent);
   border-color: var(--accent);
-  background: rgba(43, 184, 245, 0.12);
+  background: rgba(226, 100, 63, 0.12);
 }
 
 /* ---------------- Meta ---------------- */
@@ -961,7 +1011,7 @@ input[type='range']::-moz-range-thumb {
   justify-content: space-between;
 }
 .alerts-toggle {
-  background: rgba(10, 20, 40, 0.6);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   color: var(--ink-dim);
   border-radius: 6px;
@@ -1079,8 +1129,8 @@ input[type='range']::-moz-range-thumb {
 }
 .alert-row-name {
   font-size: 12px;
-  font-weight: 600;
-  color: #fff;
+  font-weight: 800;
+  color: var(--ink);
 }
 .alert-row-area {
   font-family: 'JetBrains Mono', monospace;
@@ -1092,14 +1142,9 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------------- Alert briefing (full-screen) ---------------- */
-.app.alert-mode .topbar,
-.app.alert-mode .rail,
-.app.alert-mode .map-hud,
-.app.alert-mode .footer {
+.app.alert-mode .sidebar,
+.app.alert-mode .map-hud {
   display: none;
-}
-.app.alert-mode .layout {
-  grid-template-columns: 1fr;
 }
 
 /* Compact preview card shown when an alert is first clicked, before the full
@@ -1136,11 +1181,11 @@ input[type='range']::-moz-range-thumb {
   pointer-events: auto;
   width: 360px;
   max-width: 100%;
-  border-radius: var(--radius);
+  border-radius: 18px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(18, 30, 54, 0.97), rgba(8, 14, 28, 0.97));
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), var(--glow);
+  box-shadow: var(--glow-strong);
 }
 .apv-head {
   --ac: #e0152d;
@@ -1199,7 +1244,7 @@ input[type='range']::-moz-range-thumb {
   align-items: baseline;
   gap: 12px;
   padding: 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--panel-edge);
 }
 .apv-row:last-child {
   border-bottom: 0;
@@ -1214,7 +1259,7 @@ input[type='range']::-moz-range-thumb {
 .apv-row b {
   font-size: 14px;
   font-weight: 700;
-  color: #fff;
+  color: var(--ink);
   text-align: right;
 }
 .apv-row b i {
@@ -1256,7 +1301,7 @@ input[type='range']::-moz-range-thumb {
   height: 36px;
   border-radius: 8px;
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.7);
+  background: var(--panel-soft);
   color: var(--ink);
   font-size: 16px;
   line-height: 1;
@@ -1272,7 +1317,7 @@ input[type='range']::-moz-range-thumb {
   height: 38px;
   border-radius: 9px;
   border: 1px solid var(--accent);
-  background: rgba(43, 184, 245, 0.12);
+  background: rgba(226, 100, 63, 0.12);
   color: var(--accent);
   font-size: 13px;
   font-weight: 600;
@@ -1281,7 +1326,7 @@ input[type='range']::-moz-range-thumb {
   transition: 0.12s;
 }
 .apv-details:hover {
-  background: rgba(43, 184, 245, 0.2);
+  background: rgba(226, 100, 63, 0.2);
 }
 
 .alert-detail {
@@ -1315,9 +1360,9 @@ input[type='range']::-moz-range-thumb {
      space" report on full-screen mobile. Desktop's inset is 0, so it's a no-op. */
   padding-top: env(safe-area-inset-top, 0px);
   pointer-events: auto;
-  background: linear-gradient(180deg, rgba(8, 14, 28, 0.97), rgba(6, 10, 22, 0.97));
+  background: var(--panel);
   border-right: 1px solid var(--panel-edge);
-  box-shadow: 6px 0 40px rgba(0, 0, 0, 0.6);
+  box-shadow: 6px 0 40px rgba(0, 0, 0, 0.35);
   will-change: transform;
   transform: translateX(0);
   transition: transform var(--dur-slow) var(--ease-out);
@@ -1336,7 +1381,7 @@ input[type='range']::-moz-range-thumb {
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
-  background: rgba(6, 12, 24, 0.96);
+  background: var(--panel);
   border-bottom: 1px solid var(--panel-edge);
   backdrop-filter: blur(4px);
 }
@@ -1346,7 +1391,7 @@ input[type='range']::-moz-range-thumb {
   height: 30px;
   border-radius: 7px;
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.7);
+  background: var(--panel-soft);
   color: var(--ink);
   font-size: 18px;
   line-height: 1;
@@ -1379,7 +1424,7 @@ input[type='range']::-moz-range-thumb {
   height: 34px;
   border-radius: 50%;
   border: 1px solid var(--panel-edge);
-  background: rgba(8, 16, 32, 0.9);
+  background: var(--panel);
   color: var(--ink);
   font-size: 15px;
   cursor: pointer;
@@ -1402,10 +1447,10 @@ input[type='range']::-moz-range-thumb {
 }
 
 .alert-sec {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--panel-edge);
 }
 .alert-sec.selected .alert-sec-head {
-  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.25);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.4);
 }
 .alert-sec-head {
   --ac: #e0152d;
@@ -1454,13 +1499,13 @@ input[type='range']::-moz-range-thumb {
   font-size: 15px !important;
   font-weight: 700 !important;
   letter-spacing: 0.6px !important;
-  color: #fff !important;
+  color: var(--ink) !important;
   margin-bottom: 7px !important;
 }
 .alert-expires b {
   font-size: 20px;
   font-weight: 700;
-  color: #fff;
+  color: var(--ink);
 }
 .alert-hazards {
   display: flex;
@@ -1473,7 +1518,7 @@ input[type='range']::-moz-range-thumb {
   border-radius: 9px;
   padding: 8px;
   text-align: left;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-soft);
 }
 .alert-hazards .hz span {
   display: block;
@@ -1484,7 +1529,7 @@ input[type='range']::-moz-range-thumb {
 }
 .alert-hazards .hz b {
   font-size: 15px;
-  color: #fff;
+  color: var(--ink);
 }
 .alert-motion {
   font-family: 'JetBrains Mono', monospace;
@@ -1513,7 +1558,7 @@ input[type='range']::-moz-range-thumb {
 }
 .md-concern-line {
   font-weight: 700;
-  color: #fff;
+  color: var(--ink);
 }
 .md-watchprob {
   display: flex;
@@ -1528,7 +1573,7 @@ input[type='range']::-moz-range-thumb {
 .md-watchprob b {
   font-size: 18px;
   font-weight: 700;
-  color: #fff;
+  color: var(--ink);
 }
 .md-source {
   margin-top: 8px;
@@ -1564,7 +1609,7 @@ input[type='range']::-moz-range-thumb {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   font-weight: 400;
-  color: #b9cbe6;
+  color: var(--ink-dim);
 }
 
 /* Plain-language safety guidance, shown above the official NWS instruction. */
@@ -1581,7 +1626,7 @@ input[type='range']::-moz-range-thumb {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.5;
-  color: #fff;
+  color: var(--ink);
 }
 .alert-guidance-list {
   margin: 0;
@@ -1613,13 +1658,13 @@ input[type='range']::-moz-range-thumb {
   padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid var(--panel-edge);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--panel-soft);
   color: var(--ink);
 }
 .alert-tag.strong {
   border-color: var(--warn);
-  color: #fff;
-  background: rgba(255, 120, 40, 0.2);
+  color: var(--ink);
+  background: rgba(217, 144, 48, 0.18);
 }
 
 /* ---------------- Animations ---------------- */
@@ -1640,34 +1685,25 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------------- Responsive ---------------- */
-/* Tablet: keep all three columns but tighten them. */
+/* Tablet-width desktop: keep the sidebar but tighten it. */
 @media (max-width: 1180px) {
-  .layout {
-    grid-template-columns: 220px 1fr 220px;
-    gap: 8px;
+  .sidebar {
+    width: 300px;
   }
 }
 
-/* Universal layout: on every screen — phones, iPads and desktops — the map goes
-   full-bleed and all the controls live in a bottom dock that expands into a
-   settings sheet. (Larger screens scale this up in the iPad/desktop tier below.)
-   This used to be gated to `max-width: 900px`; it is now always on so desktop
-   gets the same simple, touch-first experience as the tablet. */
-@media (min-width: 0px) {
-  .app {
-    padding: 0;
-    gap: 0;
-    height: 100dvh;
-  }
-  .topbar,
-  .footer {
+/* Phone/narrow layout: below ~760px the sidebar gives way to the bottom dock
+   that expands into a settings sheet, and the map goes full-bleed. At or
+   above this width the real sidebar (above) is shown instead — see
+   `mqSmallScreen` / `applyResponsiveLayout` in app.js, which this mirrors. */
+@media (max-width: 759.98px) {
+  .sidebar {
     display: none;
   }
 
   .layout {
     display: block;
     height: 100%;
-    gap: 0;
   }
   .stage {
     position: absolute;
@@ -1679,25 +1715,33 @@ input[type='range']::-moz-range-thumb {
     border: none;
     border-radius: 0;
   }
+  /* The desktop breadcrumb chip is redundant with the bottom dock's
+     site/product chip on mobile; re-stack the clock + legend into one
+     centered column (both children back in normal flow). */
+  .breadcrumb {
+    display: none;
+  }
   .map-hud {
+    position: absolute;
     top: calc(8px + env(safe-area-inset-top, 0px));
-    /* The floating tool column is hidden on mobile (it lives in the dock), so the
-       HUD no longer has to reserve room for it on the right — use nearly the full
-       width. The old 92px reserve left the centred clock too narrow, so its right
-       edge ("…UTC") spilled past the time-bar border on narrow phones. */
+    left: 50%;
+    transform: translateX(-50%);
     width: min(560px, calc(100vw - 24px));
+    display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
   }
-  .map-hud .legend {
+  .hud-left,
+  .legend {
+    position: static;
+    top: auto;
+    left: auto;
+    transform: none;
     width: 100%;
-    min-width: 0;
     margin: 0;
-    /* The HUD stacks vertically on mobile, so the base `flex: 1 1 360px` would
-       treat 360px as the legend's *height* (main axis is now vertical) — that was
-       the tall, mostly-empty legend box. Size it to its content instead. */
-    flex: 0 0 auto;
+  }
+  .legend {
     transition: opacity 0.2s ease;
   }
   .map-hud .time-bar {
@@ -1731,12 +1775,6 @@ input[type='range']::-moz-range-thumb {
   html,
   body {
     overscroll-behavior: none;
-  }
-
-  /* Rails are hidden while docked in .layout; they're relocated into the sheet
-     by JS, where the rules below make them visible again. */
-  .layout > .rail {
-    display: none;
   }
 
   /* Roomier touch targets inside the sheet. */
@@ -1920,28 +1958,6 @@ input[type='range']::-moz-range-thumb {
     width: 460px;
     max-width: 60vw;
   }
-  /* Keep the legend compact inside the top HUD on wide monitors. */
-  .map-hud {
-    width: min(820px, calc(100vw - 150px));
-    flex-direction: row;
-    align-items: stretch;
-  }
-  .map-hud .time-bar,
-  .map-hud .legend {
-    flex: 1 1 0;
-    width: auto;
-    min-width: 0;
-    max-width: none;
-  }
-  .map-hud .legend {
-    font-size: 12px;
-    padding-top: 9px;
-    padding-bottom: 8px;
-  }
-  .map-tools,
-  .tool-popover {
-    top: calc(70px + env(safe-area-inset-top, 0px));
-  }
 }
 
 /* Wider desktops: a touch more breathing room again. */
@@ -2043,7 +2059,7 @@ input[type='range']::-moz-range-thumb {
 .crosshair .cx-line {
   position: absolute;
   background: var(--accent);
-  box-shadow: 0 0 6px rgba(43, 184, 245, 0.8);
+  box-shadow: 0 0 6px rgba(226, 100, 63, 0.8);
 }
 .crosshair .cx-v {
   left: 50%;
@@ -2068,7 +2084,7 @@ input[type='range']::-moz-range-thumb {
   margin: -11px 0 0 -11px;
   border: 1.5px solid var(--accent);
   border-radius: 50%;
-  box-shadow: 0 0 8px rgba(43, 184, 245, 0.7), inset 0 0 6px rgba(43, 184, 245, 0.4);
+  box-shadow: 0 0 8px rgba(226, 100, 63, 0.7), inset 0 0 6px rgba(226, 100, 63, 0.4);
 }
 .crosshair .cx-read {
   position: absolute;
@@ -2104,7 +2120,7 @@ input[type='range']::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: rgba(14, 24, 44, 0.94);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 12px;
   padding: 8px 12px;
@@ -2149,7 +2165,7 @@ input[type='range']::-moz-range-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(14, 24, 44, 0.94);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 12px;
   color: var(--ink);
@@ -2187,7 +2203,7 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   justify-content: center;
   padding: 0;
-  background: rgba(8, 14, 28, 0.92);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 9px;
   color: var(--ink-dim);
@@ -2209,7 +2225,7 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   gap: 2px;
   padding: 6px;
-  background: rgba(14, 24, 44, 0.97);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 12px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
@@ -2247,11 +2263,11 @@ input[type='range']::-moz-range-thumb {
   cursor: pointer;
 }
 .dock-tool-item:active {
-  background: rgba(43, 184, 245, 0.14);
+  background: rgba(226, 100, 63, 0.14);
 }
 .dock-tool-item.active {
   color: var(--accent);
-  background: rgba(43, 184, 245, 0.1);
+  background: rgba(226, 100, 63, 0.1);
 }
 .dock-tool-item .ti-icon {
   width: 22px;
@@ -2272,7 +2288,7 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  background: rgba(14, 24, 44, 0.96);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   border-radius: 14px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
@@ -2283,12 +2299,19 @@ input[type='range']::-moz-range-thumb {
   width: 40px;
   height: 40px;
   flex: none;
-  background: rgba(14, 24, 44, 0.9);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 10px;
   color: var(--ink);
   font-size: 15px;
   cursor: pointer;
+}
+.pb-play {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  border-radius: 13px;
+  box-shadow: 0 6px 16px -6px var(--accent);
 }
 /* The scrub track shows frame-load progress: a row of segments, one per frame,
    that turn green as each frame finishes loading (grey = still loading). The
@@ -2463,9 +2486,9 @@ input[type='range']::-moz-range-thumb {
   padding: 7px 10px;
   border-radius: 9px;
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.5);
+  background: var(--panel-soft);
   color: var(--ink-dim);
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: 'Manrope', sans-serif;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.3px;
@@ -2475,7 +2498,7 @@ input[type='range']::-moz-range-thumb {
 .sheet-tab.active {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(43, 184, 245, 0.14);
+  background: rgba(226, 100, 63, 0.14);
   box-shadow: var(--glow);
 }
 .sheet-pager {
@@ -2552,13 +2575,13 @@ input[type='range']::-moz-range-thumb {
   width: 100%;
   margin-top: 10px;
   padding: 9px 12px;
-  border: 1px solid var(--accent-2);
+  border: 1px solid var(--accent);
   border-radius: 10px;
-  background: rgba(20, 40, 78, 0.55);
-  color: var(--ink);
-  font-family: 'Space Grotesk', sans-serif;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-family: 'Manrope', sans-serif;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.3px;
   cursor: pointer;
   transition: 0.14s;
@@ -2580,8 +2603,7 @@ input[type='range']::-moz-range-thumb {
   z-index: 1300;
   display: flex;
   flex-direction: column;
-  background: radial-gradient(1100px 700px at 60% -10%, #0c1730 0%, var(--bg) 60%),
-    var(--bg);
+  background: #fffdf8;
   will-change: opacity, transform;
   transition: opacity var(--dur-base) var(--ease-out),
     transform var(--dur-base) var(--ease-out);
@@ -2607,12 +2629,12 @@ input[type='range']::-moz-range-thumb {
   padding: 12px 16px calc(12px);
   padding-top: calc(12px + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid var(--panel-edge);
-  background: rgba(6, 12, 24, 0.85);
+  background: var(--panel);
   backdrop-filter: blur(6px);
 }
 .snd-title h2 {
   margin: 0;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: 'Bricolage Grotesque', sans-serif;
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.4px;
@@ -2630,7 +2652,7 @@ input[type='range']::-moz-range-thumb {
   height: 40px;
   border-radius: 10px;
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.7);
+  background: var(--panel-soft);
   color: var(--ink);
   font-size: 18px;
   cursor: pointer;
@@ -2666,7 +2688,7 @@ input[type='range']::-moz-range-thumb {
   margin: 0;
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: rgba(10, 18, 36, 0.55);
+  background: var(--panel-soft);
   padding: 8px;
 }
 .snd-chart figcaption {
@@ -2698,7 +2720,7 @@ input[type='range']::-moz-range-thumb {
 .snd-pgroup {
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  background: rgba(10, 18, 36, 0.55);
+  background: var(--panel-soft);
   padding: 10px 12px;
 }
 .snd-pgroup h3 {
@@ -2915,24 +2937,27 @@ input[type='range']::-moz-range-thumb {
 /* Map tools — toolbar, METAR station plots, storm panel, split  */
 /* ============================================================= */
 
-/* Vertical toolbar pinned to the map's top-right. */
+/* Vertical toolbar pinned to the map's top-right, below the conditions card. */
 .map-tools {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 84px;
+  right: 18px;
   z-index: 600;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 8px;
+  border-radius: 15px;
+  background: var(--panel);
+  box-shadow: var(--glow);
 }
 .map-tool {
-  width: 38px;
-  height: 38px;
-  border-radius: 9px;
-  border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.82);
-  backdrop-filter: blur(6px);
-  color: var(--ink);
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  border: none;
+  background: transparent;
+  color: var(--ink-dim);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -2942,28 +2967,22 @@ input[type='range']::-moz-range-thumb {
   justify-content: center;
 }
 .map-tool:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .map-tool.active {
-  background: rgba(43, 184, 245, 0.18);
-  border-color: var(--accent);
-  color: var(--accent);
-  box-shadow: var(--glow);
+  background: var(--accent);
+  color: #fff;
 }
 
 .tool-popover {
   position: absolute;
-  top: 12px;
-  right: 58px;
+  top: 84px;
+  right: 70px;
   z-index: 620;
   width: 230px;
-  border: 1px solid var(--panel-edge);
-  border-radius: 10px;
-  background: rgba(8, 14, 26, 0.9);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(95, 212, 255, 0.08);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
   padding: 10px;
 }
 .tool-popover-head {
@@ -2988,24 +3007,6 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
 }
 
-/* The app now uses the bottom dock on every viewport, so the draw/measure
-   popover is dock-anchored too. This rule intentionally lives after the base
-   .tool-popover block: earlier responsive rules set bottom, while the base block
-   reset top later, which stretched the popup into a tall panel. */
-.tool-popover {
-  top: auto;
-  right: auto;
-  left: 50%;
-  bottom: calc(104px + env(safe-area-inset-bottom, 0px));
-  width: min(360px, calc(100vw - 24px));
-  max-width: 360px;
-  height: auto;
-  max-height: none;
-  margin: 0;
-  transform: translateX(-50%);
-  overflow: visible;
-  z-index: 720;
-}
 .tool-popover .ms-line {
   margin-top: 8px;
   padding-top: 8px;
@@ -3066,9 +3067,9 @@ input[type='range']::-moz-range-thumb {
   line-height: 1.25;
   padding: 3px 6px;
   border-radius: 6px;
-  background: rgba(6, 14, 28, 0.9);
-  border: 1px solid var(--panel-edge);
-  color: var(--ink);
+  background: rgba(20, 16, 12, 0.9);
+  border: 1px solid var(--accent);
+  color: #fffdf8;
   text-align: center;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
 }
@@ -3090,12 +3091,12 @@ input[type='range']::-moz-range-thumb {
   z-index: 1260;
   width: 360px;
   max-width: calc(100vw - 24px);
-  border-radius: var(--radius);
+  border-radius: 18px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(18, 30, 54, 0.97), rgba(8, 14, 28, 0.97));
+  background: var(--panel);
   border: 1px solid #ff5a7a;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 24px rgba(255, 90, 122, 0.22);
-  font-family: 'Space Grotesk', system-ui, sans-serif;
+  box-shadow: var(--glow-strong), 0 0 24px rgba(255, 90, 122, 0.22);
+  font-family: 'Manrope', system-ui, sans-serif;
 }
 .storm-head {
   display: flex;
@@ -3150,7 +3151,7 @@ input[type='range']::-moz-range-thumb {
 .storm-inputs input {
   width: 56px;
   margin: 0 2px;
-  background: rgba(4, 10, 22, 0.9);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 6px;
   color: var(--ink);
@@ -3159,7 +3160,7 @@ input[type='range']::-moz-range-thumb {
 }
 .storm-inputs button {
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.8);
+  background: var(--panel-soft);
   color: var(--ink);
   border-radius: 6px;
   padding: 4px 8px;
@@ -3264,7 +3265,7 @@ body.storm-active .playback-bar {
   gap: 8px;
   padding: 5px 10px;
   border-radius: 999px;
-  background: rgba(8, 16, 32, 0.9);
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
   backdrop-filter: blur(6px);
   font-family: 'JetBrains Mono', monospace;
@@ -3301,10 +3302,10 @@ body.storm-active .playback-bar {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 
-/* Stacked split panes (chosen product on top), and keep the toolbar reachable
-   above the bottom dock. Applies on every width now that the dock layout is
-   universal; the iPad/desktop tier keeps the same stacked arrangement. */
-@media (min-width: 0px) {
+/* Stacked split panes (chosen product on top) on phones, where the bottom dock
+   replaces the floating tool column; the >=820px tier below restores the
+   side-by-side desktop arrangement. */
+@media (max-width: 759.98px) {
   .map-wrap.split #map {
     right: 0;
     top: 50%;
@@ -3523,7 +3524,7 @@ body.storm-active .playback-bar {
   padding: 10px 16px;
   border-radius: 9px;
   border: 1px solid var(--panel-edge);
-  background: rgba(10, 20, 40, 0.6);
+  background: var(--panel-soft);
   color: var(--ink);
   font-family: inherit;
   font-size: 13px;
@@ -3666,12 +3667,13 @@ body.storm-active .playback-bar {
 .weather-picker-card {
   position: relative;
   width: min(430px, 100%);
-  border: 1px solid #2f7fc8;
-  border-radius: calc(var(--radius) + 4px);
-  background: linear-gradient(160deg, #142947 0%, #0b1830 48%, #07101f 100%);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(43, 184, 245, 0.08);
+  border: 1px solid var(--panel-edge);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
   padding: 20px;
   pointer-events: auto;
+  color: var(--ink);
 }
 .weather-picker-close {
   position: absolute;
@@ -3681,7 +3683,7 @@ body.storm-active .playback-bar {
   height: 30px;
   border-radius: 50%;
   border: 1px solid var(--panel-edge);
-  background: #0b1830;
+  background: var(--panel-soft);
   color: var(--ink-dim);
   cursor: pointer;
 }
@@ -3719,7 +3721,7 @@ body.storm-active .playback-bar {
   color: var(--ink-dim);
   font: 11px/1.35 'JetBrains Mono', monospace;
 }
-.weather-picker-status.error { color: #ffb08a; }
+.weather-picker-status.error { color: var(--accent-2); }
 
 .weather-center-picker {
   position: absolute;
@@ -3731,7 +3733,7 @@ body.storm-active .playback-bar {
   margin: -46px 0 0 -46px;
   pointer-events: none;
   color: var(--accent);
-  filter: drop-shadow(0 0 10px rgba(43, 184, 245, 0.75));
+  filter: drop-shadow(0 0 10px rgba(226, 100, 63, 0.75));
 }
 .weather-center-picker .wxp-line {
   position: absolute;
@@ -3766,11 +3768,11 @@ body.storm-active .playback-bar {
   left: 50%;
   top: calc(100% + 8px);
   transform: translateX(-50%);
-  border: 1px solid #2f7fc8;
+  border: 1px solid var(--accent);
   border-radius: 999px;
-  background: linear-gradient(180deg, #10233f, #07101f);
+  background: rgba(20, 16, 12, 0.9);
   padding: 4px 8px;
-  color: var(--ink);
+  color: #fffdf8;
   font: 700 10px 'JetBrains Mono', monospace;
   letter-spacing: 1px;
   text-transform: uppercase;
@@ -3781,18 +3783,18 @@ body.storm-active .playback-bar {
   display: block;
   width: max-content;
   max-width: min(340px, calc(100vw - 32px));
-  border-color: #2f7fc8;
-  background: linear-gradient(160deg, #142947 0%, #0b1830 52%, #07101f 100%);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.38);
+  border-color: var(--panel-edge);
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
 }
 .weather-card .wx-temp {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 3px;
-  font: 700 clamp(34px, 5vw, 52px)/1 'Space Grotesk', sans-serif;
+  font: 700 clamp(34px, 5vw, 52px)/1 'Bricolage Grotesque', sans-serif;
   letter-spacing: -1.5px;
-  color: #fff;
+  color: var(--ink);
 }
 .weather-card .wx-emoji {
   font-size: 0.74em;
@@ -3815,9 +3817,9 @@ body.storm-active .playback-bar {
   gap: 8px;
 }
 .weather-card .wx-metric {
-  border: 1px solid #27456f;
+  border: 1px solid var(--panel-edge);
   border-radius: 10px;
-  background: linear-gradient(180deg, #10213c, #0a1428);
+  background: var(--panel-soft);
   padding: 8px 9px;
   min-width: 0;
 }
@@ -3847,7 +3849,7 @@ body.storm-active .playback-bar {
   gap: 12px;
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px solid rgba(47, 141, 157, 0.35);
+  border-top: 1px solid var(--panel-edge);
   color: var(--ink-dim);
   font: 700 10px 'JetBrains Mono', monospace;
   letter-spacing: 1px;
@@ -3863,7 +3865,7 @@ body.storm-active .playback-bar {
   font-family: 'JetBrains Mono', monospace;
   color: var(--ink-dim);
 }
-.weather-card.error { color: #ffb08a; }
+.weather-card.error { color: var(--accent-2); }
 .weather-card.forecast {
   width: min(620px, calc(100vw - 32px));
   max-width: min(620px, calc(100vw - 32px));
@@ -3888,9 +3890,9 @@ body.storm-active .playback-bar {
 }
 .weather-card .wx-forecast-pill {
   flex: 0 0 74px;
-  border: 1px solid #27456f;
+  border: 1px solid var(--panel-edge);
   border-radius: 12px;
-  background: linear-gradient(180deg, #10213c, #0a1428);
+  background: var(--panel-soft);
   padding: 8px 7px;
   text-align: center;
 }
@@ -3906,7 +3908,7 @@ body.storm-active .playback-bar {
 }
 .weather-card .wx-forecast-temp {
   margin-top: 6px;
-  color: #fff;
+  color: var(--ink);
   font: 700 13px 'JetBrains Mono', monospace;
 }
 .weather-card .wx-forecast-pop {
@@ -3947,9 +3949,9 @@ body.storm-active .playback-bar {
   gap: 10px;
   align-items: center;
   margin-top: 10px;
-  border: 1px solid #2f7fc8;
+  border: 1px solid var(--panel-edge);
   border-radius: 14px;
-  background: linear-gradient(135deg, #123b50 0%, #0a1428 100%);
+  background: var(--panel-soft);
   padding: 10px;
 }
 .weather-card .wx-current-now {
@@ -3959,7 +3961,7 @@ body.storm-active .playback-bar {
   min-width: 0;
 }
 .weather-card .wx-current-now span { font-size: 25px; }
-.weather-card .wx-current-now strong { color: #fff; font: 800 24px/1 'Space Grotesk', sans-serif; }
+.weather-card .wx-current-now strong { color: var(--ink); font: 800 24px/1 'Bricolage Grotesque', sans-serif; }
 .weather-card .wx-current-now em {
   color: var(--ink-dim);
   font: 11px 'JetBrains Mono', monospace;
@@ -3975,18 +3977,18 @@ body.storm-active .playback-bar {
   justify-content: flex-end;
 }
 .weather-card .wx-current-facts span {
-  border: 1px solid #27456f;
+  border: 1px solid var(--panel-edge);
   border-radius: 999px;
   color: var(--ink);
-  background: #0a1428;
+  background: var(--panel-soft);
   padding: 4px 7px;
   font: 10px 'JetBrains Mono', monospace;
 }
 .weather-card .wx-forecast-pill { cursor: pointer; transition: border-color 140ms ease, transform 140ms ease, background 140ms ease; }
 .weather-card .wx-forecast-pill:hover,
 .weather-card .wx-forecast-pill:focus-visible {
-  border-color: rgba(43, 184, 245, 0.75);
-  background: rgba(43, 184, 245, 0.12);
+  border-color: rgba(226, 100, 63, 0.75);
+  background: rgba(226, 100, 63, 0.12);
   transform: translateY(-2px);
   outline: none;
 }
@@ -4004,9 +4006,9 @@ body.storm-active .playback-bar {
   width: min(520px, calc(100vw - 36px));
   max-height: min(680px, calc(100vh - 36px));
   overflow: auto;
-  border: 1px solid rgba(43, 184, 245, 0.34);
+  border: 1px solid rgba(226, 100, 63, 0.34);
   border-radius: 20px;
-  background: rgba(8, 16, 32, 0.94);
+  background: var(--panel);
   box-shadow: var(--glow);
   padding: 18px;
   color: var(--ink);
@@ -4015,19 +4017,19 @@ body.storm-active .playback-bar {
   float: right;
   border: 1px solid var(--panel-edge);
   border-radius: 999px;
-  background: rgba(255,255,255,0.08);
+  background: var(--panel-soft);
   color: var(--ink);
   width: 32px;
   height: 32px;
   cursor: pointer;
 }
 .wx-detail-kicker { color: var(--ink-dim); font: 10px 'JetBrains Mono', monospace; letter-spacing: 1px; text-transform: uppercase; }
-.wx-detail-dialog h3 { margin: 8px 38px 4px 0; color: #fff; font: 800 24px/1.1 'Space Grotesk', sans-serif; }
+.wx-detail-dialog h3 { margin: 8px 38px 4px 0; color: var(--ink); font: 800 24px/1.1 'Bricolage Grotesque', sans-serif; }
 .wx-detail-condition { color: var(--ink-dim); margin-bottom: 14px; }
 .wx-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.wx-detail-metric { border: 1px solid var(--panel-edge); border-radius: 12px; background: rgba(255,255,255,0.05); padding: 9px; }
+.wx-detail-metric { border: 1px solid var(--panel-edge); border-radius: 12px; background: var(--panel-soft); padding: 9px; }
 .wx-detail-metric div { color: var(--ink-dim); font: 10px 'JetBrains Mono', monospace; letter-spacing: .6px; text-transform: uppercase; }
-.wx-detail-metric strong { display: block; margin-top: 5px; color: #fff; font: 700 14px 'JetBrains Mono', monospace; }
+.wx-detail-metric strong { display: block; margin-top: 5px; color: var(--ink); font: 700 14px 'JetBrains Mono', monospace; }
 .wx-detail-metric.wide { grid-column: 1 / -1; }
 .wx-detail-combined strong { display: flex; gap: 16px; flex-wrap: wrap; }
 .wx-detail-combined span { display: inline-flex; gap: 6px; align-items: baseline; }
@@ -4056,20 +4058,20 @@ body.storm-active .playback-bar {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: radial-gradient(120% 120% at 50% 0%, rgba(13, 22, 44, 0.96), rgba(5, 9, 18, 0.98));
+  background: rgba(20, 16, 12, 0.5);
   backdrop-filter: blur(6px);
 }
 .mbx-gate-card {
   width: min(520px, 100%);
   max-height: calc(100vh - 40px);
   overflow: auto;
-  background: linear-gradient(180deg, rgba(18, 30, 54, 0.96), rgba(9, 16, 30, 0.96));
+  background: var(--panel);
   border: 1px solid var(--panel-edge);
-  border-radius: var(--radius);
-  box-shadow: var(--glow), 0 24px 64px rgba(0, 0, 0, 0.55);
+  border-radius: 18px;
+  box-shadow: var(--glow-strong);
   padding: 26px 26px 24px;
   color: var(--ink);
-  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-family: 'Manrope', system-ui, sans-serif;
 }
 .mbx-gate-kicker {
   font-family: 'JetBrains Mono', monospace;
@@ -4102,7 +4104,7 @@ body.storm-active .playback-bar {
 .mbx-gate-card code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
-  background: rgba(43, 184, 245, 0.1);
+  background: rgba(226, 100, 63, 0.1);
   color: var(--accent);
   padding: 1px 5px;
   border-radius: 5px;
@@ -4120,7 +4122,7 @@ body.storm-active .playback-bar {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   color: var(--ink);
-  background: rgba(5, 9, 18, 0.8);
+  background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 10px;
   padding: 12px 13px;
@@ -4129,7 +4131,7 @@ body.storm-active .playback-bar {
 }
 .mbx-gate-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(43, 184, 245, 0.18);
+  box-shadow: 0 0 0 3px rgba(226, 100, 63, 0.18);
 }
 .mbx-gate-error {
   min-height: 18px;
@@ -4140,11 +4142,11 @@ body.storm-active .playback-bar {
 .mbx-gate-save {
   width: 100%;
   margin-top: 10px;
-  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-family: 'Manrope', system-ui, sans-serif;
   font-size: 15px;
-  font-weight: 600;
-  color: #03121a;
-  background: linear-gradient(180deg, var(--accent), #1fb9a4);
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
   border: none;
   border-radius: 10px;
   padding: 13px;
@@ -4162,7 +4164,7 @@ body.storm-active .playback-bar {
   margin-top: 12px;
   border: 1px solid var(--panel-edge);
   border-radius: 8px;
-  background: rgba(8, 18, 38, 0.4);
+  background: var(--panel-soft);
 }
 .panel-details > summary {
   cursor: pointer;
@@ -4320,8 +4322,8 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
 .kb-key {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: var(--accent);
-  background: rgba(54, 224, 200, 0.08);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
   border: 1px solid var(--panel-edge);
   border-radius: 5px;
   padding: 3px 9px;
