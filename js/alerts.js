@@ -27,6 +27,37 @@ const ACTIVE_URL =
 const REFRESH_MS = 120000;
 const zoneGeometryCache = new Map();
 
+// Concurrency cap for the per-zone geometry fetches. During active weather the
+// alert feed can carry thousands of county/zone-based products with no inline
+// geometry, each needing one fetch per affected zone. Firing them all at once
+// (the previous Promise.all-of-everything approach) overruns the browser's
+// connection pool and the request queue dies with net::ERR_INSUFFICIENT_RESOURCES
+// — which not only drops the alert data but starves Mapbox's own glyph/tile
+// requests, so the basemap never renders either. A small semaphore keeps only a
+// handful of zone fetches in flight at a time; everything still resolves, just
+// in waves instead of one ruinous burst.
+const ZONE_FETCH_CONCURRENCY = 6;
+let zoneFetchActive = 0;
+const zoneFetchQueue = [];
+function runQueuedZoneFetches() {
+  while (zoneFetchActive < ZONE_FETCH_CONCURRENCY && zoneFetchQueue.length) {
+    const job = zoneFetchQueue.shift();
+    zoneFetchActive++;
+    job().finally(() => {
+      zoneFetchActive--;
+      runQueuedZoneFetches();
+    });
+  }
+}
+// Schedule `task` (a function returning a promise) to run once a slot frees up,
+// resolving/rejecting with the task's result.
+function withZoneFetchSlot(task) {
+  return new Promise((resolve, reject) => {
+    zoneFetchQueue.push(() => task().then(resolve, reject));
+    runQueuedZoneFetches();
+  });
+}
+
 // Colors keyed to the alert types in the legend screenshot. Special "upgrade"
 // states (PDS / Emergency) override these.
 const PDS_PINK = '#ff3fc8';
@@ -1273,10 +1304,15 @@ async function resolveAlertGeometry(feature) {
 
 async function fetchZoneGeometry(url) {
   if (zoneGeometryCache.has(url)) return zoneGeometryCache.get(url);
-  const promise = fetch(url, { headers: { Accept: 'application/geo+json' } })
-    .then((res) => (res.ok ? res.json() : null))
-    .then((json) => (json && json.geometry ? json.geometry : null))
-    .catch(() => null);
+  // Gate the network call through the concurrency semaphore so at most
+  // ZONE_FETCH_CONCURRENCY zone requests are ever in flight. The de-duped
+  // promise is still cached immediately, so repeated zones share one fetch.
+  const promise = withZoneFetchSlot(() =>
+    fetch(url, { headers: { Accept: 'application/geo+json' } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => (json && json.geometry ? json.geometry : null))
+      .catch(() => null)
+  ).catch(() => null);
   zoneGeometryCache.set(url, promise);
   return promise;
 }
