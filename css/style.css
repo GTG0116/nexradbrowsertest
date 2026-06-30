@@ -417,6 +417,13 @@ button {
 
 /* ---------------- Stage / map ---------------- */
 .stage {
+  /* The desktop .layout is a flex row (sidebar + stage). Without an explicit
+     grow the stage falls back to flex: 0 1 auto and, because every child of
+     .map-wrap is absolutely positioned, its content width collapses to 0 — so
+     the map disappears entirely and the body background shows through. flex: 1
+     reclaims the remaining width; min-width: 0 lets it shrink below content. */
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
