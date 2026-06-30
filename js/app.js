@@ -3749,25 +3749,38 @@ function applyResponsiveLayout() {
 const PLAYBACK_CONCURRENCY = 6;
 
 // A model loop spans *every* forecast hour of the run (GFS goes hourly to F120
-// then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384) and keeps them
-// all resident so the whole loop scrubs/plays instantly. The hazard is the *load*:
-// decoding a global GRIB allocates large transient buffers, and firing every hour
-// at once multiplies those spikes until the tab crashes — the GFS/AI-GFS failure.
-// So model frames load in **chunks**: a small batch decodes, the loop yields long
-// enough for the browser to paint and reclaim the transient decode buffers, then
-// the next batch starts. Steady, bounded allocation instead of one big spike.
+// then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384). Every hour
+// gets a timeline slot, but the frames are *streamed*, not all held at once: only
+// a bounded window around the playhead is decoded and kept resident (see
+// MODEL_PLAYBACK_MAX_CACHED), the loop pulls more hours in as it plays/scrubs, and
+// the engine evicts the frames farthest from the current one. Keeping every pooled
+// hour resident at once is what exhausted a phone's memory and crashed the tab —
+// the device-crash failure — since a full GFS run is ~200 global GRIBs and each
+// resident frame carries a values array, a GPU texture and up to five overlay
+// arrays. The decode itself is also paced in **chunks**: a small batch decodes,
+// the loop yields long enough for the browser to paint and reclaim the transient
+// decode buffers, then the next batch starts — steady, bounded allocation instead
+// of one big spike.
 const MODEL_PLAYBACK_CHUNK = 6;       // forecast hours decoded per batch
 const MODEL_PLAYBACK_CHUNK_PAUSE = 120; // ms breather between batches (GC/paint)
 // Decode concurrency within a model batch — kept modest so the transient memory of
 // several in-flight GRIB decodes can't pile up the way 10 parallel lanes did.
 const MODEL_PLAYBACK_CONCURRENCY = 4;
-// Every forecast hour of a run is loaded and kept resident so the whole loop
-// scrubs/plays instantly (no streaming cap). A full GFS run is ~200 global GRIBs,
-// so to keep that many frames resident without crashing the tab we down-pool each
-// *playback* frame's grid to a modest resolution (the live single-frame view still
-// renders full-res). Pooling shrinks BOTH the GPU texture and the readout-values
-// array, cutting per-frame memory ~4× at factor 2. Targets are the max grid
-// dimension after pooling; phones pool harder to fit a tighter memory budget.
+// How many decoded forecast hours stay resident at once, and how many to prefetch
+// ahead of the playhead for smooth playback. The window slides with the playhead
+// (the engine evicts the frames farthest from the current one), so resident memory
+// stays bounded no matter how long the run is. Phones keep a tighter window to fit
+// a smaller memory budget. Prefetch is kept below the cap so prefetching and
+// eviction don't fight over the same slots.
+const MODEL_PLAYBACK_MAX_CACHED = 48;
+const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 20;
+const MODEL_PLAYBACK_PREFETCH = 12;
+const MODEL_PLAYBACK_PREFETCH_MOBILE = 6;
+// Each *playback* frame's grid is down-pooled to a modest resolution (the live
+// single-frame view still renders full-res). Pooling shrinks BOTH the GPU texture
+// and the readout-values array, cutting per-frame memory ~4× at factor 2. Targets
+// are the max grid dimension after pooling; phones pool harder to fit a tighter
+// memory budget.
 const MODEL_PLAYBACK_TARGET_DIM = 900;
 const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 600;
 const FRAME_WARM_START_DELAY = 1800;
@@ -3931,18 +3944,24 @@ async function buildPlaybackProvider(opts = {}) {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Span the *entire* run — every forecast hour gets a frame, all kept resident
-    // so the full loop scrubs and plays without re-fetching. To avoid crashing the
-    // tab while decoding 200+ global GRIBs, the loader paces the work in chunks
-    // (see createPlayback.loadInChunks): a small batch at a time with a breather
-    // between batches, rather than slamming every hour through the decoder at once.
+    // Span the *entire* run — every forecast hour gets a timeline slot — but stream
+    // the frames rather than holding them all at once. Decoding 200+ global GRIBs
+    // and keeping every pooled frame resident is what crashed phones; instead the
+    // engine keeps only a bounded window around the playhead resident, pulling more
+    // hours in as the loop plays/scrubs and evicting the farthest ones. The decode
+    // is still paced in chunks (see createPlayback.loadInChunks) so the initial
+    // window doesn't slam every hour through the decoder at once.
     const hours = forecastHours(run);
+    const mobile = mqSmallScreen.matches;
     return {
-      // Decode a few hours at a time so several in-flight GRIB decodes can't pile
-      // their transient buffers into a memory spike. NOT streaming: every forecast
-      // hour is loaded and kept resident (down-pooled per frame, see below) so the
-      // whole run — all ~200 GFS / 65 AI-GFS hours — scrubs and plays instantly
-      // instead of capping at a sliding window of frames.
+      // Stream a bounded window of forecast hours instead of the whole run: only
+      // `maxCachedFrames` stay resident (down-pooled per frame, see below), with
+      // `prefetchAhead` decoded ahead of the playhead for smooth playback. Decode a
+      // few hours at a time so several in-flight GRIB decodes can't pile their
+      // transient buffers into a memory spike.
+      streaming: true,
+      maxCachedFrames: mobile ? MODEL_PLAYBACK_MAX_CACHED_MOBILE : MODEL_PLAYBACK_MAX_CACHED,
+      prefetchAhead: mobile ? MODEL_PLAYBACK_PREFETCH_MOBILE : MODEL_PLAYBACK_PREFETCH,
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
@@ -3955,8 +3974,8 @@ async function buildPlaybackProvider(opts = {}) {
       })),
       async load(f) {
         const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
-        // Down-pool for playback so hundreds of resident frames fit in memory; the
-        // pooled grid is what both the GPU fill and the scrubbed-hour readout use.
+        // Down-pool for playback so the resident window of frames fits in memory;
+        // the pooled grid is what both the GPU fill and the scrubbed-hour readout use.
         // The full-res `grid` here is transient and GC'd after this returns.
         const pooled = poolGridForPlayback(grid);
         const payload = prepareGridTexture(pooled, resolveGridProduct(grid.product));
