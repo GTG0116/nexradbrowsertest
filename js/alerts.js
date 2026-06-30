@@ -1288,7 +1288,18 @@ async function fetchActiveAlerts() {
     url = json.pagination && json.pagination.next;
     if (features.length > 4000) break;
   }
-  return Promise.all(features.map(resolveAlertGeometry));
+  // Resolve geometry ONLY for the event types we actually draw (MAP_ALERT_EVENTS).
+  // During active weather the feed is dominated by high-volume, zone-based
+  // advisories (flood/heat/wind/marine etc.) we never display — resolving their
+  // geometry meant thousands of per-zone fetches plus thousands of combined
+  // polygons built and held in memory, only to be discarded by the event filter
+  // in load(). On mobile that allocation storm is enough to hard-crash the tab.
+  // Filtering first is behaviour-preserving (discarded alerts' geometry was
+  // never used) and turns thousands of zone fetches into a handful.
+  const mapped = features.filter(
+    (f) => MAP_ALERT_EVENTS.has((f.properties && f.properties.event) || '')
+  );
+  return Promise.all(mapped.map(resolveAlertGeometry));
 }
 
 async function resolveAlertGeometry(feature) {
