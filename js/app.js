@@ -240,7 +240,7 @@ function sitePillImage(icao, kind, ratio = 2) {
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
   const palette = {
-    current: { fill: 'rgba(22,75,112,0.96)', stroke: '#2bb8f5', text: '#e8fbff' },
+    current: { fill: 'rgba(157,60,20,0.96)', stroke: '#e2643f', text: '#fff1ea' },
     down: { fill: 'rgba(92,20,28,0.96)', stroke: '#ff7878', text: '#ffe8e8' },
     tdwr: { fill: 'rgba(86,72,12,0.96)', stroke: '#ffe682', text: '#fff7c2' },
     base: { fill: 'rgba(12,30,58,0.94)', stroke: '#96cdff', text: '#e3f2ff' },
@@ -437,14 +437,14 @@ function setupOverlays(map) {
         // terminal radars → yellow; NEXRAD → blue.
         'circle-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#2bb8f5',
+          ['==', ['get', 'current'], 1], '#e2643f',
           ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
           ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
           'rgba(80,140,220,0.85)',
         ],
         'circle-stroke-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#2bb8f5',
+          ['==', ['get', 'current'], 1], '#e2643f',
           ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
           ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
           'rgba(150,205,255,0.85)',
@@ -766,8 +766,12 @@ function cacheEls() {
   el.satInfo = $('#satInfo');
 
   // Mobile control surface.
-  el.railLeft = $('.rail-left');
-  el.railRight = $('.rail-right');
+  el.sidebar = $('#sidebar');
+  el.displayPanel = $('#displayPanel');
+  el.settingsBtn = $('#settingsBtn');
+  el.layoutSwitch = $('#layoutSwitch');
+  el.layoutPanel = $('#layoutPanel');
+  el.sidebarFoot = $('.sidebar-foot');
   el.layout = $('.layout');
   el.stage = $('.stage');
   el.mobileDock = $('#mobileDock');
@@ -781,6 +785,9 @@ function cacheEls() {
   el.dockToolMore = $('#dockToolMore');
   el.dockToolBtn = $('#dockToolBtn');
   el.dockToolMenu = $('#dockToolMenu');
+  el.breadcrumb = $('#breadcrumb');
+  el.breadcrumbText = $('#breadcrumbText');
+  el.breadcrumbIcon = $('#breadcrumbIcon');
   el.sheet = $('#mobileSheet');
   el.sheetBody = $('#sheetBody');
   el.sheetScrim = $('#sheetScrim');
@@ -844,6 +851,14 @@ function cacheEls() {
   el.sndSkewt = $('#sndSkewt');
   el.sndHodo = $('#sndHodo');
   el.sndParams = $('#sndParams');
+
+  // These overflow panels start `hidden` in the raw markup only so they don't
+  // flash in a stray spot while sitting outside both the sidebar and the
+  // sheet before the first layout pass runs (below). Their actual on-screen
+  // visibility from here on is purely a function of which container (sidebar,
+  // sheet page, or neither while the drawer/sheet is closed) they're in.
+  [el.volumePanel, el.displayPanel, el.basemapPanel, el.spcPanel, el.metaPanel]
+    .forEach((p) => { if (p) p.hidden = false; });
 }
 
 function setStatus(text, busy = false) {
@@ -3145,7 +3160,7 @@ function refreshSiteDots() {
   if (map.getLayer('site-pills'))
     map.setLayoutProperty('site-pills', 'visibility', showSites && state.siteMarkerStyle === 'pill' ? 'visible' : 'none');
   map.getSource('sites').setData(sitesGeoJSON());
-  const mobile = mqMobile.matches;
+  const mobile = mqSmallScreen.matches;
   if (map.getLayer('sites')) {
     map.setPaintProperty('sites', 'circle-radius', [
       'case',
@@ -3440,11 +3455,21 @@ function dockInfo() {
   };
 }
 
+const BREADCRUMB_ICON = { radar: 'radar', satellite: 'satellite', mrms: 'layers-3', models: 'line-chart' };
 function updateDock() {
   if (!el.dockProd) return;
   const info = dockInfo();
   el.dockProd.textContent = info.prod;
   el.dockSite.textContent = info.source;
+  if (el.breadcrumbText) {
+    el.breadcrumbText.textContent = `${info.source} · ${info.prod}`;
+    const want = BREADCRUMB_ICON[state.mode] || 'radar';
+    if (el.breadcrumbIcon.dataset.icon !== want) {
+      el.breadcrumbIcon.dataset.icon = want;
+      el.breadcrumbIcon.innerHTML = `<i data-lucide="${want}" class="lucide sm"></i>`;
+      refreshIcons();
+    }
+  }
   tickClock();
   if (state.playback && state.playback.active) return; // dock time owned by playback
   el.dockTime.textContent = info.name ? `${info.name} · ${info.time}` : info.time;
@@ -3650,17 +3675,37 @@ function layoutMobilePages() {
   // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
   // "MRMS frames" / "Model runs") lives with the product controls so the frame
   // picker sits beside the product/tilt controls instead of on the source page.
-  el.pageControls.append(el.productPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
-  el.pageSettings.append(el.sourcePanel, el.alertsPanel);
+  el.pageControls.append(el.productPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
+  setSheetTabLabels('Controls', 'Settings', 'Map');
 }
 
-// Put every panel back in its rail (desktop), in the original order.
-function layoutDesktopRails() {
-  el.railLeft.append(el.sourcePanel, el.volumePanel, el.alertsPanel);
-  el.railRight.append(
-    el.productPanel, el.basemapPanel, el.spcPanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel, el.metaPanel
+// Desktop: the core controls live directly in the sidebar (everything has a
+// home, nothing is tucked behind a tap) — only the overflow stuff (scan
+// browsing, display toggles, map/outlook settings, metadata) goes in the
+// settings drawer, which reuses the same sheet/page machinery as mobile.
+function layoutDesktopSidebar() {
+  // .append() moves each node to the end, in order — the settings button and
+  // footer note must be included here too (last) or they'd get stranded
+  // above whichever of these panels happens to already sit below them.
+  el.sidebar.append(
+    el.sourcePanel, el.layoutPanel, el.productPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
+    el.settingsBtn, el.sidebarFoot
   );
+}
+function layoutDesktopDrawer() {
+  el.pageControls.append(el.volumePanel);
+  el.pageSettings.append(el.displayPanel, el.satOptsPanel);
+  el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
+  setSheetTabLabels('Scans', 'Display', 'Map');
+}
+function setSheetTabLabels(a, b, c) {
+  if (!el.sheetTabs) return;
+  const tabs = el.sheetTabs.querySelectorAll('.sheet-tab');
+  if (tabs[0]) tabs[0].textContent = a;
+  if (tabs[1]) tabs[1].textContent = b;
+  if (tabs[2]) tabs[2].textContent = c;
 }
 
 const SHEET_PAGES = 3;
@@ -3700,22 +3745,25 @@ function setupSheetPager() {
   }, { passive: true });
 }
 
-// The touch-first "dock + settings sheet" layout is now the universal layout on
-// every screen — phones, iPads and desktops alike. The desktop multi-rail layout
-// was retired in favour of the same simple experience everywhere (the CSS scales
-// the dock/sheet up for tablet and desktop widths). This query therefore always
-// matches; it's kept as a matchMedia so the rest of the code can keep asking
-// "are we in the dock layout?" unchanged.
-const mqMobile = window.matchMedia('(min-width: 0px)');
+// Real responsive split: below ~760px the controls collapse into the bottom
+// dock + swipe sheet; at or above it, a proper sidebar sits beside the map and
+// only the overflow controls live behind the settings drawer (which reuses
+// the same sheet component, restyled — see CSS). `mqSmallScreen` is defined
+// further down and used by a few other subsystems (decode sizing, dot radius);
+// referencing it here is fine since this function only runs once both have
+// been declared (it's only ever called from the init path at the bottom of
+// this file).
 function applyResponsiveLayout() {
-  const mobile = mqMobile.matches;
+  const mobile = mqSmallScreen.matches;
   document.querySelector('.app').classList.toggle('mobile', mobile);
   // The dock stays visible during playback now — the scrubber lives inside it and
   // only replaces the product + play slot (see `.app.playing` CSS).
   el.mobileDock.hidden = !mobile;
+  el.sidebar.hidden = mobile;
   if (!mobile && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
+    closeSheet();
     if (el.productPanel.parentElement !== el.pageControls) {
       layoutMobilePages();
       // Re-anchor the carousel to whatever page was last shown (default: controls).
@@ -3724,10 +3772,19 @@ function applyResponsiveLayout() {
   } else {
     closeSheet();
     if (state.inspect) toggleInspect(false);
-    if (el.sourcePanel.parentElement !== el.railLeft) {
-      layoutDesktopRails();
+    // volumePanel starts as a raw sibling of .sidebar/.stage in the markup
+    // (outside both the sidebar and the sheet), so — unlike sourcePanel,
+    // which is already nested inside #sidebar in the raw HTML — checking its
+    // parent reliably detects "first desktop layout pass" too, not just a
+    // mobile→desktop transition.
+    if (el.volumePanel.parentElement !== el.pageControls) {
+      layoutDesktopSidebar();
+      layoutDesktopDrawer();
+      requestAnimationFrame(() => setSheetPage(state._sheetPage || 0, false));
     }
   }
+  updateLayoutSwitchUI();
+  refreshIcons();
   setTimeout(() => state.map && state.map.resize(), 60);
 }
 
@@ -3802,9 +3859,10 @@ function waitForFrameWarmSlot() {
 // (values + geometry) that draws and samples the same, at a fraction of the
 // memory. Mirrors buildTexture's max-pool so reflectivity-type fields keep their
 // peaks. factor ≤ 1 returns the grid untouched.
-// A real small-screen check. (mqMobile matches `min-width:0px` — i.e. always — so
-// it can't distinguish a phone from a desktop; the 760px breakpoint mirrors the
-// CSS iPad/desktop tier, so phones pool harder to fit a tighter memory budget.)
+// The real small-screen check, also used by applyResponsiveLayout (above) to
+// drive the sidebar/dock split — the 760px breakpoint mirrors the CSS
+// iPad/desktop tier, so phones additionally pool grids harder to fit a
+// tighter memory budget.
 const mqSmallScreen = window.matchMedia('(max-width: 759.98px)');
 function poolGridForPlayback(grid) {
   const factor = Math.max(1, Math.ceil(Math.max(grid.ni, grid.nj) /
@@ -4364,7 +4422,7 @@ function createPlayback() {
       // scrubber stood in for; the dock itself stayed visible throughout.
       document.querySelector('.app').classList.remove('playing');
       // Release the frame cache on phones so playback memory is freed at once.
-      if (mqMobile.matches) { this.cache.clear(); this.cacheCtx = null; }
+      if (mqSmallScreen.matches) { this.cache.clear(); this.cacheCtx = null; }
       // Restore the live view for the active source.
       if (provider && provider.idle) provider.idle();
       else displaySweep(currentSweep(), state.volume && state.volume.site);
@@ -4700,7 +4758,20 @@ function setupMapTools() {
     setToggleBtn(el.toolSplit, on);
     if (on) state.splitView.setDrawings(state.mapTools.getFeatureCollection());
     updateSplitPaneChrome();
+    updateLayoutSwitchUI();
   });
+  // Sidebar Layout switch (single / split) — a friendlier face on the same
+  // split-view toggle above; it just clicks the real control so every other
+  // split-view listener (state, chrome, drawings) fires unchanged.
+  if (el.layoutSwitch) {
+    el.layoutSwitch.addEventListener('click', (e) => {
+      const btn = e.target.closest('.layout-btn');
+      if (!btn) return;
+      const wantSplit = btn.dataset.layout === 'split2';
+      if (wantSplit !== state.splitView.active) el.toolSplit.click();
+      else updateLayoutSwitchUI();
+    });
+  }
 
   // Export / share — snapshot the live map(s) to a PNG with a caption banner.
   state.exportTool = new ExportTool({ getScene: buildExportScene });
@@ -6070,6 +6141,24 @@ function setToggleBtn(btn, on) {
   btn.textContent = on ? 'ON' : 'OFF';
 }
 
+// Reflect the real split-view state onto the sidebar's Layout switch buttons.
+function updateLayoutSwitchUI() {
+  if (!el.layoutSwitch) return;
+  const split = !!(state.splitView && state.splitView.active);
+  el.layoutSwitch.querySelectorAll('.layout-btn').forEach((b) => {
+    b.classList.toggle('active', (b.dataset.layout === 'split2') === split);
+  });
+}
+
+// (Re)render any Lucide icon placeholders (<i data-lucide="...">) added to the
+// static chrome. Safe to call repeatedly — Lucide just swaps matching <i>
+// elements for inline <svg>, and no-ops once an element is already swapped.
+let _iconRetries = 0;
+function refreshIcons() {
+  if (window.lucide && window.lucide.createIcons) { window.lucide.createIcons(); _iconRetries = 0; }
+  else if (_iconRetries++ < 40) setTimeout(refreshIcons, 60);
+}
+
 // Push restored settings onto their UI controls (run once, after the controls
 // exist but before the first data load). state already holds the restored values.
 // Smoothing slider stops, indexed by level (0 = none … 3 = high).
@@ -6402,6 +6491,13 @@ function init() {
   enableSheetSwipe();
   setupSheetPager();
 
+  // ---- Desktop settings drawer: same sheet, opened from the sidebar ----
+  if (el.settingsBtn) {
+    el.settingsBtn.addEventListener('click', () =>
+      el.sheet.hidden ? openSheet() : closeSheet()
+    );
+  }
+
   if (el.mapProviderSelect) {
     el.mapProviderSelect.value = state.mapProvider;
     el.mapProviderSelect.addEventListener('change', () => setMapProvider(el.mapProviderSelect.value));
@@ -6446,7 +6542,7 @@ function init() {
     state.playback.setFps(f);
   });
 
-  mqMobile.addEventListener('change', applyResponsiveLayout);
+  mqSmallScreen.addEventListener('change', applyResponsiveLayout);
   applyResponsiveLayout();
 
   window.addEventListener('resize', () => {

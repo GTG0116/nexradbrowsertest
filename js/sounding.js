@@ -277,7 +277,7 @@ export function drawSkewT(canvas, profile) {
   ctx.clip();
 
   // Dry adiabats (constant potential temperature) — subtle warm grey.
-  ctx.strokeStyle = 'rgba(190,130,70,0.22)';
+  ctx.strokeStyle = 'rgba(190,130,70,0.32)';
   ctx.lineWidth = 1;
   for (let th = -40; th <= 200; th += 20) {
     ctx.beginPath();
@@ -291,7 +291,7 @@ export function drawSkewT(canvas, profile) {
   }
 
   // Moist adiabats (pseudoadiabats) — subtle green.
-  ctx.strokeStyle = 'rgba(80,180,120,0.22)';
+  ctx.strokeStyle = 'rgba(80,180,120,0.30)';
   for (let t0 = -20; t0 <= 36; t0 += 8) {
     ctx.beginPath();
     let T = t0, first = true;
@@ -304,7 +304,7 @@ export function drawSkewT(canvas, profile) {
   }
 
   // Saturation mixing-ratio lines — dashed teal.
-  ctx.strokeStyle = 'rgba(90,170,200,0.30)';
+  ctx.strokeStyle = 'rgba(40,140,170,0.38)';
   ctx.setLineDash([3, 3]);
   for (const wgkg of [1, 2, 4, 8, 12, 20]) {
     ctx.beginPath();
@@ -322,7 +322,7 @@ export function drawSkewT(canvas, profile) {
 
   // Skewed isotherms every 10 °C; freezing line emphasised.
   for (let T = -100; T <= 50; T += 10) {
-    ctx.strokeStyle = T === 0 ? 'rgba(120,180,255,0.55)' : 'rgba(120,140,170,0.22)';
+    ctx.strokeStyle = T === 0 ? 'rgba(42,111,219,0.55)' : 'rgba(163,148,127,0.3)';
     ctx.lineWidth = T === 0 ? 1.4 : 1;
     ctx.beginPath();
     ctx.moveTo(xOf(T, bot), bot);
@@ -332,8 +332,8 @@ export function drawSkewT(canvas, profile) {
   ctx.restore();
 
   // Isobars + pressure labels.
-  ctx.strokeStyle = 'rgba(120,140,170,0.30)';
-  ctx.fillStyle = 'rgba(150,170,195,0.9)';
+  ctx.strokeStyle = 'rgba(163,148,127,0.35)';
+  ctx.fillStyle = '#8a7f72';
   ctx.font = '10px "JetBrains Mono", monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
@@ -365,8 +365,8 @@ export function drawSkewT(canvas, profile) {
   traceLine(ctx, L, (lv) => lv.Td, yOf, xOf, '#34d27b', 2.6);
   traceLine(ctx, L, (lv) => lv.T, yOf, xOf, '#ff5a4d', 2.6);
 
-  // Parcel path, dashed white.
-  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  // Parcel path, dashed.
+  ctx.strokeStyle = 'rgba(42,37,32,0.55)';
   ctx.lineWidth = 1.5;
   ctx.setLineDash([5, 4]);
   ctx.beginPath();
@@ -465,8 +465,8 @@ function shadeParcel(ctx, levels, parcel, yOf, xOf, left, top, pw, ph) {
 
 // Wind barbs (kt) drawn at a fixed x, one per ~every-other level to avoid clutter.
 function drawBarbs(ctx, levels, yOf, x, room) {
-  ctx.strokeStyle = '#cdd6e6';
-  ctx.fillStyle = '#cdd6e6';
+  ctx.strokeStyle = '#6b6155';
+  ctx.fillStyle = '#6b6155';
   ctx.lineWidth = 1.2;
   let lastY = Infinity;
   for (const lv of levels) {
@@ -564,8 +564,8 @@ export function drawHodograph(canvas, profile) {
   const py = (v) => cy - v * MS2KT * sc;
 
   // Range rings + labels.
-  ctx.strokeStyle = 'rgba(120,140,170,0.28)';
-  ctx.fillStyle = 'rgba(150,170,195,0.85)';
+  ctx.strokeStyle = 'rgba(163,148,127,0.35)';
+  ctx.fillStyle = '#8a7f72';
   ctx.font = '9px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -574,7 +574,7 @@ export function drawHodograph(canvas, profile) {
     ctx.fillText(String(r), cx + r * sc + 8, cy - 4);
   }
   // Axes.
-  ctx.strokeStyle = 'rgba(120,140,170,0.4)';
+  ctx.strokeStyle = 'rgba(163,148,127,0.5)';
   ctx.beginPath();
   ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
   ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
@@ -592,13 +592,13 @@ export function drawHodograph(canvas, profile) {
     ctx.moveTo(px(sm.rm[0]), py(sm.rm[1]));
     for (const [u, v] of srhPts) ctx.lineTo(px(u), py(v));
     ctx.closePath();
-    ctx.fillStyle = 'rgba(205,214,228,0.18)';
+    ctx.fillStyle = 'rgba(163,148,127,0.18)';
     ctx.fill();
   }
 
   // Storm-relative inflow vector: storm motion → surface wind (the one edge that
   // bounds the shaded area).
-  ctx.strokeStyle = 'rgba(230,236,247,0.45)';
+  ctx.strokeStyle = 'rgba(107,97,85,0.5)';
   ctx.setLineDash([4, 3]);
   ctx.lineWidth = 1.1;
   ctx.beginPath();
@@ -642,17 +642,17 @@ export function drawHodograph(canvas, profile) {
     const x = px(vec[0]), y = py(vec[1]);
     ctx.beginPath(); ctx.arc(x, y, 5, 0, 7);
     ctx.fillStyle = fill; ctx.fill();
-    ctx.lineWidth = 1.5; ctx.strokeStyle = '#0b0f17'; ctx.stroke();
-    ctx.fillStyle = '#e6ecf7';
-    ctx.font = '700 10px "Space Grotesk", sans-serif';
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fffdf8'; ctx.stroke();
+    ctx.fillStyle = '#2a2520';
+    ctx.font = '700 10px "Manrope", sans-serif';
     ctx.fillText(label, x + 12, y);
   };
   // 0–6 km mean wind (hollow, labelled MW), then both movers.
   const mx = px(sm.mean[0]), my = py(sm.mean[1]);
   ctx.beginPath(); ctx.arc(mx, my, 4, 0, 7);
-  ctx.strokeStyle = '#9aa6bd'; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.fillStyle = '#e6ecf7';
-  ctx.font = '700 10px "Space Grotesk", sans-serif';
+  ctx.strokeStyle = '#6b6155'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#2a2520';
+  ctx.font = '700 10px "Manrope", sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText('MW', mx + 14, my);
   drawSM(sm.lm, 'LM', '#6aa9ff');
@@ -669,7 +669,9 @@ function tier(v, stops) {
   for (const [t, col] of stops) if (v >= t) c = col;
   return c;
 }
-const C = { base: '#9aa6bd', low: '#7fd0a0', mod: '#ffd24a', high: '#ff9a4a', extreme: '#ff5a4d', sig: '#e06bd0' };
+// Tier colors for the severe-parameter value text — chosen for contrast
+// against the panel's light card background, not just hue identity.
+const C = { base: '#6b7280', low: '#2f8f5b', mod: '#a8780a', high: '#c2570c', extreme: '#c81e1e', sig: '#9c2da8' };
 
 // Build the rows (grouped) the panel renders. Each row: {label, value, color}.
 export function paramRows(profile) {
