@@ -36,6 +36,27 @@
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+body.theme-dark {
+  --bg: #17120d;
+  --bg-2: #211a13;
+  --panel: #251f18;
+  --panel-edge: #3a3027;
+  --panel-soft: #1d1711;
+  --ink: #f7efe4;
+  --ink-dim: #b8a997;
+  --ink-faint: #8f8172;
+  --accent: #e2643f;
+  --accent-2: #f06d47;
+  --accent-bright: #ffb997;
+  --accent-soft: rgba(226, 100, 63, 0.18);
+  --accent-border: rgba(226, 100, 63, 0.45);
+  --accent-ink: #ffb08f;
+  --selected-radar: #45d66b;
+  --selected-radar-ink: #082414;
+  --glow: 0 10px 28px -12px rgba(0, 0, 0, 0.75);
+  --glow-strong: 0 18px 42px -14px rgba(0, 0, 0, 0.8);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -87,6 +108,17 @@ body {
   background: #fff;
   border-right: 1px solid var(--panel-edge);
   z-index: 30;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sidebar::-webkit-scrollbar {
+  display: none;
+}
+body.theme-dark .sidebar {
+  background: #18130e;
+}
+body.theme-dark .brand-mark {
+  background: #090604;
 }
 
 .sidebar-brand {
@@ -432,6 +464,7 @@ button {
 .map-wrap {
   flex: 1;
   position: relative;
+  --wx-card-h: 0px;
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
   overflow: hidden;
@@ -1109,7 +1142,7 @@ input[type='range']::-moz-range-thumb {
 .alert-row {
   --ac: #6f8aa8;
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-rows: auto auto;
   column-gap: 8px;
   align-items: center;
@@ -1138,11 +1171,16 @@ input[type='range']::-moz-range-thumb {
   font-size: 12px;
   font-weight: 800;
   color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .alert-row-area {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   color: var(--ink-dim);
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1751,6 +1789,35 @@ input[type='range']::-moz-range-thumb {
   .legend {
     transition: opacity 0.2s ease;
   }
+  .map-hud.weather-hud {
+    position: static;
+    top: auto;
+    left: auto;
+    width: auto;
+    transform: none;
+    display: block;
+  }
+  .map-hud.weather-hud .hud-left {
+    display: none;
+  }
+  .map-hud.weather-hud .legend.weather-card {
+    position: absolute;
+    top: calc(14px + env(safe-area-inset-top, 0px));
+    right: 12px;
+    left: auto;
+    width: min(338px, calc(100vw - 24px));
+    max-width: min(338px, calc(100vw - 24px));
+    transform: translateY(var(--wx-swipe-y, 0));
+    margin: 0;
+  }
+  .map-hud.weather-hud .legend.weather-card.wx-expanded {
+    width: min(420px, calc(100vw - 24px));
+    max-width: min(420px, calc(100vw - 24px));
+  }
+  .map-wrap.wx-active .map-tools,
+  .map-wrap.wx-active .tool-popover {
+    top: calc(14px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
+  }
   .map-hud .time-bar {
     justify-content: center;
     min-width: 0;
@@ -1817,6 +1884,22 @@ input[type='range']::-moz-range-thumb {
 @media (max-width: 520px) {
   .product-grid {
     grid-template-columns: 1fr 1fr;
+  }
+  .weather-card .wx-summary {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 9px;
+  }
+  .weather-card .wx-summary-place {
+    grid-column: 1 / -1;
+    border-left: 0;
+    border-top: 1px solid var(--panel-edge);
+    padding: 8px 0 0;
+    min-width: 0;
+    display: flex;
+    gap: 12px;
+  }
+  .weather-card .wx-summary-temp {
+    font-size: 28px;
   }
 }
 
@@ -2278,8 +2361,19 @@ input[type='range']::-moz-range-thumb {
 }
 .dock-tool-item .ti-icon {
   width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   font-size: 16px;
+}
+.dock-tool-more .lucide,
+.dock-tool .lucide,
+.dock-tool-item .lucide {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2.2;
 }
 
 /* ---------------- Playback bar ---------------- */
@@ -2958,6 +3052,9 @@ input[type='range']::-moz-range-thumb {
   background: var(--panel);
   box-shadow: var(--glow);
 }
+.map-wrap.wx-active .map-tools {
+  top: calc(22px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
+}
 .map-tool {
   width: 40px;
   height: 40px;
@@ -3289,6 +3386,9 @@ body.storm-active .playback-bar {
   font-size: 12px;
   font-weight: 700;
   color: var(--ink);
+}
+.map-wrap.wx-active .tool-popover {
+  top: calc(22px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
 }
 .split-badge .sb-dot {
   font-size: 9px;
@@ -3788,11 +3888,77 @@ body.storm-active .playback-bar {
 
 .legend.weather-card {
   display: block;
-  width: max-content;
-  max-width: min(340px, calc(100vw - 32px));
+  top: calc(22px + env(safe-area-inset-top, 0px));
+  right: 26px;
+  left: auto;
+  transform: translateY(var(--wx-swipe-y, 0));
+  width: min(338px, calc(100vw - 32px));
+  max-width: min(338px, calc(100vw - 32px));
   border-color: var(--panel-edge);
   background: var(--panel);
   box-shadow: var(--glow-strong);
+  padding: 14px 18px;
+  border-radius: 20px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.legend.weather-card.wx-expanded {
+  width: min(420px, calc(100vw - 32px));
+  max-width: min(420px, calc(100vw - 32px));
+  cursor: default;
+}
+.weather-card .wx-summary {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.weather-card .wx-summary-icon {
+  color: var(--accent);
+  font-size: 28px;
+  line-height: 1;
+}
+.weather-card .wx-summary-temp {
+  color: var(--ink);
+  font: 800 32px/1 'Bricolage Grotesque', sans-serif;
+}
+.weather-card .wx-summary-condition,
+.weather-card .wx-summary-feels {
+  margin-top: 4px;
+  color: var(--ink-dim);
+  font: 600 12px/1.1 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.weather-card .wx-summary-place {
+  min-width: 88px;
+  padding-left: 16px;
+  border-left: 1px solid var(--panel-edge);
+  color: var(--ink-dim);
+  font: 700 12px/1.65 'JetBrains Mono', monospace;
+  text-align: left;
+  white-space: nowrap;
+}
+.weather-card .wx-expand-hint {
+  margin-top: 10px;
+  color: var(--accent);
+  font: 700 10px 'JetBrains Mono', monospace;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+.weather-card:not(.wx-expanded) .wx-expanded-body {
+  display: none;
+}
+.weather-card .wx-expanded-body {
+  margin-top: 14px;
+  cursor: default;
+}
+.weather-card .wx-expanded-body > .wx-kicker,
+.weather-card .wx-expanded-body > .wx-temp,
+.weather-card .wx-expanded-body > .wx-condition,
+.weather-card .wx-expanded-body > .wx-place {
+  display: none;
 }
 .weather-card .wx-temp {
   display: flex;
@@ -3928,7 +4094,7 @@ body.storm-active .playback-bar {
    edge snaps to screen centre and the card runs off the right edge (the
    "half on the far right, rest off-screen" bug). Compose both translates. */
 .weather-card {
-  transform: translateX(-50%) translateY(var(--wx-swipe-y, 0));
+  transform: translateY(var(--wx-swipe-y, 0));
   transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out),
     box-shadow 220ms var(--ease-out);
   will-change: transform, opacity;
@@ -3941,14 +4107,14 @@ body.storm-active .playback-bar {
 /* Keyframes override `transform`, so they too must carry translateX(-50%) or the
    card would jump off-centre for the duration of the swipe animation. */
 @keyframes wxSwipeDownIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(-22px) scale(.97); }
+  from { opacity: 0; transform: translateY(-22px) scale(.97); }
   60% { opacity: 1; }
-  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes wxSwipeUpIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(22px) scale(.97); }
+  from { opacity: 0; transform: translateY(22px) scale(.97); }
   60% { opacity: 1; }
-  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .weather-card .wx-current-strip {
   display: grid;

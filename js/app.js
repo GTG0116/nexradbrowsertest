@@ -36,6 +36,10 @@ function resolveGridProduct(p) {
 }
 
 const M_PER_DEG_LAT = 111320;
+const SMALL_SCREEN_QUERY = '(max-width: 759.98px)';
+function isSmallScreenNow() {
+  return typeof window !== 'undefined' && window.matchMedia(SMALL_SCREEN_QUERY).matches;
+}
 
 const MODEL_CITY_VALUE_SOURCE = 'model-city-values';
 const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
@@ -231,7 +235,15 @@ function sitePillKind(icao) {
 }
 
 function sitePillImageId(icao, kind) {
-  return `site-pill-${icao}-${kind}`;
+  return `site-pill-${icao}-${kind}-${state.uiTheme || 'light'}`;
+}
+
+function selectedRadarColor() {
+  return state.uiTheme === 'dark' ? '#45d66b' : '#e2643f';
+}
+
+function selectedRadarInk() {
+  return state.uiTheme === 'dark' ? '#082414' : '#fff1ea';
 }
 
 function sitePillImage(icao, kind, ratio = 2) {
@@ -240,7 +252,11 @@ function sitePillImage(icao, kind, ratio = 2) {
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
   const palette = {
-    current: { fill: 'rgba(157,60,20,0.96)', stroke: '#e2643f', text: '#fff1ea' },
+    current: {
+      fill: state.uiTheme === 'dark' ? 'rgba(69,214,107,0.96)' : 'rgba(157,60,20,0.96)',
+      stroke: selectedRadarColor(),
+      text: selectedRadarInk(),
+    },
     down: { fill: 'rgba(92,20,28,0.96)', stroke: '#ff7878', text: '#ffe8e8' },
     tdwr: { fill: 'rgba(86,72,12,0.96)', stroke: '#ffe682', text: '#fff7c2' },
     base: { fill: 'rgba(12,30,58,0.94)', stroke: '#96cdff', text: '#e3f2ff' },
@@ -437,14 +453,14 @@ function setupOverlays(map) {
         // terminal radars → yellow; NEXRAD → blue.
         'circle-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#e2643f',
+          ['==', ['get', 'current'], 1], selectedRadarColor(),
           ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
           ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
           'rgba(80,140,220,0.85)',
         ],
         'circle-stroke-color': [
           'case',
-          ['==', ['get', 'current'], 1], '#e2643f',
+          ['==', ['get', 'current'], 1], selectedRadarColor(),
           ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
           ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
           'rgba(150,205,255,0.85)',
@@ -522,7 +538,9 @@ function clearRadarSource(map) {
 // slow (each multi-MB frame waited for the previous one); a pool lets the
 // parallel frame loader below keep more than one core busy. Sized to the
 // hardware but capped so we don't spawn a worker per frame or hog memory.
-const DECODE_POOL_SIZE = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+const DECODE_POOL_SIZE = isSmallScreenNow()
+  ? 1
+  : Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
 let decodeSeq = 0;
 let decodeRR = 0;
 const pending = new Map();
@@ -583,6 +601,7 @@ const state = {
   timeSource: 'product',
   mapProvider: 'mapbox',
   basemap: 'dark',
+  uiTheme: 'light',
   // User customisation of the basemap's own layers (town labels, roads,
   // rivers, borders). Re-applied on every style load so it survives a
   // basemap switch. See js/mapStyle.js.
@@ -633,7 +652,7 @@ const state = {
   // combo→action. Built from defaults or storage by initKeybinds().
   keybinds: null,
   _storedKeybinds: null,
-  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', touchStart: null, touchMove: null, anim: null },
+  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', expanded: false, touchStart: null, touchMove: null, anim: null },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
   mode: 'radar',
@@ -680,6 +699,7 @@ const el = {};
 function cacheEls() {
   el.map = $('#map');
   el.mapWrap = $('#mapWrap');
+  el.mapHud = $('#mapHud');
   el.siteSelect = $('#siteSelect');
   el.dateInput = $('#dateInput');
   el.volumeList = $('#volumeList');
@@ -807,6 +827,7 @@ function cacheEls() {
   el.metaPanel = $('#metaPanel');
   el.mapProviderSelect = $('#mapProviderSelect');
   el.basemapSelect = $('#basemapSelect');
+  el.uiThemeSelect = $('#uiThemeSelect');
   el.siteMarkerSelect = $('#siteMarkerSelect');
   el.sheetPlayback = $('#sheetPlayback');
   el.playSpeed = $('#playSpeed');
@@ -1035,6 +1056,62 @@ function setMapProvider(provider) {
     if (state.splitView) state.splitView.setBasemap(url);
   }
   saveSettings();
+}
+
+function applyUiTheme(theme = state.uiTheme) {
+  state.uiTheme = theme === 'dark' ? 'dark' : 'light';
+  document.body.classList.toggle('theme-dark', state.uiTheme === 'dark');
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', state.uiTheme === 'dark' ? '#17120d' : '#efe7da');
+  if (el.uiThemeSelect) el.uiThemeSelect.value = state.uiTheme;
+  if (state.map) ensureSitePillImages(state.map);
+  refreshSiteDots();
+  if (state.map && state.map.getLayer && state.map.getLayer('sites')) {
+    const c = selectedRadarColor();
+    state.map.setPaintProperty('sites', 'circle-color', [
+      'case',
+      ['==', ['get', 'current'], 1], c,
+      ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
+      ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
+      'rgba(80,140,220,0.85)',
+    ]);
+    state.map.setPaintProperty('sites', 'circle-stroke-color', [
+      'case',
+      ['==', ['get', 'current'], 1], c,
+      ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
+      ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
+      'rgba(150,205,255,0.85)',
+    ]);
+  }
+}
+
+function exportTheme() {
+  if (state.uiTheme === 'dark') {
+    return {
+      mode: 'dark',
+      bg: '#17120d',
+      panel: '#251f18',
+      separator: 'rgba(255,255,255,0.12)',
+      text: '#f7efe4',
+      dim: '#b8a997',
+      faint: '#8f8172',
+      accent: '#e2643f',
+      alertPanel: 'rgba(37,31,24,0.98)',
+      alertSoft: 'rgba(255,255,255,0.06)',
+    };
+  }
+  return {
+    mode: 'light',
+    bg: '#fffaf2',
+    panel: '#fffaf2',
+    separator: 'rgba(42,37,32,0.12)',
+    text: '#2a2520',
+    dim: '#6f655b',
+    faint: '#9a8b7b',
+    accent: '#e2643f',
+    alertPanel: 'rgba(255,250,242,0.98)',
+    alertSoft: 'rgba(42,37,32,0.055)',
+  };
 }
 
 // Switch to a radar by ICAO, injecting it into the picker if it isn't a curated
@@ -1321,6 +1398,7 @@ function buildVolumeList() {
 
 function buildLegend() {
   if (state.weather && state.weather.active) return renderWeatherLegend();
+  setWeatherHudActive(false);
   el.legend.className = 'legend';
   clearWeatherSwipe();
   if (state.mode === 'satellite') return buildSatLegend();
@@ -3173,10 +3251,10 @@ function refreshSiteDots() {
 
 // Scan every radar site's most recent scan time and flag the ones that look
 // down — no volume in the past hour, or none findable at all — so their dots can
-// draw red. Runs in the background with bounded concurrency (one small list
-// request per site) and recolors the dots progressively as results arrive, so a
-// ~160-site sweep never blocks the UI. A fresh call supersedes any in-flight one.
-const DOWN_SCAN_CONCURRENCY = 8;
+// draw red. This uses only the lightweight rolling IEM list; falling through to
+// NOMADS/AWS here would multiply one startup task into hundreds of public-data
+// requests. A fresh call supersedes any in-flight one.
+const DOWN_SCAN_CONCURRENCY = isSmallScreenNow() ? 1 : 2;
 const DOWN_STALE_MS = 60 * 60 * 1000; // "down" = no scan in the past hour
 async function scanDownRadars() {
   const seq = ++state._downScanSeq;
@@ -3199,7 +3277,8 @@ async function scanDownRadars() {
       const icao = codes[i];
       let down = true;
       try {
-        const t = await latestScanTime(icao);
+        const t = await latestScanTime(icao, { allowArchiveFallback: false });
+        if (t === undefined) continue;
         down = !t || (Date.now() - t.getTime() > DOWN_STALE_MS);
       } catch (_) { down = true; }
       if (seq !== state._downScanSeq) return;
@@ -3803,7 +3882,7 @@ function applyResponsiveLayout() {
 // per-frame network latency; the decode worker pool caps how much actually runs
 // in parallel for radar, while grid/satellite frames are network-bound so a few
 // extra lanes mostly hide round-trip time.
-const PLAYBACK_CONCURRENCY = 6;
+const PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 2 : 6;
 
 // A model loop spans *every* forecast hour of the run (GFS goes hourly to F120
 // then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384). Every hour
@@ -3818,11 +3897,11 @@ const PLAYBACK_CONCURRENCY = 6;
 // the loop yields long enough for the browser to paint and reclaim the transient
 // decode buffers, then the next batch starts — steady, bounded allocation instead
 // of one big spike.
-const MODEL_PLAYBACK_CHUNK = 6;       // forecast hours decoded per batch
-const MODEL_PLAYBACK_CHUNK_PAUSE = 120; // ms breather between batches (GC/paint)
+const MODEL_PLAYBACK_CHUNK = isSmallScreenNow() ? 2 : 6; // forecast hours decoded per batch
+const MODEL_PLAYBACK_CHUNK_PAUSE = isSmallScreenNow() ? 260 : 120; // ms breather between batches (GC/paint)
 // Decode concurrency within a model batch — kept modest so the transient memory of
 // several in-flight GRIB decodes can't pile up the way 10 parallel lanes did.
-const MODEL_PLAYBACK_CONCURRENCY = 4;
+const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
 // How many decoded forecast hours stay resident at once, and how many to prefetch
 // ahead of the playhead for smooth playback. The window slides with the playhead
 // (the engine evicts the frames farthest from the current one), so resident memory
@@ -3830,16 +3909,16 @@ const MODEL_PLAYBACK_CONCURRENCY = 4;
 // a smaller memory budget. Prefetch is kept below the cap so prefetching and
 // eviction don't fight over the same slots.
 const MODEL_PLAYBACK_MAX_CACHED = 48;
-const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 20;
+const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 8;
 const MODEL_PLAYBACK_PREFETCH = 12;
-const MODEL_PLAYBACK_PREFETCH_MOBILE = 6;
+const MODEL_PLAYBACK_PREFETCH_MOBILE = 3;
 // Each *playback* frame's grid is down-pooled to a modest resolution (the live
 // single-frame view still renders full-res). Pooling shrinks BOTH the GPU texture
 // and the readout-values array, cutting per-frame memory ~4× at factor 2. Targets
 // are the max grid dimension after pooling; phones pool harder to fit a tighter
 // memory budget.
 const MODEL_PLAYBACK_TARGET_DIM = 900;
-const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 600;
+const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 420;
 const FRAME_WARM_START_DELAY = 1800;
 const FRAME_WARM_IDLE_TIMEOUT = 3000;
 const FRAME_WARM_FRAME_PAUSE = 220;
@@ -3863,7 +3942,7 @@ function waitForFrameWarmSlot() {
 // drive the sidebar/dock split — the 760px breakpoint mirrors the CSS
 // iPad/desktop tier, so phones additionally pool grids harder to fit a
 // tighter memory budget.
-const mqSmallScreen = window.matchMedia('(max-width: 759.98px)');
+const mqSmallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
 function poolGridForPlayback(grid) {
   const factor = Math.max(1, Math.ceil(Math.max(grid.ni, grid.nj) /
     (mqSmallScreen.matches ? MODEL_PLAYBACK_TARGET_DIM_MOBILE : MODEL_PLAYBACK_TARGET_DIM)));
@@ -4061,6 +4140,7 @@ async function buildPlaybackProvider(opts = {}) {
 
 function scheduleFrameWarm() {
   if (!state.playback || state.playback.active) return;
+  if (mqSmallScreen.matches) return;
   if (state.mode === 'models') return;
   if (frameWarmTimer) clearTimeout(frameWarmTimer);
   frameWarmTimer = setTimeout(() => {
@@ -4810,6 +4890,7 @@ function startWeatherTool() {
   state.weather.active = true;
   state.weather.pickerOpen = false;
   state.weather.view = 'current';
+  state.weather.expanded = false;
   if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
   updateSplitPaneChrome();
@@ -4822,12 +4903,14 @@ function stopWeatherTool() {
   state.weather.pickerOpen = false;
   state.weather.data = null;
   state.weather.view = 'current';
+  state.weather.expanded = false;
   if (state.weather.timer) clearTimeout(state.weather.timer);
   state.weather.timer = null;
   if (state.weather.abort) state.weather.abort.abort();
   state.weather.abort = null;
   if (el.weatherPicker) el.weatherPicker.hidden = true;
   if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
+  setWeatherHudActive(false);
   updateSplitPaneChrome();
   el.toolWeather.classList.remove('active');
   buildLegend();
@@ -4922,18 +5005,39 @@ function describeWeatherCode(code) {
   return table[code] || ['🌡️', 'Current weather'];
 }
 
+function setWeatherHudActive(active) {
+  if (el.mapWrap) {
+    el.mapWrap.classList.toggle('wx-active', !!active);
+    el.mapWrap.classList.toggle('wx-expanded', !!(active && state.weather && state.weather.expanded));
+    if (!active) el.mapWrap.style.removeProperty('--wx-card-h');
+  }
+  if (el.mapHud) el.mapHud.classList.toggle('weather-hud', !!active);
+}
+
+function updateWeatherCardHeight() {
+  if (!el.mapWrap || !el.legend || !state.weather.active) return;
+  requestAnimationFrame(() => {
+    if (!el.legend.classList.contains('weather-card')) return;
+    const h = Math.ceil(el.legend.getBoundingClientRect().height || 0);
+    if (h > 0) el.mapWrap.style.setProperty('--wx-card-h', `${h}px`);
+  });
+}
+
 function renderWeatherLegend(stateOverride = null) {
   if (!state.weather.active && !stateOverride) return;
+  setWeatherHudActive(true);
   if (stateOverride && stateOverride.loading) {
     el.legend.className = 'legend weather-card loading';
     el.legend.innerHTML = `Loading current conditions near ${escapeHTML(stateOverride.label)}…`;
     bindWeatherSwipe();
+    updateWeatherCardHeight();
     return;
   }
   if (stateOverride && stateOverride.error) {
     el.legend.className = 'legend weather-card error';
     el.legend.innerHTML = `Current conditions unavailable — ${escapeHTML(stateOverride.error)}`;
     bindWeatherSwipe();
+    updateWeatherCardHeight();
     return;
   }
   const wx = state.weather.data;
@@ -4942,16 +5046,31 @@ function renderWeatherLegend(stateOverride = null) {
   const units = wx.forecast.current_units || {};
   const [emoji, text] = describeWeatherCode(current.weather_code);
   const place = `${wx.lat.toFixed(2)}°, ${wx.lon.toFixed(2)}°`;
-  el.legend.className = `legend weather-card ${state.weather.view === 'forecast' ? 'forecast' : ''} ${state.weather.anim ? `wx-${state.weather.anim}` : ''}`.trim();
+  el.legend.className = `legend weather-card ${state.weather.expanded ? 'wx-expanded' : ''} ${state.weather.view === 'forecast' ? 'forecast' : ''} ${state.weather.anim ? `wx-${state.weather.anim}` : ''}`.trim();
+  setWeatherHudActive(true);
   if (state.weather.view === 'forecast') {
     el.legend.innerHTML = weatherForecastHTML(wx.forecast, wx);
     bindWeatherSwipe();
     bindWeatherForecastDetails();
     clearWeatherAnimation();
+    bindWeatherCardToggle();
+    updateWeatherCardHeight();
     return;
   }
   el.legend.innerHTML = `
-    <div class="wx-main">
+    <div class="wx-main" role="button" tabindex="0" aria-expanded="${state.weather.expanded ? 'true' : 'false'}">
+      <div class="wx-summary">
+        <div class="wx-summary-icon" aria-hidden="true">${emoji}</div>
+        <div>
+          <div class="wx-summary-temp">${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '\u00b0F')}</div>
+          <div class="wx-summary-condition">${escapeHTML(text)}</div>
+        </div>
+        <div class="wx-summary-place">
+          <div>${escapeHTML(place)}</div>
+          <div class="wx-summary-feels">Feels ${fmtNumber(current.apparent_temperature)}${escapeHTML(units.apparent_temperature || '\u00b0F')}</div>
+        </div>
+      </div>
+      <div class="wx-expanded-body">
       <div class="wx-kicker">Current Conditions</div>
       <div class="wx-temp"><span class="wx-emoji" aria-hidden="true">${emoji}</span>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</div>
       <div class="wx-condition">${emoji} ${escapeHTML(text)}</div>
@@ -4967,9 +5086,13 @@ function renderWeatherLegend(stateOverride = null) {
         <div>Swipe down for forecast</div>
         <div>Open-Meteo · map center</div>
       </div>
+      </div>
+      ${state.weather.expanded ? '' : '<div class="wx-expand-hint">Tap for details</div>'}
     </div>`;
   clearWeatherAnimation();
   bindWeatherSwipe();
+  bindWeatherCardToggle();
+  updateWeatherCardHeight();
 }
 
 function weatherForecastHTML(forecast, wx) {
@@ -5026,6 +5149,33 @@ function weatherCurrentMiniHTML(wx) {
       <span>Wind ${fmtNumber(current.wind_speed_10m)} ${escapeHTML(units.wind_speed_10m || 'mph')}</span>
     </div>
   </div>`;
+}
+
+function bindWeatherCardToggle() {
+  if (!el.legend) return;
+  el.legend.onclick = (ev) => {
+    if (state.weather.suppressClickUntil && Date.now() < state.weather.suppressClickUntil) return;
+    if (ev.target.closest('[data-wx-detail], .wx-detail-close, button, a, input, select')) return;
+    if (state.weather.view === 'forecast') {
+      state.weather.view = 'current';
+      state.weather.expanded = false;
+    } else {
+      state.weather.expanded = !state.weather.expanded;
+    }
+    renderWeatherLegend();
+  };
+  el.legend.onkeydown = (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    if (ev.target.closest('[data-wx-detail], button, a, input, select')) return;
+    ev.preventDefault();
+    if (state.weather.view === 'forecast') {
+      state.weather.view = 'current';
+      state.weather.expanded = false;
+    } else {
+      state.weather.expanded = !state.weather.expanded;
+    }
+    renderWeatherLegend();
+  };
 }
 
 function bindWeatherForecastDetails() {
@@ -5116,6 +5266,8 @@ function clearWeatherSwipe() {
   el.legend.ontouchstart = null;
   el.legend.ontouchmove = null;
   el.legend.ontouchend = null;
+  el.legend.onclick = null;
+  el.legend.onkeydown = null;
 }
 
 function bindWeatherSwipe() {
@@ -5135,8 +5287,18 @@ function bindWeatherSwipe() {
     el.legend.style.removeProperty('--wx-swipe-y');
     if (start == null) return;
     const delta = ev.changedTouches[0].clientY - start;
-    if (delta > 45 && state.weather.view !== 'forecast') { state.weather.view = 'forecast'; state.weather.anim = 'swipe-down'; renderWeatherLegend(); }
-    if (delta < -45 && state.weather.view !== 'current') { state.weather.view = 'current'; state.weather.anim = 'swipe-up'; renderWeatherLegend(); }
+    if (Math.abs(delta) > 12) state.weather.suppressClickUntil = Date.now() + 350;
+    if (delta > 45 && state.weather.view !== 'forecast') {
+      state.weather.view = 'forecast';
+      state.weather.expanded = true;
+      state.weather.anim = 'swipe-down';
+      renderWeatherLegend();
+    }
+    if (delta < -45 && state.weather.view !== 'current') {
+      state.weather.view = 'current';
+      state.weather.anim = 'swipe-up';
+      renderWeatherLegend();
+    }
   };
 }
 
@@ -5174,13 +5336,27 @@ const DOCK_TOOLS = [
 
 // The tools offered in the mobile dock slot. Kept as a function (rather than the
 // constant list) so source-specific filtering can be reintroduced if needed.
+const MOBILE_TOOL_DEFS = [
+  { id: 'storm', icon: 'navigation', label: 'Storm track', btn: () => el.toolStorm },
+  { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
+  { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
+  { id: 'metars', icon: 'cloud-sun', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  { id: 'weather', icon: 'sun', label: 'Local weather', btn: () => el.toolWeather },
+  { id: 'locate', icon: 'locate-fixed', label: 'My live location', btn: () => el.toolLocate },
+  { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
+];
+
 function dockToolsForMode() {
-  return DOCK_TOOLS;
+  return MOBILE_TOOL_DEFS;
 }
 
 function setupDockTools() {
   if (!el.dockToolBtn) return;
   state.dockTool = state.dockTool || 'storm';
+  if (el.dockToolMore) {
+    el.dockToolMore.innerHTML = '<i data-lucide="wrench" class="lucide sm"></i>';
+    el.dockToolMore.title = 'Choose tool';
+  }
 
   const current = () => dockToolsForMode().find((t) => t.id === state.dockTool) || dockToolsForMode()[0];
 
@@ -5197,13 +5373,14 @@ function setupDockTools() {
       const item = document.createElement('button');
       item.className = 'dock-tool-item';
       if (t.id === state.dockTool) item.classList.add('active');
-      item.innerHTML = `<span class="ti-icon">${t.icon}</span><span>${t.label}</span>`;
+      item.innerHTML = `<span class="ti-icon"><i data-lucide="${t.icon}" class="lucide sm"></i></span><span>${t.label}</span>`;
       item.addEventListener('click', () => {
         setDockTool(t.id);
         closeDockMenu();
       });
       el.dockToolMenu.appendChild(item);
     }
+    refreshIcons();
   }
 
   function setDockTool(id) {
@@ -5211,10 +5388,11 @@ function setupDockTools() {
     if (prev && prev.id !== id) clearOtherTools(null);
     state.dockTool = id;
     const t = current();
-    el.dockToolBtn.textContent = t.icon;
+    el.dockToolBtn.innerHTML = `<i data-lucide="${t.icon}" class="lucide sm"></i>`;
     el.dockToolBtn.title = t.label;
     syncActive();
     saveSettings();
+    refreshIcons();
   }
 
   function openDockMenu() {
@@ -5287,7 +5465,7 @@ function buildExportScene() {
   // briefing" footer). The full briefing takes precedence over the card.
   const briefing = state.alerts ? state.alerts.exportDetail() : null;
   const alert = briefing ? null : (state.alerts ? state.alerts.exportPreview() : null);
-  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert, briefing };
+  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert, briefing, theme: exportTheme() };
 }
 
 // Describe what's on screen for the export banner: a title, a product/source
@@ -5382,14 +5560,14 @@ const KEYBIND_SCOPES = ['global', 'radar', 'satellite', 'mrms', 'models'];
 const DEFAULT_KEYBINDS = {
   global: {
     'Shift+KeyI': 'tool:inspect',
-    'Shift+Digit1': 'tool:storm',
-    'Shift+Digit2': 'tool:measure',
-    'Shift+Digit3': 'tool:draw',
-    'Shift+Digit4': 'tool:metars',
-    'Shift+Digit5': 'tool:weather',
-    'Shift+Digit6': 'tool:locate',
+    'KeyT': 'tool:storm',
+    'KeyM': 'tool:measure',
+    'KeyD': 'tool:draw',
+    'KeyS': 'tool:metars',
+    'KeyW': 'tool:weather',
+    'KeyL': 'tool:locate',
+    'KeyE': 'tool:export',
     'Shift+Digit7': 'tool:split',
-    'Shift+Digit8': 'tool:export',
     'Shift+Digit9': 'tool:clear',
     'Space': 'playback:loop',
     'ArrowRight': 'playback:next',
@@ -5427,6 +5605,16 @@ const PLAYBACK_ACTIONS = [
   ['playback:loop', 'Start / pause loop'],
   ['playback:next', 'Next frame'],
   ['playback:prev', 'Previous frame'],
+];
+
+const TOOL_KEYBIND_MIGRATIONS = [
+  ['Shift+Digit1', 'KeyT', 'tool:storm'],
+  ['Shift+Digit2', 'KeyM', 'tool:measure'],
+  ['Shift+Digit3', 'KeyD', 'tool:draw'],
+  ['Shift+Digit4', 'KeyS', 'tool:metars'],
+  ['Shift+Digit5', 'KeyW', 'tool:weather'],
+  ['Shift+Digit6', 'KeyL', 'tool:locate'],
+  ['Shift+Digit8', 'KeyE', 'tool:export'],
 ];
 
 // Catalog of product actions per source mode, [actionId, label]. Used to label
@@ -5509,6 +5697,7 @@ function initKeybinds() {
     const src = stored && typeof stored[scope] === 'object' ? stored[scope] : (stored ? {} : DEFAULT_KEYBINDS[scope]);
     state.keybinds[scope] = { ...src };
   }
+  if (stored) migrateToolKeybindDefaults();
   // Existing users may have a saved shortcut map from before inspect was
   // bindable. Add the new default only when it does not collide with a custom
   // combo or an already-bound inspect action.
@@ -5517,6 +5706,19 @@ function initKeybinds() {
       Object.values(state.keybinds[scope] || {}).includes('tool:inspect'));
     if (!hasInspect) state.keybinds.global['Shift+KeyI'] = 'tool:inspect';
   }
+}
+
+function migrateToolKeybindDefaults() {
+  const global = state.keybinds.global || (state.keybinds.global = {});
+  let changed = false;
+  for (const [oldCombo, nextCombo, action] of TOOL_KEYBIND_MIGRATIONS) {
+    if (global[oldCombo] !== action) continue;
+    if (findActionForCombo(nextCombo)) continue;
+    delete global[oldCombo];
+    global[nextCombo] = action;
+    changed = true;
+  }
+  if (changed) saveSettings();
 }
 
 // Run an action id by driving the matching button. Returns true if handled.
@@ -6018,6 +6220,7 @@ function saveSettings() {
         opacity: state.opacity,
         smooth: state.smooth,
         basemap: state.basemap,
+        uiTheme: state.uiTheme,
         mapStyle: state.mapStyle,
         alertStyle: state.alertStyle,
         showRings: state.showRings,
@@ -6084,6 +6287,7 @@ function applyStoredSettings(s) {
   if (typeof s.smooth === 'number') state.smooth = Math.max(0, Math.min(3, s.smooth | 0));
   else if (typeof s.smooth === 'boolean') state.smooth = s.smooth ? 2 : 0;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
+  if (s.uiTheme === 'dark' || s.uiTheme === 'light') state.uiTheme = s.uiTheme;
   if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
   if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
@@ -6189,6 +6393,7 @@ function reflectStoredControls() {
   if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
   if (el.mapProviderSelect) el.mapProviderSelect.value = state.mapProvider;
   if (el.basemapSelect) el.basemapSelect.value = state.basemap;
+  if (el.uiThemeSelect) el.uiThemeSelect.value = state.uiTheme;
   if (el.siteMarkerSelect) el.siteMarkerSelect.value = state.siteMarkerStyle;
 }
 
@@ -6255,6 +6460,7 @@ function showMapboxGate(message, provider = state.mapProvider || getStoredMapPro
 function init() {
   cacheEls();
   applyStoredSettings(loadSettings()); // restore last session before building UI
+  applyUiTheme(state.uiTheme);
   state.mapProvider = getStoredMapProvider();
   MAPBOX_TOKEN = getStoredMapToken(state.mapProvider);
   if (!MAPBOX_TOKEN) {
@@ -6506,6 +6712,13 @@ function init() {
   el.basemapSelect.addEventListener('change', () =>
     setBasemap(el.basemapSelect.value)
   );
+  if (el.uiThemeSelect) {
+    el.uiThemeSelect.value = state.uiTheme;
+    el.uiThemeSelect.addEventListener('change', () => {
+      applyUiTheme(el.uiThemeSelect.value);
+      saveSettings();
+    });
+  }
   if (el.siteMarkerSelect) {
     el.siteMarkerSelect.value = state.siteMarkerStyle;
     el.siteMarkerSelect.addEventListener('change', () => {

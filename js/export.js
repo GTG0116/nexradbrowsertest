@@ -40,6 +40,7 @@ export class ExportTool {
     const maps = scene.canvases;
     const cap = scene.caption || {};
     const legend = readLegend(scene.legendEl);
+    const theme = normalizeTheme(scene.theme);
 
     const gap = maps.length > 1 ? 2 : 0;
     const mapW = maps.reduce((s, c) => s + c.width, 0) + gap * (maps.length - 1);
@@ -67,11 +68,13 @@ export class ExportTool {
     out.width = mapW;
     out.height = headerH + mapH + footerH;
     const ctx = out.getContext('2d');
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, out.width, out.height);
 
     // Header band.
-    ctx.fillStyle = '#0a0f18';
+    ctx.fillStyle = theme.panel;
     ctx.fillRect(0, 0, out.width, headerH);
-    drawHeader(ctx, cap, out.width, headerH, u, padX);
+    drawHeader(ctx, cap, out.width, headerH, u, padX, theme);
 
     // The map panes.
     let x = 0;
@@ -84,23 +87,23 @@ export class ExportTool {
     // precedence; otherwise the floating preview card is stamped over the map
     // near the bottom (matching where it sits live), without its "View full
     // briefing" footer.
-    if (scene.briefing) drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile);
-    else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile);
+    if (scene.briefing) drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
+    else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile, theme);
 
     // Footer band: legend (left) + credit/timestamp (right), measured so they
     // never collide.
     const fy = headerH + mapH;
-    ctx.fillStyle = '#0a0f18';
+    ctx.fillStyle = theme.panel;
     ctx.fillRect(0, fy, out.width, footerH);
     // Hairline separators between the map and each band.
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillStyle = theme.separator;
     ctx.fillRect(0, headerH - 1, out.width, 1);
     ctx.fillRect(0, fy, out.width, 1);
 
     const legendRight = legend
-      ? drawLegend(ctx, legend, padX, fy, footerH, u, out.width - padX * 2)
+      ? drawLegend(ctx, legend, padX, fy, footerH, u, out.width - padX * 2, theme)
       : padX;
-    drawCredit(ctx, cap, legendRight + Math.round(u), out.width - padX, fy, footerH, u);
+    drawCredit(ctx, cap, legendRight + Math.round(u), out.width - padX, fy, footerH, u, theme);
 
     return out;
   }
@@ -232,8 +235,8 @@ const SANS = "'Manrope', system-ui, sans-serif";
 // Header: "◆ RadarNexus" wordmark on the left, title + sub stacked in the middle,
 // scan time on the right. Everything is measured and clipped so the three blocks
 // never overlap, whatever the image width. `u` is the base text unit (~px).
-function drawHeader(ctx, cap, W, H, u, padX) {
-  const AZURE = '#e2643f';
+function drawHeader(ctx, cap, W, H, u, padX, theme) {
+  const AZURE = theme.accent;
   // Brand accent bar down the left edge.
   ctx.fillStyle = AZURE;
   ctx.fillRect(0, 0, Math.max(2, Math.round(u * 0.22)), H);
@@ -248,7 +251,7 @@ function drawHeader(ctx, cap, W, H, u, padX) {
   let brandRight;
   const split = /^Radar(Nexus)$/.test(brand) ? ['Radar', 'Nexus'] : null;
   if (split) {
-    ctx.fillStyle = '#f2f8ff';
+    ctx.fillStyle = theme.text;
     ctx.fillText(split[0], padX, midY);
     const midX = padX + ctx.measureText(split[0]).width;
     ctx.fillStyle = AZURE;
@@ -276,10 +279,10 @@ function drawHeader(ctx, cap, W, H, u, padX) {
   const availW = timeLeft - Math.round(u * 1.3) - tx;
   if (availW > u * 2) {
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#e8eef5';
+    ctx.fillStyle = theme.text;
     ctx.font = `700 ${Math.round(u * 1.25)}px ${SANS}`;
     ctx.fillText(clip(ctx, cap.title || '', availW), tx, Math.round(H * 0.36));
-    ctx.fillStyle = '#9aa7b4';
+    ctx.fillStyle = theme.dim;
     ctx.font = `500 ${Math.round(u * 0.82)}px ${SANS}`;
     ctx.fillText(clip(ctx, cap.sub || '', availW), tx, Math.round(H * 0.68));
   }
@@ -288,7 +291,7 @@ function drawHeader(ctx, cap, W, H, u, padX) {
 
 // Legend: caption above a gradient bar with low/mid/high ticks beneath. Returns
 // the x of its right edge so the credit can be placed clear of it.
-function drawLegend(ctx, legend, x, y, H, u, maxW) {
+function drawLegend(ctx, legend, x, y, H, u, maxW, theme) {
   const barW = Math.round(clamp(maxW * 0.42, u * 8, u * 16));
   const barH = Math.round(u * 0.62);
   const barY = y + Math.round(H * 0.42);
@@ -296,7 +299,7 @@ function drawLegend(ctx, legend, x, y, H, u, maxW) {
   // Caption above the bar.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = '#9aa7b4';
+  ctx.fillStyle = theme.dim;
   ctx.font = `600 ${Math.round(u * 0.72)}px ${MONO}`;
   ctx.fillText(clip(ctx, (legend.title || '').toUpperCase(), barW + u * 4), x, barY - Math.round(u * 0.45));
 
@@ -306,14 +309,14 @@ function drawLegend(ctx, legend, x, y, H, u, maxW) {
     for (const [pos, color] of legend.stops) grad.addColorStop(clamp(pos, 0, 1), color);
     ctx.fillStyle = grad;
     ctx.fillRect(x, barY, barW, barH);
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = theme.separator;
     ctx.lineWidth = Math.max(1, Math.round(u / 14));
     ctx.strokeRect(x, barY, barW, barH);
   }
 
   // Low / mid / high ticks under the bar.
   const ticks = legend.ticks || [];
-  ctx.fillStyle = '#6b7785';
+  ctx.fillStyle = theme.faint;
   ctx.font = `400 ${Math.round(u * 0.7)}px ${MONO}`;
   const ty = barY + barH + Math.round(u * 0.95);
   if (ticks[0]) { ctx.textAlign = 'left'; ctx.fillText(ticks[0], x, ty); }
@@ -325,12 +328,12 @@ function drawLegend(ctx, legend, x, y, H, u, maxW) {
 
 // Credit + UTC stamp, right-aligned and clipped to the space left of `maxX` after
 // the legend. Drops the wordmark suffix first, then ellipsises, when space is tight.
-function drawCredit(ctx, cap, minX, maxX, y, H, u) {
+function drawCredit(ctx, cap, minX, maxX, y, H, u, theme) {
   const avail = maxX - minX;
   if (avail < u * 6) return; // no room — skip rather than overlap the legend
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#6b7785';
+  ctx.fillStyle = theme.faint;
   ctx.font = `400 ${Math.round(u * 0.72)}px ${MONO}`;
   const full = `${cap.stamp || ''}  ·  radarnexus`;
   const text = ctx.measureText(full).width <= avail ? full : (cap.stamp || '');
@@ -343,7 +346,7 @@ function drawCredit(ctx, cap, minX, maxX, y, H, u) {
 // card, but omits the "View full briefing" footer since the export captures the
 // first popup, not the expanded briefing. Drawn centred near the bottom of the
 // map region so it overlays the scope the way it does on screen.
-function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
+function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile, theme) {
   const rows = alert.rows || [];
   // On phones the live preview card spans almost the whole width, so size the
   // exported card the same way (near-full-width) instead of the compact desktop
@@ -367,9 +370,9 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
   // Card body + border, clipped to the rounded rect so the header band and
   // everything inside keeps the rounded corners.
   roundRectPath(ctx, x, y, cardW, cardH, r);
-  ctx.fillStyle = 'rgba(9, 16, 32, 0.97)';
+  ctx.fillStyle = theme.alertPanel;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.strokeStyle = theme.separator;
   ctx.lineWidth = Math.max(1, Math.round(cu / 16));
   ctx.stroke();
   ctx.clip();
@@ -400,16 +403,16 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
   for (let i = 0; i < rows.length; i++) {
     const [label, value] = rows[i];
     if (i > 0) {
-      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = theme.separator;
       ctx.fillRect(x + pad, ry - rowH / 2, cardW - pad * 2, 1);
     }
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#8a98a8';
+    ctx.fillStyle = theme.dim;
     ctx.font = `600 ${Math.round(cu * 0.62)}px ${MONO}`;
     ctx.fillText(String(label).toUpperCase(), x + pad, ry);
     const labelW = ctx.measureText(String(label).toUpperCase()).width;
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = theme.text;
     ctx.font = `700 ${Math.round(cu * 0.95)}px ${SANS}`;
     ctx.fillText(clip(ctx, String(value), cardW - pad * 2 - labelW - cu), x + cardW - pad, ry);
     ry += rowH;
@@ -425,7 +428,7 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile) {
 // sees. The panel runs the full height of the map region and its content is
 // clipped to that box (rendered from the top, like the live panel scrolled to
 // its start). On phones the live panel is full-width, so the export panel is too.
-function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
+function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme) {
   const panelW = mobile ? mapW : Math.round(clamp(mapW * 0.36, u * 16, u * 30));
   const x0 = mapX;
   const y0 = mapY;
@@ -441,22 +444,19 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
   ctx.clip();
 
   // Panel background + right-edge hairline.
-  const grad = ctx.createLinearGradient(0, y0, 0, y0 + panelH);
-  grad.addColorStop(0, 'rgba(8,14,28,0.97)');
-  grad.addColorStop(1, 'rgba(6,10,22,0.98)');
-  ctx.fillStyle = grad;
+  ctx.fillStyle = theme.alertPanel;
   ctx.fillRect(x0, y0, panelW, panelH);
-  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillStyle = theme.separator;
   ctx.fillRect(x0 + panelW - 1, y0, 1, panelH);
 
   // Optional "X / Y alerts here" cycle bar (stacked alerts).
   if (b.group) {
     const barH = Math.round(u * 2.1);
-    ctx.fillStyle = 'rgba(10,18,34,0.92)';
+    ctx.fillStyle = theme.panel;
     ctx.fillRect(x0, y, panelW, barH);
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillStyle = theme.separator;
     ctx.fillRect(x0, y + barH - 1, panelW, 1);
-    ctx.fillStyle = '#9aa7b4';
+    ctx.fillStyle = theme.dim;
     ctx.font = `600 ${Math.round(u * 0.78)}px ${MONO}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -489,7 +489,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
   const sectionLabel = (t) => {
     if (y > bottom) return;
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#7c8a99';
+    ctx.fillStyle = theme.dim;
     ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
     ctx.fillText(String(t).toUpperCase(), x0 + pad, y);
     y += Math.round(u * 1.05);
@@ -498,7 +498,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
     if (!t || y > bottom) return;
     const size = opts.size || 0.92;
     ctx.textAlign = 'left';
-    ctx.fillStyle = opts.color || '#cdd6e0';
+    ctx.fillStyle = opts.color || theme.text;
     ctx.font = `${opts.weight || '400'} ${Math.round(u * size)}px ${SANS}`;
     const lh = Math.round(u * size * 1.42);
     for (const block of String(t).split(/\n+/)) {
@@ -524,7 +524,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
         ctx.fillStyle = b.color || '#e2643f';
         ctx.fillText('•', x0 + pad, y);
       }
-      ctx.fillStyle = '#cdd6e0';
+      ctx.fillStyle = theme.text;
       ctx.fillText(lines[i], bx, y);
       y += lh;
     }
@@ -533,7 +533,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
 
   // EXPIRES.
   sectionLabel('Expires');
-  paragraph(b.expires, { color: '#fff', weight: '700', size: 1.0 });
+  paragraph(b.expires, { color: theme.text, weight: '700', size: 1.0 });
   gap();
 
   // Hazard boxes (HAIL / WIND / TORNADO).
@@ -547,16 +547,16 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
     for (let i = 0; i < b.hazards.length && i < 3; i++) {
       const [lab, val] = b.hazards[i];
       roundRectPath(ctx, bxp, y, bw, bh, Math.round(u * 0.4));
-      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      ctx.fillStyle = theme.alertSoft;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.strokeStyle = theme.separator;
       ctx.lineWidth = Math.max(1, Math.round(u / 18));
       ctx.stroke();
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#8a98a8';
+      ctx.fillStyle = theme.dim;
       ctx.font = `600 ${Math.round(u * 0.55)}px ${MONO}`;
       ctx.fillText(lab, bxp + bw / 2, y + bh * 0.36);
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = theme.text;
       ctx.font = `700 ${Math.round(u * 0.85)}px ${SANS}`;
       ctx.fillText(clip(ctx, val, bw - u * 0.5), bxp + bw / 2, y + bh * 0.72);
       bxp += bw + bgap;
@@ -575,14 +575,14 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
   // Safety guidance: lead paragraph + bullet points.
   if (b.guidance) {
     sectionLabel('Safety guidance');
-    paragraph(b.guidance.lead, { color: '#e8eef5', size: 0.95 });
+    paragraph(b.guidance.lead, { color: theme.text, size: 0.95 });
     gap(0.3);
     for (const pt of b.guidance.points || []) bullet(pt);
     gap();
   }
 
   // Issued line.
-  paragraph(b.issued, { color: '#7c8a99', size: 0.72 });
+  paragraph(b.issued, { color: theme.dim, size: 0.72 });
   gap(0.6);
 
   // Location.
@@ -599,7 +599,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile) {
 
   // Full alert text.
   sectionLabel('Full alert text');
-  paragraph(b.description, { color: '#aeb8c4', size: 0.84 });
+  paragraph(b.description, { color: theme.dim, size: 0.84 });
   gap();
 
   // Tags.
@@ -649,6 +649,23 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+function normalizeTheme(theme) {
+  const base = theme && typeof theme === 'object' ? theme : {};
+  const dark = base.mode === 'dark';
+  return {
+    mode: dark ? 'dark' : 'light',
+    bg: base.bg || '#fffaf2',
+    panel: base.panel || base.bg || '#fffaf2',
+    separator: base.separator || 'rgba(42,37,32,0.12)',
+    text: base.text || '#2a2520',
+    dim: base.dim || '#6f655b',
+    faint: base.faint || '#9a8b7b',
+    accent: base.accent || '#e2643f',
+    alertPanel: base.alertPanel || (dark ? 'rgba(37,31,24,0.98)' : 'rgba(255,250,242,0.98)'),
+    alertSoft: base.alertSoft || (dark ? 'rgba(255,255,255,0.06)' : 'rgba(42,37,32,0.055)'),
+  };
 }
 
 // Truncate text with an ellipsis so it fits `maxW` px in the current font.

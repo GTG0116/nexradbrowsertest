@@ -1,6 +1,7 @@
 // s3.js — discover and download NEXRAD Level II volumes for the live viewer.
 //
-// Three public sources are used, in priority order:
+// Three public sources are known, but routine browser traffic only uses the
+// public feeds that tolerate automated client-side access:
 //
 //   1. PRIMARY — the Iowa Environmental Mesonet (IEM) raw Level II feed at
 //      mesonet-nexrad.agron.iastate.edu/level2/raw/<SITE>/ . IEM relays the NWS
@@ -12,7 +13,7 @@
 //      AR2V "Archive II" files (internally bzip2-compressed LDM records), so the
 //      decoder reads them unchanged.
 //
-//   2. FALLBACK — NCEP NOMADS' Level II radar feed at
+//   2. EMERGENCY FALLBACK — NCEP NOMADS' Level II radar feed at
 //      nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/<SITE>/ . It
 //      exposes Apache-style directory indexes plus `dir.list`, with volumes named
 //      like IEM (<SITE>_YYYYMMDD_HHMMSS.bz2).
@@ -22,13 +23,13 @@
 //      program. Objects are keyed  YYYY/MM/DD/SITE/SITEYYYYMMDD_HHMMSS_V06  and
 //      the bucket returns `Access-Control-Allow-Origin: *` for listing and GET.
 //
-// IEM is tried first. We fall back to NOMADS and then the AWS bucket whenever
-// IEM is unreachable
+// IEM is tried first. We fall back directly to the AWS bucket whenever IEM is unreachable
 // (it does not advertise CORS, so a cross-origin browser fetch can be blocked —
 // set a proxy below if so), errors out, or simply has no data for the requested
-// UTC day. That last case covers history browsing: IEM keeps only a rolling
-// window, while NOMADS provides another realtime feed and AWS retains the full
-// recent archive.
+// UTC day. NOMADS is intentionally not part of normal automatic fallback because
+// browser sessions can otherwise fan out across many radar sites and trip NOAA
+// rate limits. Keep the NOMADS helpers below for legacy keys and emergency local
+// re-enablement, but do not call them from bulk/background paths.
 //
 // (NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
 // disables anonymous bucket listing, so it can't be browsed from the client.)
@@ -36,6 +37,7 @@
 const IEM_BASE = 'https://mesonet-nexrad.agron.iastate.edu/level2/raw';
 const NOMADS_BASE = 'https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2';
 const BUCKET = 'https://unidata-nexrad-level2.s3.amazonaws.com';
+const NOMADS_FALLBACK_ENABLED = false;
 
 // Keys for IEM/NOMADS volumes carry a prefix so fetchVolume can route them back
 // to the right source; AWS keys are bare S3 object keys.
@@ -57,20 +59,14 @@ function pad(n) {
 }
 
 // List the volume scan keys for a given site and UTC day, newest last. Prefers
-// the IEM feed, then NOMADS, and falls back to the AWS bucket when neither has
-// anything usable.
+// the IEM feed, then falls back directly to AWS. NOMADS is deliberately skipped
+// here so date probing, live refreshes and playback setup cannot flood NOMADS.
 export async function listVolumes(site, date) {
   try {
     const vols = await listVolumesIem(site, date);
     if (vols.length) return vols;
   } catch (e) {
-    console.warn('IEM list failed, falling back to NOMADS:', e.message);
-  }
-  try {
-    const vols = await listVolumesNomads(site, date);
-    if (vols.length) return vols;
-  } catch (e) {
-    console.warn('NOMADS list failed, falling back to AWS:', e.message);
+    console.warn('IEM list failed, falling back to AWS:', e.message);
   }
   return listVolumesAws(site, date);
 }
@@ -108,7 +104,7 @@ async function listVolumesIem(site, date) {
 }
 
 
-// --- NCEP NOMADS (secondary fallback) ------------------------------------
+// --- NCEP NOMADS (disabled legacy/emergency helper) -----------------------
 
 async function listVolumesNomads(site, date) {
   const SITE = site.toUpperCase();
@@ -176,37 +172,27 @@ async function listVolumesAws(site, date) {
 // if none can be found (used to flag "down" radars on the map). Prefers the IEM
 // dir.list — a rolling recent window, so it answers in one small fetch and isn't
 // fooled by the day boundary (a radar that last scanned at 23:55Z still shows up
-// just after 00Z). Falls back to NOMADS, then the AWS bucket (today, then
-// yesterday) when IEM is unreachable (e.g. blocked by CORS) or empty.
-export async function latestScanTime(site) {
+// just after 00Z). Falls back to the AWS bucket (today, then yesterday) when IEM
+// is unreachable (e.g. blocked by CORS) or empty. Do not call NOMADS from this
+// all-site background scan.
+export async function latestScanTime(site, opts = {}) {
+  const allowArchiveFallback = opts.allowArchiveFallback !== false;
   try {
     const SITE = site.toUpperCase();
     const res = await fetch(viaProxy(`${IEM_BASE}/${SITE}/dir.list`));
-    if (res.ok) {
-      const text = await res.text();
-      let newest = null;
-      for (const line of text.split('\n')) {
-        const name = line.trim().split(/\s+/).pop();
-        const t = name && timeForName(name);
-        if (t && (!newest || t > newest)) newest = t;
-      }
-      if (newest) return newest;
+    if (!res.ok) throw new Error(`IEM latest scan failed: ${res.status}`);
+    const text = await res.text();
+    let newest = null;
+    for (const line of text.split('\n')) {
+      const name = line.trim().split(/\s+/).pop();
+      const t = name && timeForName(name);
+      if (t && (!newest || t > newest)) newest = t;
     }
-  } catch (_) { /* fall through to NOMADS */ }
-  try {
-    const SITE = site.toUpperCase();
-    const res = await fetch(viaProxy(`${NOMADS_BASE}/${SITE}/dir.list`));
-    if (res.ok) {
-      const text = await res.text();
-      let newest = null;
-      for (const line of text.split('\n')) {
-        const name = line.trim().split(/\s+/).pop();
-        const t = name && timeForName(name);
-        if (t && (!newest || t > newest)) newest = t;
-      }
-      if (newest) return newest;
-    }
-  } catch (_) { /* fall through to the AWS mirror */ }
+    if (newest || !allowArchiveFallback) return newest;
+  } catch (_) {
+    if (!allowArchiveFallback) return undefined;
+    /* fall through to the AWS mirror */
+  }
   const now = new Date();
   for (let back = 0; back < 2; back++) {
     const d = new Date(now.getTime() - back * 86400000);
@@ -315,9 +301,10 @@ async function downloadBytes(fullUrl, onProgress) {
 }
 
 // Download one volume scan as raw bytes, reporting progress 0..1. The key picks
-// the source: IEM/NOMADS keys are prefixed, AWS keys are bare. If an IEM or
-// NOMADS scan fails (outage/timeout) we retry the equivalent AWS mirror object
-// once before giving up.
+// the source: IEM/NOMADS keys are prefixed, AWS keys are bare. If an IEM scan
+// fails (outage/timeout), retry the equivalent AWS mirror object once before
+// giving up. NOMADS is skipped by default here too; frame warming/playback can
+// otherwise turn a single IEM outage into many NOMADS downloads.
 export async function fetchVolume(key, onProgress) {
   if (key.startsWith(IEM_PREFIX)) {
     const path = key.slice(IEM_PREFIX.length); // e.g. "KTLX/KTLX_20240619_120300.bz2"
@@ -326,21 +313,27 @@ export async function fetchVolume(key, onProgress) {
     } catch (e) {
       const awsKey = awsKeyForIemName(path.split('/').pop());
       if (!awsKey) throw e;
-      console.warn('IEM volume fetch failed, trying NOMADS then AWS mirror:', e.message);
-      try {
-        return await downloadBytes(`${NOMADS_BASE}/${path}`, onProgress);
-      } catch (nomadsError) {
-        console.warn('NOMADS volume fetch failed, trying AWS mirror:', nomadsError.message);
-        return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
-      }
+      console.warn('IEM volume fetch failed, trying AWS mirror:', e.message);
+      return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
     }
   }
   if (key.startsWith(NOMADS_PREFIX)) {
     const path = key.slice(NOMADS_PREFIX.length);
+    const awsKey = awsKeyForIemName(path.split('/').pop());
+    if (awsKey) {
+      try {
+        return await downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
+      } catch (awsError) {
+        if (!NOMADS_FALLBACK_ENABLED) throw awsError;
+        console.warn('AWS mirror fetch failed, trying NOMADS legacy key:', awsError.message);
+      }
+    }
+    if (!NOMADS_FALLBACK_ENABLED) {
+      throw new Error('NOMADS fallback disabled; AWS mirror unavailable for this scan');
+    }
     try {
       return await downloadBytes(`${NOMADS_BASE}/${path}`, onProgress);
     } catch (e) {
-      const awsKey = awsKeyForIemName(path.split('/').pop());
       if (!awsKey) throw e;
       console.warn('NOMADS volume fetch failed, trying AWS mirror:', e.message);
       return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
