@@ -145,6 +145,7 @@
             <div class="layout-switch" id="layoutSwitch">
               <button type="button" class="layout-btn active" data-layout="single" title="Single view"><i data-lucide="square" class="lucide sm"></i></button>
               <button type="button" class="layout-btn" data-layout="split2" title="Split view (compare products)"><i data-lucide="columns-2" class="lucide sm"></i></button>
+              <button type="button" class="layout-btn" data-layout="quad4" title="Four-panel view"><i data-lucide="grid-2x2" class="lucide sm"></i></button>
             </div>
           </section>
 
@@ -210,6 +211,8 @@
           <div id="mapWrap" class="map-wrap">
             <div id="map"></div>
             <div id="map2" hidden></div>
+            <div id="map3" hidden></div>
+            <div id="map4" hidden></div>
 
             <div id="mapHud" class="map-hud">
               <!-- Breadcrumb + clock stack top-left; the legend centers itself
@@ -232,7 +235,8 @@
               <button id="toolDraw" class="map-tool" title="Draw (freehand)"><i data-lucide="pencil" class="lucide sm"></i></button>
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area"><i data-lucide="ruler" class="lucide sm"></i></button>
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><i data-lucide="navigation" class="lucide sm"></i></button>
-              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)"><i data-lucide="cloud-sun" class="lucide sm"></i></button>
+              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)"><i data-lucide="radio-tower" class="lucide sm"></i></button>
+              <button id="toolInspect" class="map-tool" title="Inspect a pixel"><i data-lucide="crosshair" class="lucide sm"></i></button>
               <button id="toolWeather" class="map-tool" title="Local current conditions"><i data-lucide="sun" class="lucide sm"></i></button>
               <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="locate-fixed" class="lucide sm"></i></button>
               <button id="toolExport" class="map-tool" title="Export / share image"><i data-lucide="download" class="lucide sm"></i></button>

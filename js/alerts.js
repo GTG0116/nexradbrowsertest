@@ -1135,7 +1135,18 @@ export class AlertsController {
     this.els.detail.hidden = false;
     this.renderDetail();
     this._fitTo(this.selectedId);
-    setTimeout(() => this.map.resize(), 60);
+    this._resizeMaps();
+  }
+
+  // The briefing changes the map area's size (sidebar hidden, stage shifted
+  // right of the panel). Every pane map must be resized, not just the main
+  // one — otherwise the split/quad panes keep their stale canvas size and
+  // render dead space where the container grew.
+  _resizeMaps() {
+    setTimeout(() => {
+      this.map.resize();
+      for (const m of this.mirrors) if (m && m.resize) m.resize();
+    }, 60);
   }
 
   // Step the briefing to another alert at the same location (delta = ±1, wraps).
@@ -1174,7 +1185,7 @@ export class AlertsController {
     this.detailOpen = false;
     this._applyAlertFeatures();
     document.querySelector('.app').classList.remove('alert-mode', 'alert-split-mode');
-    setTimeout(() => this.map.resize(), 60);
+    this._resizeMaps();
   }
 
   renderDetail() {

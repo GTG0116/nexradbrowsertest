@@ -39,12 +39,14 @@ const PROB = [
 const QPE = [
   s(0.2, [120, 200, 255]), s(5, [0, 120, 240]), s(15, [0, 200, 120]),
   s(30, [230, 220, 0]), s(60, [255, 120, 0]), s(100, [220, 0, 0]),
-  s(150, [180, 0, 90]), s(250, [255, 0, 255]),
+  s(150, [180, 0, 90]), s(250, [255, 0, 255]), s(762, [255, 0, 255]),
 ];
-// Echo-top height (km) ramp — short/warm storms blue, tall (severe) tops red→magenta.
+// Echo-top height (km) ramp - short/warm storms blue, tall (severe) tops red to
+// magenta. The final color waits until ~75 kft instead of topping out near 60 kft.
 const ETOP = [
   s(2, [40, 60, 120]), s(5, [0, 150, 210]), s(8, [0, 200, 120]),
-  s(10, [230, 220, 0]), s(12, [255, 150, 0]), s(15, [220, 0, 0]), s(18, [255, 0, 255]),
+  s(10, [230, 220, 0]), s(12, [255, 150, 0]), s(15, [220, 0, 0]),
+  s(18, [220, 0, 0]), s(23, [255, 0, 255]),
 ];
 // Vertically Integrated Liquid (kg/m²) ramp — high VIL flags hail cores.
 const VILR = [
@@ -94,11 +96,11 @@ export const MRMS_PRODUCTS = {
   REF0C: product('REF0C', 'Reflectivity_0C_00.50', 'Reflectivity at 0°C', 'dBZ', 5, 75, 5, REFL),
   REFM20C: product('REFM20C', 'Reflectivity_-20C_00.50', 'Reflectivity at −20°C', 'dBZ', 5, 75, 5, REFL),
   // ---- Echo tops ----
-  HREET: product('HREET', 'LVL3_HREET_00.50', 'Enhanced Echo Top (18 dBZ)', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
-  ET18: product('ET18', 'EchoTop_18_00.50', '18 dBZ Echo Top', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
-  ET30: product('ET30', 'EchoTop_30_00.50', '30 dBZ Echo Top', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
-  ET50: product('ET50', 'EchoTop_50_00.50', '50 dBZ Echo Top', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
-  ET60: product('ET60', 'EchoTop_60_00.50', '60 dBZ Echo Top', 'km', 0, 18, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  HREET: product('HREET', 'LVL3_HREET_00.50', 'Enhanced Echo Top (18 dBZ)', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET18: product('ET18', 'EchoTop_18_00.50', '18 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET30: product('ET30', 'EchoTop_30_00.50', '30 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET50: product('ET50', 'EchoTop_50_00.50', '50 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
+  ET60: product('ET60', 'EchoTop_60_00.50', '60 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
   // ---- Vertically integrated liquid / ice ----
   VIL: product('VIL', 'VIL_00.50', 'Vert. Integrated Liquid', 'kg/m²', 0, 70, 0.5, VILR),
   VILD: product('VILD', 'VIL_Density_00.50', 'VIL Density', 'g/m³', 0, 6, 0.1, VILR.map((k) => ({ ...k, v: k.v / 11.7 }))),
@@ -140,14 +142,14 @@ export const MRMS_PRODUCTS = {
   FFGMAX: product('FFGMAX', 'FLASH_QPE_FFGMAX_00.00', 'Max QPE/FFG Ratio', '', 0, 3, 0.1, FFG),
   // ---- Precipitation accumulation (rate + multi-sensor QPE accumulations) ----
   PRATE: product('PRATE', 'PrecipRate_00.00', 'Precip Rate', 'mm/hr', 0, 100, 0.2, PRATE, { unit: 'in/hr', factor: MM_TO_IN }),
-  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 50, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', 0, 75, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 100, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE12H: product('QPE12H', 'MultiSensor_QPE_12H_Pass2_00.00', '12-hr Precip Total', 'mm', 0, 150, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 200, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', 0, 250, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', 0, 300, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
-  QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 250, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE1H: product('QPE1H', 'MultiSensor_QPE_01H_Pass2_00.00', '1-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE3H: product('QPE3H', 'MultiSensor_QPE_03H_Pass2_00.00', '3-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE6H: product('QPE6H', 'MultiSensor_QPE_06H_Pass2_00.00', '6-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE12H: product('QPE12H', 'MultiSensor_QPE_12H_Pass2_00.00', '12-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE24H: product('QPE24H', 'MultiSensor_QPE_24H_Pass2_00.00', '24-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
 };
 
 // The MRMS reflectivity products all share the single-site radar reflectivity
@@ -162,14 +164,14 @@ for (const id of ['REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C']) {
 // they appear. MRMS_ORDER is derived from these so anything listed here is part
 // of the catalogue.
 export const MRMS_CATEGORIES = [
-  { id: 'precip', name: 'Precip Accumulation', products: ['PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
-  { id: 'hail', name: 'Hail', products: ['MESH', 'MESH1H', 'MESH6H', 'MESH24H', 'POSH', 'SHI'] },
+  { id: 'reflectivity', name: 'Reflectivity', products: ['REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C'] },
   { id: 'rotation', name: 'Rotation', products: ['AZSHEAR', 'AZSHEAR36', 'ROT1H', 'ROT6H', 'ROT24H', 'ROTML1H', 'ROTML6H', 'ROTML24H'] },
+  { id: 'hail', name: 'Hail', products: ['MESH', 'MESH1H', 'MESH6H', 'MESH24H', 'POSH', 'SHI'] },
   { id: 'lightning', name: 'Lightning', products: ['LTG30', 'LTG60', 'CGD1', 'CGD5', 'CGD15', 'CGD30'] },
+  { id: 'precip', name: 'Precip Accumulation', products: ['PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
   { id: 'flooding', name: 'Flooding', products: ['ARI1H', 'ARI3H', 'ARI6H', 'ARI24H', 'ARIMAX', 'FFG1H', 'FFG3H', 'FFG6H', 'FFGMAX'] },
   { id: 'echotops', name: 'Echo Tops', products: ['HREET', 'ET18', 'ET30', 'ET50', 'ET60'] },
   { id: 'vil', name: 'Vertically Integrated Liquid', products: ['VIL', 'VILD', 'VIL2H', 'VIL24H', 'VII'] },
-  { id: 'reflectivity', name: 'Reflectivity', products: ['REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C'] },
 ];
 
 export const MRMS_ORDER = MRMS_CATEGORIES.flatMap((c) => c.products);

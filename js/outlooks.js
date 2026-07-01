@@ -608,7 +608,17 @@ export class OutlookController {
         }));
     }
     if (this.els.detailWrap) this.els.detailWrap.hidden = false;
-    setTimeout(() => this.map && this.map.resize(), 60);
+    this._resizeMaps();
+  }
+
+  // The briefing chrome changes the map area's size; resize every pane map
+  // (the host supplies resizeMaps to cover split/quad panes), not just the
+  // main one, or the extra panes keep a stale canvas size.
+  _resizeMaps() {
+    setTimeout(() => {
+      if (this.els.resizeMaps) this.els.resizeMaps();
+      else if (this.map) this.map.resize();
+    }, 60);
   }
 
   _openMdBriefing() {
@@ -623,7 +633,7 @@ export class OutlookController {
     if (this.els.detailPanel) this.els.detailPanel.innerHTML = this._renderMdBriefing(md);
     if (this.els.detailWrap) this.els.detailWrap.hidden = false;
     if (this.els.detailPanel) this.els.detailPanel.scrollTop = 0;
-    setTimeout(() => this.map && this.map.resize(), 60);
+    this._resizeMaps();
   }
 
   _renderMdBriefing(md) {
@@ -670,5 +680,6 @@ export class OutlookController {
     if (this.els.detailWrap) this.els.detailWrap.hidden = true;
     const app = document.querySelector('.app');
     if (app) app.classList.remove('alert-mode', 'alert-split-mode', 'alert-preview-open');
+    this._resizeMaps();
   }
 }

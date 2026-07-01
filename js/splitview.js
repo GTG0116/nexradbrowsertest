@@ -1,14 +1,9 @@
-// splitview.js — a second, camera-synced map pane that shows a *different*
-// product over the exact same view as the main scope. Side-by-side on desktop,
-// stacked (chosen product on top) on mobile.
+// splitview.js - synced comparison panes for the main map.
 //
-// The two maps share center/zoom/bearing/pitch (kept in lock-step both ways).
-// The second pane gets its own custom GL data layer instances and renders from
-// the data already in `state`:
-//   • radar  — any moment from the loaded volume (free; no refetch).
-//   • satellite — any channel/RGB (extra bands decoded from the cached file).
-//   • MRMS / models — the chosen product's frame is fetched on demand + cached.
-// Any annotations drawn with the map tools are mirrored into the second pane.
+// Two-pane split and four-pane quad mode share the same controller. Pane 1 is
+// the app's normal map; panes 2-4 are Mapbox maps created on demand and kept in
+// camera lock-step. Each extra pane owns its own custom data layer instances so
+// it can show a different product over the same view.
 
 import { createRadarLayer } from './radarLayer.js';
 import { createGridLayer } from './gridLayer.js';
@@ -22,11 +17,8 @@ import { applyMapStyle } from './mapStyle.js';
 
 const p2 = (n) => String(n).padStart(2, '0');
 const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
+const DATA_LAYER_IDS = ['radar', 'mrms', 'models', SATELLITE_LAYER_ID];
 
-// Layer-stack helpers — kept in sync with app.js. Two anchors: the label anchor
-// (first admin/boundary line) for annotations + our redrawn borders, and the data
-// anchor (first road/transportation layer) for the data layer, so the basemap's roads, borders
-// and labels all draw on top of the radar/satellite/grid data.
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
@@ -42,8 +34,9 @@ function dataLayerAnchor(map) {
   const layers = map.getStyle().layers || [];
   for (const ly of layers) {
     if ((ly.type === 'line' || ly.type === 'symbol') &&
-        (ly['source-layer'] === 'road' || ly['source-layer'] === 'transportation'))
+        (ly['source-layer'] === 'road' || ly['source-layer'] === 'transportation')) {
       return ly.id;
+    }
   }
   for (const ly of layers) {
     if (ly.type === 'line' || ly.type === 'symbol') return ly.id;
@@ -51,135 +44,207 @@ function dataLayerAnchor(map) {
   return firstLabelLayerId(map);
 }
 
+function paneContainer(n) {
+  return document.getElementById(n === 1 ? 'map' : `map${n}`);
+}
+
 export class SplitView {
   constructor(ctx) {
-    this.ctx = ctx; // { state, MAPBOX_TOKEN, BASEMAPS, radarSweepFor }
+    this.ctx = ctx;
     this.active = false;
-    this.map = null;
-    this.layers = { radar: null, mrms: null, models: null, sat: null };
-    this.productId = null;
+    this.paneCount = 1;
+    this.map = null; // Back-compat alias for pane 2.
+    this.maps = { 2: null, 3: null, 4: null };
+    this.layersByPane = {
+      2: this._emptyLayers(),
+      3: this._emptyLayers(),
+      4: this._emptyLayers(),
+    };
+    this.productIds = { 2: null, 3: null, 4: null };
+    this.productId = null; // Back-compat alias for pane 2.
     this.syncing = false;
     this.drawings = { type: 'FeatureCollection', features: [] };
     this._gridCache = new Map();
-    this._paneLegends = [null, null];
-    this._weatherPickers = [null, null];
-    // Which pane the shared bottom UI currently drives: 1 = main map, 2 = this
-    // pane. Click a panel to switch. Starts on the main map so behaviour is
-    // unchanged until the user picks the second pane.
+    this._paneLegends = [null, null, null, null];
+    this._weatherPickers = [null, null, null, null];
+    this._badges = [null, null, null, null];
+    this._paneSelectHandlers = [];
+    this._syncHandlers = [];
     this.activePane = 1;
   }
 
-  // ---- Enable / disable ----
-  enable() {
-    if (this.active) return;
+  _emptyLayers() {
+    return { radar: null, mrms: null, models: null, sat: null };
+  }
+
+  _paneNums() {
+    return Array.from({ length: this.paneCount }, (_, i) => i + 1);
+  }
+
+  _extraPaneNums() {
+    return this._paneNums().filter((n) => n > 1);
+  }
+
+  _mapForPane(n) {
+    return n === 1 ? this.ctx.state.map : this.maps[n];
+  }
+
+  _allMaps() {
+    return this._paneNums().map((n) => this._mapForPane(n)).filter(Boolean);
+  }
+
+  enable(paneCount = 2) {
+    const count = paneCount === 4 ? 4 : 2;
+    if (this.active && this.paneCount === count) return;
+    if (this.active) this.disable();
+
     this.active = true;
+    this.paneCount = count;
+    this.activePane = 1;
+
     const { state, MAPBOX_TOKEN, basemapStyleUrl } = this.ctx;
     const wrap = document.getElementById('mapWrap');
     wrap.classList.add('split');
-    const cont = document.getElementById('map2');
-    cont.hidden = false;
+    wrap.classList.toggle('quad', count === 4);
 
     const main = state.map;
-    const map = new mapboxgl.Map({
-      container: 'map2',
-      style: basemapStyleUrl(state.basemap),
-      center: main.getCenter(),
-      zoom: main.getZoom(),
-      bearing: main.getBearing(),
-      pitch: main.getPitch(),
-      minZoom: 4, maxZoom: 14,
-      projection: 'mercator',
-      attributionControl: false,
-      accessToken: MAPBOX_TOKEN,
-      preserveDrawingBuffer: true, // keep the pane grabbable by the export tool
-    });
-    this.map = map;
-    this.productId = this._defaultProduct();
+    for (const n of [2, 3, 4]) {
+      const cont = paneContainer(n);
+      if (cont) cont.hidden = n > count;
+      this.layersByPane[n] = this._emptyLayers();
+      this.productIds[n] = n <= count ? this._defaultProduct(n) : null;
+    }
+    this.productId = this.productIds[2];
 
-    map.on('style.load', () => {
-      this._setupOverlays();
-      this.render();
-      this._setDrawSource();
-    });
+    for (const n of this._extraPaneNums()) {
+      const map = new mapboxgl.Map({
+        container: `map${n}`,
+        style: basemapStyleUrl(state.basemap),
+        center: main.getCenter(),
+        zoom: main.getZoom(),
+        bearing: main.getBearing(),
+        pitch: main.getPitch(),
+        minZoom: 4,
+        maxZoom: 14,
+        projection: 'mercator',
+        attributionControl: false,
+        accessToken: MAPBOX_TOKEN,
+        preserveDrawingBuffer: true,
+      });
+      this.maps[n] = map;
+      if (n === 2) this.map = map;
+      map.on('style.load', () => {
+        this._setupOverlays(n);
+        this.renderPane(n);
+        this._setDrawSource(n);
+      });
+    }
+
     this._bindSync();
     this._buildBadges();
     this._buildPaneChrome();
     this._bindPaneSelect();
-    this.activePane = 1;
     this._updatePaneUI();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
-    setTimeout(() => { main.resize(); map.resize(); }, 60);
+    setTimeout(() => this._allMaps().forEach((m) => m.resize()), 60);
   }
 
   disable() {
     if (!this.active) return;
     this.active = false;
+
     const wrap = document.getElementById('mapWrap');
-    wrap.classList.remove('split');
-    document.getElementById('map2').hidden = true;
-    if (this._badge1) { this._badge1.remove(); this._badge1 = null; }
-    if (this._badge2) { this._badge2.remove(); this._badge2 = null; }
-    this._removePaneChrome();
+    wrap.classList.remove('split', 'quad');
+
+    this._unbindSync();
     this._unbindPaneSelect();
-    const mapEl = document.getElementById('map');
-    const map2El = document.getElementById('map2');
-    if (mapEl) mapEl.classList.remove('pane-active');
-    if (map2El) map2El.classList.remove('pane-active');
+    this._removeBadges();
+    this._removePaneChrome();
+
+    const alerts = this.ctx.state && this.ctx.state.alerts;
+    for (const n of [2, 3, 4]) {
+      const map = this.maps[n];
+      if (alerts && map) alerts.removeMirror(map);
+      if (map) map.remove();
+      this.maps[n] = null;
+      this.layersByPane[n] = this._emptyLayers();
+      this.productIds[n] = null;
+      const cont = paneContainer(n);
+      if (cont) cont.hidden = true;
+    }
+
+    const mainEl = paneContainer(1);
+    if (mainEl) mainEl.classList.remove('pane-active');
+    this.map = null;
+    this.productId = null;
+    this.paneCount = 1;
     this.activePane = 1;
-    // Detach the camera-sync listener from the main map before tearing down the
-    // pane, or its next move would call jumpTo on a removed map.
-    if (this._onMainMove) { this.ctx.state.map.off('move', this._onMainMove); this._onMainMove = null; }
-    // Stop mirroring alerts into this pane before its map is torn down.
-    if (this.ctx.state && this.ctx.state.alerts) this.ctx.state.alerts.removeMirror(this.map);
-    if (this.map) { this.map.remove(); this.map = null; }
-    this.layers = { radar: null, mrms: null, models: null, sat: null };
-    // Repaint the bottom UI to reflect the main map again.
+
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     setTimeout(() => this.ctx.state.map && this.ctx.state.map.resize(), 60);
   }
 
-  toggle() { this.active ? this.disable() : this.enable(); return this.active; }
-
-  // ---- Camera sync (both directions, guarded) ----
-  _bindSync() {
-    const main = this.ctx.state.map;
-    const map = this.map;
-    const copy = (from, to) => {
-      if (this.syncing) return;
-      this.syncing = true;
-      to.jumpTo({
-        center: from.getCenter(), zoom: from.getZoom(),
-        bearing: from.getBearing(), pitch: from.getPitch(),
-      });
-      this.syncing = false;
-    };
-    this._onMainMove = () => copy(main, map);
-    this._onMapMove = () => copy(map, main);
-    main.on('move', this._onMainMove);
-    map.on('move', this._onMapMove);
+  toggle(paneCount = 2) {
+    const count = paneCount === 4 ? 4 : 2;
+    if (this.active && this.paneCount === count) this.disable();
+    else this.enable(count);
+    return this.active;
   }
 
-  // ---- Overlay layers on the second pane (drawings mirror) ----
-  _setupOverlays() {
-    const map = this.map;
-    // Restyle the basemap's town labels, roads, rivers and borders to match the
-    // main map's user customisation. setStyle reset the stock paint, so capture
-    // fresh native widths (fresh: true).
+  setPaneCount(paneCount) {
+    this.enable(paneCount);
+  }
+
+  // ---- Camera sync ----
+  _bindSync() {
+    this._unbindSync();
+    const copyFrom = (from) => {
+      if (this.syncing) return;
+      this.syncing = true;
+      const camera = {
+        center: from.getCenter(),
+        zoom: from.getZoom(),
+        bearing: from.getBearing(),
+        pitch: from.getPitch(),
+      };
+      for (const map of this._allMaps()) {
+        if (map !== from) map.jumpTo(camera);
+      }
+      this.syncing = false;
+    };
+
+    for (const map of this._allMaps()) {
+      const handler = () => copyFrom(map);
+      map.on('move', handler);
+      this._syncHandlers.push([map, handler]);
+    }
+  }
+
+  _unbindSync() {
+    for (const [map, handler] of this._syncHandlers) {
+      if (map && handler) map.off('move', handler);
+    }
+    this._syncHandlers = [];
+  }
+
+  // ---- Shared overlays on extra panes ----
+  _setupOverlays(pane) {
+    const map = this._mapForPane(pane);
+    if (!map) return;
+
     const mapStyle = this.ctx.state && this.ctx.state.mapStyle;
     applyMapStyle(map, mapStyle, firstLabelLayerId(map), { fresh: true });
 
-    // Live NWS alert polygons, mirrored from the main map so the second pane
-    // (the top panel in the stacked split) shows the same watches and
-    // warnings. Fill sits below the data layer (like the main scope); the
-    // outline sits above the data but beneath the basemap labels. The
-    // AlertsController feeds these via addMirror() below.
-    if (!map.getSource('alerts'))
+    if (!map.getSource('alerts')) {
       map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-    if (!map.getLayer('alerts-fill'))
+    }
+    if (!map.getLayer('alerts-fill')) {
       map.addLayer(
         {
-          id: 'alerts-fill', type: 'fill', source: 'alerts',
+          id: 'alerts-fill',
+          type: 'fill',
+          source: 'alerts',
           paint: {
             'fill-color': ['get', 'color'],
             'fill-opacity': [
@@ -191,10 +256,13 @@ export class SplitView {
         },
         dataLayerAnchor(map)
       );
-    if (!map.getLayer('alerts-line'))
+    }
+    if (!map.getLayer('alerts-line')) {
       map.addLayer(
         {
-          id: 'alerts-line', type: 'line', source: 'alerts',
+          id: 'alerts-line',
+          type: 'line',
+          source: 'alerts',
           paint: {
             'line-color': ['coalesce', ['get', 'outlineColor'], ['get', 'color']],
             'line-width': [
@@ -207,22 +275,27 @@ export class SplitView {
         },
         firstLabelLayerId(map)
       );
+    }
     const alertsCtl = this.ctx.state && this.ctx.state.alerts;
     if (alertsCtl) alertsCtl.addMirror(map);
 
-    if (!map.getSource('mt-shapes'))
+    if (!map.getSource('mt-shapes')) {
       map.addSource('mt-shapes', { type: 'geojson', data: this.drawings });
-    const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };
+    }
+    const add = (layer) => {
+      if (!map.getLayer(layer.id)) map.addLayer(layer);
+    };
     add({
-      id: 'mt-fill', type: 'fill', source: 'mt-shapes',
+      id: 'mt-fill',
+      type: 'fill',
+      source: 'mt-shapes',
       filter: ['==', ['geometry-type'], 'Polygon'],
       paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.12 },
     });
-    // line-dasharray is data-constant in Mapbox GL, so split solid vs. dashed
-    // into two layers (matching maptools.js) instead of a per-feature dash
-    // expression that would silently fail to validate.
     add({
-      id: 'mt-line', type: 'line', source: 'mt-shapes',
+      id: 'mt-line',
+      type: 'line',
+      source: 'mt-shapes',
       filter: ['all', ['!=', ['geometry-type'], 'Point'], ['!=', ['get', 'dashed'], true]],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
@@ -232,7 +305,9 @@ export class SplitView {
       },
     });
     add({
-      id: 'mt-line-dash', type: 'line', source: 'mt-shapes',
+      id: 'mt-line-dash',
+      type: 'line',
+      source: 'mt-shapes',
       filter: ['all', ['!=', ['geometry-type'], 'Point'], ['==', ['get', 'dashed'], true]],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
@@ -243,49 +318,54 @@ export class SplitView {
       },
     });
     add({
-      id: 'mt-vertex', type: 'circle', source: 'mt-shapes',
+      id: 'mt-vertex',
+      type: 'circle',
+      source: 'mt-shapes',
       filter: ['==', ['geometry-type'], 'Point'],
       paint: {
         'circle-radius': ['case', ['==', ['get', 'role'], 'storm-pos'], 6, 4],
         'circle-color': ['get', 'color'],
-        'circle-stroke-color': '#06101f', 'circle-stroke-width': 1.5,
+        'circle-stroke-color': '#06101f',
+        'circle-stroke-width': 1.5,
       },
     });
   }
 
   setDrawings(fc) {
     this.drawings = fc || { type: 'FeatureCollection', features: [] };
-    this._setDrawSource();
+    for (const n of this._extraPaneNums()) this._setDrawSource(n);
   }
 
-  _setDrawSource() {
-    const src = this.map && this.map.getSource && this.map.getSource('mt-shapes');
+  _setDrawSource(pane) {
+    const map = this._mapForPane(pane);
+    const src = map && map.getSource && map.getSource('mt-shapes');
     if (src) src.setData(this.drawings);
   }
 
-  // Re-apply the user's basemap-layer customisation (town labels, roads, rivers,
-  // borders) to this pane live, matching a change made on the main map.
   setMapStyle(opts) {
-    if (this.active && this.map && this.map.getStyle)
-      applyMapStyle(this.map, opts, firstLabelLayerId(this.map), { fresh: false });
-  }
-
-  // React to a basemap change on the main map.
-  setBasemap(url) {
-    if (this.active && this.map) {
-      this.map.setStyle(url);
-      // style.load handler rebuilds overlays + re-renders.
+    for (const n of this._extraPaneNums()) {
+      const map = this._mapForPane(n);
+      if (map && map.getStyle) applyMapStyle(map, opts, firstLabelLayerId(map), { fresh: false });
     }
   }
 
-  // ---- Product picker (overlaid on the second pane) ----
-  _defaultProduct() {
-    const m = this.ctx.state.mode;
-    if (m === 'radar') return this.ctx.state.productId === 'REF' ? 'VEL' : 'REF';
-    if (m === 'mrms') return this.ctx.state.mrms.productId;
-    if (m === 'models') return this.ctx.state.models.productId;
-    if (m === 'satellite') return this.ctx.state.sat.productId;
-    return 'REF';
+  setBasemap(url) {
+    for (const n of this._extraPaneNums()) {
+      const map = this._mapForPane(n);
+      if (map) map.setStyle(url);
+    }
+  }
+
+  // ---- Product selection ----
+  _defaultProduct(pane = 2) {
+    const list = this._productList().map(([id]) => id);
+    if (!list.length) return 'REF';
+    const main = this._mainProduct();
+    if (this.ctx.state.mode === 'radar' && pane === 2) {
+      return main === 'REF' && list.includes('VEL') ? 'VEL' : 'REF';
+    }
+    const start = Math.max(0, list.indexOf(main));
+    return list[(start + pane - 1) % list.length] || list[0];
   }
 
   _productList() {
@@ -306,17 +386,15 @@ export class SplitView {
     return [];
   }
 
-  // Called by app when the mode changes so the second pane tracks the new
-  // source and the badges relabel.
   onModeChange() {
     if (!this.active) return;
-    this.productId = this._defaultProduct();
+    for (const n of this._extraPaneNums()) this.productIds[n] = this._defaultProduct(n);
+    this.productId = this.productIds[2] || null;
     this._updateBadges();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     this.render();
   }
 
-  // The product currently shown in the main (left/top) pane, by mode.
   _mainProduct() {
     const s = this.ctx.state;
     if (s.mode === 'mrms') return s.mrms.productId;
@@ -325,53 +403,60 @@ export class SplitView {
     return s.productId;
   }
 
-  // The product id of whichever pane the bottom UI is currently driving.
   activeProductId() {
-    return this.activePane === 2 ? this.productId : this._mainProduct();
+    return this.activePane > 1 ? this.productIds[this.activePane] : this._mainProduct();
   }
 
-  // Set pane 2's product (called by the app when the bottom UI is aimed here).
-  setProduct(id) {
-    this.productId = id;
+  setProduct(id, pane = this.activePane) {
+    if (pane <= 1 || pane > this.paneCount) return;
+    this.productIds[pane] = id;
+    if (pane === 2) this.productId = id;
     this._updateBadges();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
-    this.render();
+    this.renderPane(pane);
   }
 
-  // ---- Pane selection: click a panel to aim the bottom UI at it ----
+  productForPane(pane) {
+    return pane === 1 ? this._mainProduct() : this.productIds[pane];
+  }
+
+  paneProducts() {
+    return this._paneNums().map((n) => this.productForPane(n));
+  }
+
+  // ---- Pane selection and chrome ----
   _bindPaneSelect() {
-    this._sel1 = () => this.setActivePane(1);
-    this._sel2 = () => this.setActivePane(2);
-    const a = document.getElementById('map');
-    const b = document.getElementById('map2');
-    if (a) a.addEventListener('mousedown', this._sel1, true);
-    if (a) a.addEventListener('touchstart', this._sel1, true);
-    if (b) b.addEventListener('mousedown', this._sel2, true);
-    if (b) b.addEventListener('touchstart', this._sel2, true);
+    this._unbindPaneSelect();
+    for (const n of this._paneNums()) {
+      const host = paneContainer(n);
+      if (!host) continue;
+      const handler = () => this.setActivePane(n);
+      host.addEventListener('mousedown', handler, true);
+      host.addEventListener('touchstart', handler, true);
+      this._paneSelectHandlers.push([host, handler]);
+    }
   }
 
   _unbindPaneSelect() {
-    const a = document.getElementById('map');
-    const b = document.getElementById('map2');
-    if (a && this._sel1) { a.removeEventListener('mousedown', this._sel1, true); a.removeEventListener('touchstart', this._sel1, true); }
-    if (b && this._sel2) { b.removeEventListener('mousedown', this._sel2, true); b.removeEventListener('touchstart', this._sel2, true); }
-    this._sel1 = this._sel2 = null;
+    for (const [host, handler] of this._paneSelectHandlers) {
+      host.removeEventListener('mousedown', handler, true);
+      host.removeEventListener('touchstart', handler, true);
+    }
+    this._paneSelectHandlers = [];
   }
 
   setActivePane(n) {
-    if (!this.active || this.activePane === n) return;
+    if (!this.active || this.activePane === n || n < 1 || n > this.paneCount) return;
     this.activePane = n;
     this._updatePaneUI();
-    // Rebuild the bottom UI's product buttons so they highlight (and now drive)
-    // the newly selected pane.
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
   }
 
   _updatePaneUI() {
-    const a = document.getElementById('map');
-    const b = document.getElementById('map2');
-    if (a) a.classList.toggle('pane-active', this.activePane === 1);
-    if (b) b.classList.toggle('pane-active', this.activePane === 2);
+    for (let n = 1; n <= 4; n++) {
+      const host = paneContainer(n);
+      if (host) host.classList.toggle('pane-active', this.active && n === this.activePane);
+    }
     this._updateBadges();
   }
 
@@ -397,22 +482,20 @@ export class SplitView {
       host.appendChild(d);
       return d;
     };
-    const a = document.getElementById('map');
-    const b = document.getElementById('map2');
-    this._paneLegends = [makeLegend(a), makeLegend(b)];
-    this._weatherPickers = [makePicker(a), makePicker(b)];
+    this._paneLegends = this._paneNums().map((n) => makeLegend(paneContainer(n)));
+    this._weatherPickers = this._paneNums().map((n) => makePicker(paneContainer(n)));
   }
 
   _removePaneChrome() {
     for (const node of [...this._paneLegends, ...this._weatherPickers]) {
       if (node) node.remove();
     }
-    this._paneLegends = [null, null];
-    this._weatherPickers = [null, null];
+    this._paneLegends = [null, null, null, null];
+    this._weatherPickers = [null, null, null, null];
   }
 
-  setPaneLegends(mainHTML, splitHTML) {
-    const vals = [mainHTML, splitHTML];
+  setPaneLegends(...htmls) {
+    const vals = Array.isArray(htmls[0]) ? htmls[0] : htmls;
     this._paneLegends.forEach((node, i) => {
       if (!node) return;
       node.innerHTML = vals[i] || '';
@@ -426,144 +509,188 @@ export class SplitView {
     });
   }
 
-  // A small badge on each pane: which pane it is, its current product, and
-  // whether it's the one the bottom UI controls.
   _buildBadges() {
-    const make = (host, n) => {
+    this._removeBadges();
+    this._badges = this._paneNums().map((n) => {
+      const host = paneContainer(n);
       if (!host) return null;
       const d = document.createElement('div');
       d.className = 'split-badge';
-      d.addEventListener('click', (e) => { e.stopPropagation(); this.setActivePane(n); });
+      d.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.setActivePane(n);
+      });
       host.appendChild(d);
       return d;
-    };
-    if (this._badge1) this._badge1.remove();
-    if (this._badge2) this._badge2.remove();
-    this._badge1 = make(document.getElementById('map'), 1);
-    this._badge2 = make(document.getElementById('map2'), 2);
+    });
     this._updateBadges();
+  }
+
+  _removeBadges() {
+    for (const node of this._badges) {
+      if (node) node.remove();
+    }
+    this._badges = [null, null, null, null];
   }
 
   _updateBadges() {
     const fmt = (n, prod) => {
       const on = this.activePane === n;
       return `<span class="sb-name">PANE ${n}</span>` +
-        `<span class="sb-prod">${prod || '—'}</span>` +
-        (on ? '<span class="sb-dot">● editing</span>' : '<span class="sb-dot tap">tap to edit</span>');
+        `<span class="sb-prod">${prod || '-'}</span>` +
+        (on ? '<span class="sb-dot">editing</span>' : '<span class="sb-dot tap">tap to edit</span>');
     };
-    if (this._badge1) {
-      this._badge1.innerHTML = fmt(1, this._mainProduct());
-      this._badge1.classList.toggle('active', this.activePane === 1);
-    }
-    if (this._badge2) {
-      this._badge2.innerHTML = fmt(2, this.productId);
-      this._badge2.classList.toggle('active', this.activePane === 2);
-    }
+    this._badges.forEach((badge, i) => {
+      if (!badge) return;
+      const n = i + 1;
+      badge.innerHTML = fmt(n, this.productForPane(n));
+      badge.classList.toggle('active', this.activePane === n);
+    });
   }
 
-  // ---- Render the chosen product into the second pane ----
+  // ---- Render data products ----
   render() {
-    if (!this.active || !this.map) return;
+    if (!this.active) return;
+    for (const n of this._extraPaneNums()) this.renderPane(n);
+  }
+
+  renderPane(pane) {
+    if (!this.active || pane <= 1 || !this._mapForPane(pane)) return;
     const m = this.ctx.state.mode;
     try {
-      if (m === 'radar') this._renderRadar();
-      else if (m === 'satellite') this._renderSat();
-      else if (m === 'mrms') this._renderGrid('mrms');
-      else if (m === 'models') this._renderGrid('models');
-    } catch (e) { console.error('split render', e); }
+      if (m === 'radar') this._renderRadar(pane);
+      else if (m === 'satellite') this._renderSat(pane);
+      else if (m === 'mrms') this._renderGrid('mrms', pane);
+      else if (m === 'models') this._renderGrid('models', pane);
+      else this._clearData(pane);
+    } catch (e) {
+      console.error('split render', e);
+    }
   }
 
-  _ensureLayer(kind, factory) {
-    const map = this.map;
-    if (!this.layers[kind]) this.layers[kind] = factory();
+  _ensureLayer(pane, kind, factory) {
+    const map = this._mapForPane(pane);
+    const layers = this.layersByPane[pane] || (this.layersByPane[pane] = this._emptyLayers());
+    if (!layers[kind]) layers[kind] = factory();
     const layerId = { radar: 'radar', mrms: 'mrms', models: 'models', sat: SATELLITE_LAYER_ID }[kind];
     if (!map.getLayer(layerId)) {
-      // Drop other data layers so only the active product draws.
-      for (const other of ['radar', 'mrms', 'models', SATELLITE_LAYER_ID])
+      for (const other of DATA_LAYER_IDS) {
         if (other !== layerId && map.getLayer(other)) map.removeLayer(other);
-      // Data sits beneath the basemap roads/borders so they draw on top of it.
-      map.addLayer(this.layers[kind], dataLayerAnchor(map));
+      }
+      map.addLayer(layers[kind], dataLayerAnchor(map));
     }
-    return this.layers[kind];
+    return layers[kind];
   }
 
-  _clearData() {
-    for (const id of ['radar', 'mrms', 'models', SATELLITE_LAYER_ID])
-      if (this.map.getLayer(id)) this.map.removeLayer(id);
+  _clearData(pane) {
+    const map = this._mapForPane(pane);
+    if (!map) return;
+    for (const id of DATA_LAYER_IDS) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
   }
 
-  _renderRadar() {
+  _renderRadar(pane) {
     const state = this.ctx.state;
-    const product = PRODUCTS[this.productId] || PRODUCTS.REF;
+    const id = this.productIds[pane];
+    const product = PRODUCTS[id] || PRODUCTS.REF;
     const site = state.shownSite || (state.volume && state.volume.site);
-    const sweep = this.ctx.radarSweepFor(this.productId);
-    if (!sweep || !site) { this._clearData(); return; }
-    const layer = this._ensureLayer('radar', createRadarLayer);
+    const sweep = this.ctx.radarSweepFor(id);
+    if (!sweep || !site) {
+      this._clearData(pane);
+      return;
+    }
+    const layer = this._ensureLayer(pane, 'radar', createRadarLayer);
     layer.setSweep(sweep, product, site);
     layer.setOpacity(state.opacity);
     layer.setSmooth(state.smooth);
   }
 
-  _renderSat() {
+  _renderSat(pane) {
     const state = this.ctx.state;
     const scene = state.sat.scene;
-    if (!scene) { this._clearData(); return; }
-    const id = this.productId;
+    if (!scene) {
+      this._clearData(pane);
+      return;
+    }
+    const id = this.productIds[pane];
     const draw = () => {
       const rgba = buildRGBA(scene, id, { enhanceIR: state.sat.enhanceIR });
-      const layer = this._ensureLayer('sat', createSatelliteLayer);
+      const layer = this._ensureLayer(pane, 'sat', createSatelliteLayer);
       layer.setScene(scene, rgba, sceneBBox(scene));
       layer.setOpacity(state.opacity);
       layer.setSmooth(state.smooth);
     };
-    // Decode any extra bands this channel/RGB needs, then draw.
     ensureBands(scene, bandsFor(id)).then(draw).catch((e) => console.error(e));
   }
 
-  // MRMS / models: fetch the chosen product's frame if it isn't already what
-  // the main map loaded, cache it, and draw it.
-  async _renderGrid(mode) {
+  async _renderGrid(mode, pane) {
     const state = this.ctx.state;
-    const id = this.productId;
+    const id = this.productIds[pane];
     const sameAsMain = (mode === 'mrms' && id === state.mrms.productId) ||
       (mode === 'models' && id === state.models.productId);
     const draw = (grid) => {
-      if (!grid) { this._clearData(); return; }
-      const layer = this._ensureLayer(mode, () => createGridLayer(mode));
+      if (!grid) {
+        this._clearData(pane);
+        return;
+      }
+      const layer = this._ensureLayer(pane, mode, () => createGridLayer(mode));
       layer.setGrid(grid, resolveGrid(grid.product));
       layer.setOpacity(state.opacity);
       layer.setSmooth(state.smooth);
     };
+
     if (sameAsMain) {
       draw(mode === 'mrms' ? state.mrms.grid : state.models.grid);
       return;
     }
-    // Different product — load + cache.
+
     const ck = mode === 'mrms'
       ? `mrms:${id}`
       : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.fhour}`;
-    if (this._gridCache.has(ck)) { draw(this._gridCache.get(ck)); return; }
+    if (this._gridCache.has(ck)) {
+      draw(this._gridCache.get(ck));
+      return;
+    }
+
     try {
       let grid;
       if (mode === 'mrms') {
         const frames = await listMrms(id, state.live ? new Date() : state.date);
-        if (!frames.length) { this._clearData(); return; }
+        if (!frames.length) {
+          this._clearData(pane);
+          return;
+        }
         grid = await loadMrms(id, frames[frames.length - 1].key);
       } else {
         const run = state.models.runs.find((r) => r.key === state.models.runKey);
-        if (!run) { this._clearData(); return; }
+        if (!run) {
+          this._clearData(pane);
+          return;
+        }
         grid = await loadModel(state.models.modelKey, id, run, state.models.fhour);
       }
       this._gridCache.set(ck, grid);
-      if (this.productId === id) draw(grid); // ignore if user moved on
-    } catch (e) { console.error('split grid load', e); this._clearData(); }
+      if (this.productIds[pane] === id) draw(grid);
+    } catch (e) {
+      console.error('split grid load', e);
+      this._clearData(pane);
+    }
   }
 
   setOpacity(o) {
-    for (const l of Object.values(this.layers)) if (l && l.setOpacity) l.setOpacity(o);
+    for (const layers of Object.values(this.layersByPane)) {
+      for (const l of Object.values(layers)) if (l && l.setOpacity) l.setOpacity(o);
+    }
   }
 
   setSmooth(on) {
-    for (const l of Object.values(this.layers)) if (l && l.setSmooth) l.setSmooth(on);
+    for (const layers of Object.values(this.layersByPane)) {
+      for (const l of Object.values(layers)) if (l && l.setSmooth) l.setSmooth(on);
+    }
+  }
+
+  getMaps() {
+    return this._extraPaneNums().map((n) => this._mapForPane(n)).filter(Boolean);
   }
 }

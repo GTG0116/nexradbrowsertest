@@ -220,6 +220,17 @@ body.theme-dark .brand-mark {
   flex: 1 1 0;
   min-height: 80px;
 }
+/* Models mode hosts the scan panel ("Model runs") directly in the sidebar.
+   There its drawer-oriented `grow` sizing would crush it to min-height and let
+   the date/refresh/LIVE controls paint over the forecast-hour panel below —
+   size it to its content instead and give the runs list its own scroll. */
+.sidebar #volumePanel {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.sidebar #volumePanel .vol-list {
+  max-height: 220px;
+}
 
 .panel-title {
   margin: 0 0 12px;
@@ -353,10 +364,10 @@ input:focus {
   box-shadow: 0 6px 16px -7px var(--accent);
 }
 
-/* ---------------- Layout switch (single / split) ---------------- */
+/* ---------------- Layout switch (single / split / quad) ---------------- */
 .layout-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 .layout-btn {
@@ -375,6 +386,15 @@ input:focus {
   background: var(--accent);
   color: #fff;
   box-shadow: 0 5px 14px -6px var(--accent);
+}
+
+@media (max-width: 819.98px) {
+  .layout-btn[data-layout="quad4"] {
+    display: none;
+  }
+  .layout-switch {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* ---------------- Volume list ---------------- */
@@ -1202,9 +1222,33 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------------- Alert briefing (full-screen) ---------------- */
+/* One source of truth for the briefing panel's width, so the panel, its close
+   button and the map stage (which shifts right to make room) always agree. */
+.app {
+  --alert-panel-w: 360px;
+}
+@media (min-width: 760px) {
+  .app {
+    --alert-panel-w: min(460px, 60vw);
+  }
+}
+.app.alert-split-mode {
+  /* In split/quad the panel must not swallow the first pane. */
+  --alert-panel-w: clamp(232px, 26vw, 320px);
+}
+
 .app.alert-mode .sidebar,
 .app.alert-mode .map-hud {
   display: none;
+}
+/* While the briefing is open, the map area yields the panel's width instead of
+   being overlapped — in quad view all four panes then keep equal visible size
+   (the maps are resized in JS when this class toggles). Mobile keeps the
+   full-bleed overlay behavior. */
+@media (min-width: 760px) {
+  .app.alert-mode .stage {
+    margin-left: var(--alert-panel-w);
+  }
 }
 
 /* Compact preview card shown when an alert is first clicked, before the full
@@ -1409,7 +1453,7 @@ input[type='range']::-moz-range-thumb {
   position: absolute;
   top: 0;
   left: 0;
-  width: 360px;
+  width: var(--alert-panel-w, 360px);
   max-width: 90vw;
   height: 100%;
   overflow-y: auto;
@@ -1495,14 +1539,14 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* In split view the briefing must not swallow the first pane — keep it to about
-   half a pane so the panel below it (and the whole second pane) stay visible,
-   which is the entire point of the split. */
+   half a pane (via --alert-panel-w above) so the panes stay usable, which is
+   the entire point of the split. */
 .app.alert-split-mode .alert-detail-panel {
-  width: clamp(232px, 26vw, 320px) !important;
+  width: var(--alert-panel-w) !important;
   max-width: calc(50vw - 24px) !important;
 }
 .app.alert-split-mode .alert-close {
-  left: calc(clamp(232px, 26vw, 320px) + 12px) !important;
+  left: calc(var(--alert-panel-w) + 12px) !important;
   right: auto !important;
 }
 
@@ -2064,11 +2108,8 @@ input[type='range']::-moz-range-thumb {
     width: 460px;
   }
   /* The full alert briefing reads as a side panel (like a scaled-up phone), not
-     a full-bleed wall of text, on the bigger canvas. */
-  .alert-detail-panel {
-    width: 460px;
-    max-width: 60vw;
-  }
+     a full-bleed wall of text, on the bigger canvas — width comes from
+     --alert-panel-w (min(460px, 60vw) at this tier). */
 }
 
 /* Wider desktops: a touch more breathing room again. */
@@ -2082,6 +2123,41 @@ input[type='range']::-moz-range-thumb {
   .mobile-sheet {
     width: min(820px, 90vw);
     /* left:0/right:0 + auto margins from the 760px tier keep this centred. */
+  }
+}
+
+.app:not(.mobile) .mobile-dock {
+  left: 340px;
+  right: 0;
+  bottom: 18px;
+  width: min(520px, calc(100% - 376px));
+  max-width: none;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0;
+  background: none;
+  pointer-events: none;
+}
+.app:not(.mobile) .mobile-dock > * {
+  pointer-events: auto;
+}
+.app:not(.mobile) #dockStatus {
+  pointer-events: none;
+  cursor: default;
+}
+.app:not(.mobile) #dockStatus .dock-caret,
+.app:not(.mobile) #inspectBtn,
+.app:not(.mobile) #dockToolSlot {
+  display: none !important;
+}
+.app:not(.mobile) #playBtn {
+  min-height: 56px;
+}
+
+@media (min-width: 760px) and (max-width: 1180px) {
+  .app:not(.mobile) .mobile-dock {
+    left: 300px;
+    width: min(500px, calc(100% - 336px));
   }
 }
 
@@ -3158,33 +3234,80 @@ input[type='range']::-moz-range-thumb {
   height: 28px;
 }
 
-/* METAR station plots (HTML markers). */
-.metar-plot {
-  pointer-events: auto;
-  cursor: help;
-  /* A tight dark halo outlines the whole plot (circle, barb and text) so it
-     stays legible over bright radar or satellite fills. */
-  filter: drop-shadow(0 0 1.4px rgba(0, 0, 0, 0.95))
-    drop-shadow(0 1px 1px rgba(0, 0, 0, 0.75));
+/* METAR station plots (single canvas overlay). */
+.metar-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 520;
+  pointer-events: none;
 }
-.metar-plot-svg {
-  overflow: visible;
-}
-.metar-plot-svg text {
+.metar-panel {
+  position: absolute;
+  left: 14px;
+  bottom: 18px;
+  z-index: 620;
+  display: grid;
+  gap: 4px;
+  min-width: 134px;
+  padding: 8px 9px;
+  border: 1px solid rgba(159, 208, 255, 0.38);
+  border-radius: 8px;
+  background: rgba(8, 16, 31, 0.88);
+  box-shadow: var(--glow);
+  color: var(--ink);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
-  font-weight: 700;
-  /* Paint a dark stroke first, then the colored fill on top — a crisp text
-     outline that reads cleanly against any background. */
-  paint-order: stroke;
-  stroke: rgba(6, 14, 30, 0.92);
-  stroke-width: 2.4px;
-  stroke-linejoin: round;
+  line-height: 1.2;
+  backdrop-filter: blur(10px);
 }
-.metar-plot-svg .mp-t { fill: #ff6a6a; }
-.metar-plot-svg .mp-d { fill: #57d98a; }
-.metar-plot-svg .mp-p { fill: #cdd9f0; font-size: 9px; }
-.metar-plot-svg .mp-w { fill: #c79bff; font-size: 8px; }
+.metar-panel-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.metar-panel select {
+  width: 74px;
+  height: 24px;
+  border: 1px solid rgba(159, 208, 255, 0.42);
+  border-radius: 6px;
+  background: rgba(3, 10, 22, 0.82);
+  color: var(--ink);
+  font: 700 10px 'JetBrains Mono', monospace;
+}
+.metar-panel-count {
+  color: var(--ink-dim);
+  font-weight: 700;
+}
+.metar-tooltip {
+  position: absolute;
+  z-index: 1220;
+  max-width: 340px;
+  padding: 8px 10px;
+  border: 1px solid rgba(159, 208, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(6, 14, 29, 0.94);
+  box-shadow: var(--glow-strong);
+  color: var(--ink);
+  pointer-events: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.metar-tooltip strong {
+  color: #9fd0ff;
+  font-size: 12px;
+}
+.metar-tooltip span {
+  color: var(--ink-dim);
+}
+.metar-tooltip div {
+  margin-top: 3px;
+  color: #dfeaff;
+  overflow-wrap: anywhere;
+}
 
 /* Map-tool text labels (measure distances, storm-track ETAs). */
 .mt-label {
@@ -3329,6 +3452,8 @@ body.storm-active .playback-bar {
 .map-wrap.split #map2 {
   left: 50%;
 }
+.map-wrap.split #legend:not(.weather-card),
+.map-wrap.quad #legend:not(.weather-card),
 .map-wrap.split + .legend:not(.weather-card) {
   display: none;
 }
@@ -3350,6 +3475,8 @@ body.storm-active .playback-bar {
 /* In split the conditions card can't sit top-centre — it lands on top of the
    second pane's legend. Drop it to the bottom centre, clear of both pane legends
    (top of each pane) and above the dock. */
+.map-wrap.split #legend.weather-card,
+.map-wrap.quad #legend.weather-card,
 .map-wrap.split + .legend.weather-card {
   top: auto;
   bottom: calc(96px + env(safe-area-inset-bottom, 0px));

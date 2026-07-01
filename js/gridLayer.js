@@ -48,8 +48,12 @@ float smoothSigma(float level) {
 void main() {
   float lon = v_merc.x * 360.0 - 180.0;
   float lat = degrees(2.0 * atan(exp((1.0 - 2.0 * v_merc.y) * PI)) - PI * 0.5);
-  float fi = (lon - u_lon1) / u_di;
-  float fj = (u_lat1 - lat) / u_dj;       // row 0 is the northernmost
+  // (u_lon1, u_lat1) is the *center* of cell (0,0) — GRIB grids anchor on the
+  // first data point, not a cell edge — so offset by half a cell before
+  // flooring; otherwise the whole raster paints half a cell east/south of
+  // where the data actually is.
+  float fi = (lon - u_lon1) / u_di + 0.5;
+  float fj = (u_lat1 - lat) / u_dj + 0.5;  // row 0 is the northernmost
   if (fi < 0.0 || fi >= u_ni || fj < 0.0 || fj >= u_nj) discard;
 
   float t;
@@ -144,7 +148,15 @@ function buildTexture(grid, product) {
       data[o + 1] = (code >> 8) & 255;
     }
   }
-  return { data, W, H, lon1, lat1, di: di * factor, dj: dj * factor };
+  // A pooled cell aggregates `factor` source cells, so its center sits half the
+  // extra span east/south of the source origin — shift lon1/lat1 to match, or
+  // pooling drags the raster toward the north-west.
+  return {
+    data, W, H,
+    lon1: lon1 + ((factor - 1) / 2) * di,
+    lat1: lat1 - ((factor - 1) / 2) * dj,
+    di: di * factor, dj: dj * factor,
+  };
 }
 
 // Build the GPU-ready payload for a grid (max-pooled texture + quad geometry +
@@ -154,10 +166,12 @@ function buildTexture(grid, product) {
 export function prepareGridTexture(grid, product) {
   const tex = buildTexture(grid, product);
   const sc = product.scale;
-  const w = mercX(tex.lon1);
-  const e = mercX(tex.lon1 + tex.W * tex.di);
-  const n = mercY(tex.lat1);
-  const s = mercY(tex.lat1 - tex.H * tex.dj);
+  // The quad must cover the cell *footprints*: (lon1, lat1) is the center of
+  // cell (0,0), so extend half a cell beyond the first/last centers.
+  const w = mercX(tex.lon1 - tex.di / 2);
+  const e = mercX(tex.lon1 + (tex.W - 0.5) * tex.di);
+  const n = mercY(tex.lat1 + tex.dj / 2);
+  const s = mercY(tex.lat1 - (tex.H - 0.5) * tex.dj);
   const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
   return {
     tex, verts, lut: sc.rgba, steps: sc.steps,
@@ -270,8 +284,11 @@ export function createGridLayer(id = 'mrms') {
       gl.uniform1f(this.u.u_opacity, this.opacity);
       gl.uniform1f(this.u.u_smooth, this.smooth);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.depthMask(false);
+      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     },
 

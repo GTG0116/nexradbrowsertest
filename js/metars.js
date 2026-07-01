@@ -1,426 +1,669 @@
-// metars.js — live surface observations (METARs) drawn as classic station plots.
+// metars.js - global METAR station plots rendered on one canvas overlay.
 //
-// Source: the Iowa Environmental Mesonet (IEM) current-observations API. We
-// switched off aviationweather.gov because it serves no Access-Control-Allow-
-// Origin header, so browser fetches were blocked by CORS; IEM responds with
-// `access-control-allow-origin: *` and is already this app's radar feed. IEM
-// has no bbox query, so we map the visible view to the networks it covers and
-// pull each one, then filter to the view client-side:
-//   • inside the US, the per-state `{ST}_ASOS` networks (fine-grained), and
-//   • elsewhere in the world, IEM's per-country `{ISO2}__ASOS` networks
-//     (note the *double* underscore) — e.g. GB__ASOS, FR__ASOS, JP__ASOS —
-//     so international stations plot too, all from the one CORS-enabled feed.
-//
-// Only the stations inside the current view are kept, the marker set is diffed
-// each refresh (so plots vanish as they leave frame), and a hard cap thins dense
-// regions to the stations nearest the view centre — so the screen stays readable
-// however far you zoom out.
-//
-// Each station renders as a WMO station-model plot: a sky-cover circle with the
-// temperature (upper-left, °F), dewpoint (lower-left, °F), sea-level pressure
-// (upper-right, coded) and a wind barb. Plots are HTML markers (mapboxgl.Marker)
-// so they stay crisp and sit above the radar without touching the WebGL stack.
-//
-// Toggled off by default; only fetches while enabled and only for the current
-// view, refetching (debounced) on pan/zoom and on a slow timer.
+// The layer fetches a raw AviationWeather cache file, parses it in the browser,
+// and keeps the current global observation set in memory. Rendering is entirely
+// local: the map view is culled, thinned on a screen grid, capped by the user
+// selected limit, then drawn as WMO-style station plots on a single canvas. That
+// avoids the thousands of DOM markers that made the old layer feel sluggish.
 
-const IEM_URL = 'https://mesonet.agron.iastate.edu/api/1/currents.json';
-// Drop observations older than this (minutes) so a stale ASOS doesn't mislead.
-const MAX_AGE_MIN = 150;
-// Cap how many networks one view fans out to (a tight view spans 1–3 states or
-// countries; a zoomed-out view over Europe can clip a dozen, so allow a few more).
-const MAX_NETWORKS = 10;
+const RAW_SOURCES = [
+  { url: 'https://aviationweather.gov/data/cache/metars.cache.xml.gz', type: 'xml-gz' },
+  { url: 'https://aviationweather.gov/data/cache/metars.cache.csv', type: 'csv' },
+  { url: 'https://aviationweather.gov/data/cache/metars.cache.xml', type: 'xml' },
+];
+
 const REFRESH_MS = 5 * 60 * 1000;
-// Below this zoom the plots would overlap into mush, so we hide them and show a
-// hint instead of fetching the whole country.
-const MIN_ZOOM = 6.5;
-// Hard cap on plotted stations so a dense region can't spawn thousands of DOM
-// nodes.
-const MAX_STATIONS = 400;
-
-const cToF = (c) => (c * 9) / 5 + 32;
-const fToC = (f) => (f == null || Number.isNaN(f) ? null : ((f - 32) * 5) / 9);
+const MAX_AGE_MIN = 180;
+const LIMIT_STORAGE_KEY = 'rn.metars.maxStations';
+const LIMIT_CHOICES = [150, 300, 600, 900, 1200, 1800, 2400];
+const DEFAULT_LIMIT = 900;
 const IN_HG_TO_HPA = 33.8639;
-
-// Eighths of sky covered, by METAR cloud-cover token, for the station circle.
 const COVER_OKTAS = { SKC: 0, CLR: 0, CAVOK: 0, NSC: 0, FEW: 2, SCT: 4, BKN: 6, OVC: 8, OVX: 8 };
+
+const cToF = (c) => (c == null || Number.isNaN(c) ? null : (c * 9) / 5 + 32);
+const num = (v) => {
+  if (v == null || v === '' || v === 'M') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function loadLimit() {
+  try {
+    const saved = Number(localStorage.getItem(LIMIT_STORAGE_KEY));
+    return LIMIT_CHOICES.includes(saved) ? saved : DEFAULT_LIMIT;
+  } catch {
+    return DEFAULT_LIMIT;
+  }
+}
+
+function pressureCode(slp) {
+  if (slp == null || Number.isNaN(slp)) return '';
+  return String(Math.round(slp * 10) % 1000).padStart(3, '0');
+}
 
 function maxCover(clouds) {
   if (!clouds || !clouds.length) return null;
-  let best = 0;
-  let seen = false;
-  for (const c of clouds) {
-    const o = COVER_OKTAS[c.cover];
-    if (o == null) continue;
-    seen = true;
-    if (o > best) best = o;
+  let best = null;
+  for (const cover of clouds) {
+    const oktas = COVER_OKTAS[String(cover || '').toUpperCase()];
+    if (oktas == null) continue;
+    best = best == null ? oktas : Math.max(best, oktas);
   }
-  return seen ? best : null;
+  return best;
 }
 
-// The filled-circle glyph for N eighths of sky cover, drawn in a 0,0-centred
-// SVG with radius r. Returns an SVG fragment string.
-function skyGlyph(oktas, r) {
-  const ring = `<circle cx="0" cy="0" r="${r}" fill="none" stroke="#dfeaff" stroke-width="1.4"/>`;
-  if (oktas == null) // missing → cross-hatch (sky obscured / unknown)
-    return ring + `<line x1="${-r}" y1="0" x2="${r}" y2="0" stroke="#dfeaff" stroke-width="1.2"/>`;
-  const f = '#dfeaff';
-  switch (oktas) {
-    case 0:
-      return ring;
-    case 1:
-    case 2:
-      return ring + `<line x1="0" y1="0" x2="0" y2="${-r}" stroke="${f}" stroke-width="1.4"/>`;
-    case 3:
-    case 4: // half (right)
-      return ring + `<path d="M0,${-r} A${r},${r} 0 0 1 0,${r} Z" fill="${f}"/>`;
-    case 5:
-    case 6: // three quarters
-      return ring + `<path d="M0,${-r} A${r},${r} 0 1 1 0,${r} Z" fill="${f}"/>` +
-        `<path d="M0,${-r} A${r},${r} 0 0 1 0,${r} Z" fill="${f}"/>`;
-    case 7:
-      return ring + `<circle cx="0" cy="0" r="${r}" fill="${f}"/>` +
-        `<line x1="0" y1="${-r}" x2="0" y2="${r}" stroke="#0a1426" stroke-width="1.4"/>`;
-    default: // 8 = overcast
-      return ring + `<circle cx="0" cy="0" r="${r}" fill="${f}"/>`;
-  }
+function inLngRange(lng, west, east) {
+  if (west <= east) return lng >= west && lng <= east;
+  return lng >= west || lng <= east;
 }
 
-// Wind-barb staff + barbs for a speed in knots, blowing FROM `dir` degrees.
-// Drawn from the station circle outward toward the source direction, barbs on
-// the trailing side — the standard NH convention.
-function windBarb(dir, kt, r) {
-  if (dir == null || kt == null || Number.isNaN(dir) || Number.isNaN(kt)) return '';
-  if (kt < 1) // calm: a ring around the circle
-    return `<circle cx="0" cy="0" r="${r + 3}" fill="none" stroke="#9fd0ff" stroke-width="1"/>`;
-  const L = 22; // staff length
-  const rad = (dir * Math.PI) / 180;
-  // Unit vector pointing toward the source (where the wind comes from).
-  const ux = Math.sin(rad);
-  const uy = -Math.cos(rad);
-  const sx = ux * r;
-  const sy = uy * r;
-  const ex = ux * (r + L);
-  const ey = uy * (r + L);
-  // Perpendicular (barb) direction — to the left of the staff.
-  const px = -uy;
-  const py = ux;
-
-  let speed = Math.round(kt / 5) * 5;
-  const parts = [`<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="#9fd0ff" stroke-width="1.4"/>`];
-  // Walk inward from the outer end placing pennants/full/half barbs.
-  let t = r + L; // distance along the staff from the circle centre
-  const step = 5;
-  const barbLen = 8;
-  const place = () => ({ x: ux * t, y: uy * t });
-  const pennants = Math.floor(speed / 50); speed -= pennants * 50;
-  const fulls = Math.floor(speed / 10); speed -= fulls * 10;
-  const halves = Math.floor(speed / 5);
-
-  for (let i = 0; i < pennants; i++) {
-    const a = place(); t -= step * 1.5; const b = place();
-    parts.push(`<path d="M${a.x.toFixed(1)},${a.y.toFixed(1)} L${(a.x + px * barbLen).toFixed(1)},${(a.y + py * barbLen).toFixed(1)} L${b.x.toFixed(1)},${b.y.toFixed(1)} Z" fill="#9fd0ff"/>`);
+function csvRows(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"') {
+        quoted = false;
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch !== '\r') {
+      field += ch;
+    }
   }
-  if (pennants) t -= step * 0.4;
-  for (let i = 0; i < fulls; i++) {
-    const a = place();
-    parts.push(`<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${(a.x + px * barbLen).toFixed(1)}" y2="${(a.y + py * barbLen).toFixed(1)}" stroke="#9fd0ff" stroke-width="1.4"/>`);
-    t -= step;
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
   }
-  for (let i = 0; i < halves; i++) {
-    if (t >= r + L - 0.1) t -= step; // keep a half-barb off the very tip
-    const a = place();
-    parts.push(`<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${(a.x + px * barbLen * 0.5).toFixed(1)}" y2="${(a.y + py * barbLen * 0.5).toFixed(1)}" stroke="#9fd0ff" stroke-width="1.4"/>`);
-    t -= step;
-  }
-  return parts.join('');
+  return rows;
 }
 
-// Sea-level pressure → the 3-digit coded group (tens, units, tenths of hPa).
-function pressureCode(slp) {
-  if (slp == null || Number.isNaN(slp)) return '';
-  const x = Math.round(slp * 10) % 1000;
-  return String(x).padStart(3, '0');
+function parseCsvMetars(text) {
+  const rows = csvRows(text).filter((r) => r.length > 1);
+  if (!rows.length) return [];
+  const seen = new Map();
+  const headers = rows[0].map((h) => {
+    const key = String(h || '').trim();
+    const count = seen.get(key) || 0;
+    seen.set(key, count + 1);
+    return count ? `${key}_${count + 1}` : key;
+  });
+
+  const obs = [];
+  for (let i = 1; i < rows.length; i++) {
+    const rec = {};
+    for (let j = 0; j < headers.length; j++) rec[headers[j]] = rows[i][j] || '';
+    const ob = normalizeCacheRecord(rec);
+    if (ob) obs.push(ob);
+  }
+  return obs;
 }
 
-// Build the full station-plot SVG for one observation.
-function plotSVG(ob) {
-  const r = 6;
-  const tF = ob.temp != null ? Math.round(cToF(ob.temp)) : null;
-  const dF = ob.dewp != null ? Math.round(cToF(ob.dewp)) : null;
-  // Coded pressure group uses sea-level pressure (hPa); skip it when absent.
-  const code = pressureCode(ob.slp);
-  const oktas = maxCover(ob.clouds);
-  // Variable ('VRB') or missing direction → no staff; windBarb guards on null.
-  const dir = ob.wdir == null || ob.wdir === 'VRB' ? null : Number(ob.wdir);
-  const barb = windBarb(dir, Number(ob.wspd), r);
+function parseXmlMetars(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  const nodes = Array.from(doc.getElementsByTagName('METAR'));
+  const obs = [];
+  for (const node of nodes) {
+    const rec = {};
+    for (const child of Array.from(node.children)) {
+      if (child.tagName === 'sky_condition') continue;
+      rec[child.tagName] = child.textContent || '';
+    }
+    rec._clouds = Array.from(node.getElementsByTagName('sky_condition'))
+      .map((sky) => sky.getAttribute('sky_cover'))
+      .filter(Boolean);
+    const ob = normalizeCacheRecord(rec);
+    if (ob) obs.push(ob);
+  }
+  return obs;
+}
 
-  const tTxt = tF == null ? '' : `<text x="-9" y="-6" text-anchor="end" class="mp-t">${tF}</text>`;
-  const dTxt = dF == null ? '' : `<text x="-9" y="12" text-anchor="end" class="mp-d">${dF}</text>`;
-  const pTxt = code ? `<text x="9" y="-6" text-anchor="start" class="mp-p">${code}</text>` : '';
-  const wx = ob.wxString ? `<text x="-9" y="3" text-anchor="end" class="mp-w">${ob.wxString.slice(0, 4)}</text>` : '';
+function cloudsFromRecord(rec) {
+  if (rec._clouds) return rec._clouds;
+  return Object.keys(rec)
+    .filter((k) => k === 'sky_cover' || k.startsWith('sky_cover_'))
+    .map((k) => rec[k])
+    .filter(Boolean);
+}
 
-  return `<svg width="70" height="50" viewBox="-35 -25 70 50" class="metar-plot-svg" overflow="visible">
-    ${barb}
-    <g>${skyGlyph(oktas, r)}</g>
-    ${tTxt}${dTxt}${pTxt}${wx}
-  </svg>`;
+function normalizeCacheRecord(rec) {
+  const lat = num(rec.latitude);
+  const lon = num(rec.longitude);
+  const id = rec.station_id || rec.station || rec.icaoId || rec.icao_id || '';
+  if (!id || lat == null || lon == null) return null;
+
+  const observedAt = Date.parse(rec.observation_time || rec.valid || rec.report_time || '');
+  if (Number.isFinite(observedAt)) {
+    const ageMin = (Date.now() - observedAt) / 60000;
+    if (ageMin > MAX_AGE_MIN || ageMin < -30) return null;
+  }
+
+  const slp = num(rec.sea_level_pressure_mb) ?? num(rec.mslp)
+    ?? (num(rec.altim_in_hg) != null ? num(rec.altim_in_hg) * IN_HG_TO_HPA : null)
+    ?? (num(rec.altimeter) != null ? num(rec.altimeter) * IN_HG_TO_HPA : null);
+
+  return {
+    icaoId: id,
+    lat,
+    lon,
+    temp: num(rec.temp_c),
+    dewp: num(rec.dewpoint_c),
+    slp,
+    clouds: cloudsFromRecord(rec),
+    wdir: rec.wind_dir_degrees || rec.drct || '',
+    wspd: num(rec.wind_speed_kt ?? rec.sknt),
+    gust: num(rec.wind_gust_kt),
+    visibility: rec.visibility_statute_mi || '',
+    wxString: rec.wx_string || rec.wxcodes || '',
+    observedAt: Number.isFinite(observedAt) ? observedAt : null,
+    rawOb: rec.raw_text || rec.raw || id,
+  };
+}
+
+async function responseText(source) {
+  const res = await fetch(`${source.url}?_=${Date.now()}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${source.url} returned HTTP ${res.status}`);
+  if (source.type !== 'xml-gz') return res.text();
+  if (!('DecompressionStream' in window) || !res.body) {
+    throw new Error('gzip METAR cache requires DecompressionStream');
+  }
+  const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+}
+
+async function fetchRawMetars() {
+  const errors = [];
+  for (const source of RAW_SOURCES) {
+    try {
+      const text = await responseText(source);
+      const obs = source.type === 'csv' ? parseCsvMetars(text) : parseXmlMetars(text);
+      if (obs.length) return { obs, source: source.url };
+      errors.push(`${source.url}: empty cache`);
+    } catch (err) {
+      errors.push(err.message || String(err));
+    }
+  }
+  throw new Error(errors.join('; '));
 }
 
 export class MetarController {
   constructor(map) {
     this.map = map;
     this.enabled = false;
-    this.markers = new Map(); // icaoId → mapboxgl.Marker
     this.obs = [];
+    this.drawn = [];
+    this.maxStations = loadLimit();
+    this.canvas = null;
+    this.ctx = null;
+    this.panel = null;
+    this.tooltip = null;
     this._timer = null;
-    this._debounce = null;
+    this._raf = null;
     this._seq = 0;
+    this._lastLoad = 0;
+    this._loading = false;
 
-    map.on('moveend', () => {
-      if (!this.enabled) return;
-      clearTimeout(this._debounce);
-      this._debounce = setTimeout(() => this.refresh(), 250);
-    });
+    this._scheduleRender = () => this.scheduleRender();
+    this._mousemove = (e) => this.handleMouseMove(e);
+    this._mouseleave = () => this.hideTooltip();
+
+    map.on('move', this._scheduleRender);
+    map.on('zoom', this._scheduleRender);
+    map.on('resize', this._scheduleRender);
+    map.on('rotate', this._scheduleRender);
   }
 
   setEnabled(on) {
     this.enabled = on;
     if (on) {
+      this.ensureOverlay();
+      this.ensurePanel();
       this.refresh();
-      this._timer = setInterval(() => this.enabled && this.refresh(), REFRESH_MS);
+      this._timer = setInterval(() => this.enabled && this.refresh(true), REFRESH_MS);
+      this.scheduleRender();
     } else {
       clearInterval(this._timer);
       this._timer = null;
-      this.clearMarkers();
+      this.hideOverlay();
+      this.hidePanel();
+      this.hideTooltip();
+      this.drawn = [];
     }
     return this.enabled;
   }
 
-  clearMarkers() {
-    for (const m of this.markers.values()) m.remove();
-    this.markers.clear();
-  }
-
-  async refresh() {
-    if (!this.enabled || !this.map.getBounds) return;
-    const z = this.map.getZoom();
-    if (z < MIN_ZOOM) {
-      this.clearMarkers();
-      this._status = 'zoom in to load surface observations';
-      if (this.onStatus) this.onStatus(this._status);
-      return;
-    }
-    const b = this.map.getBounds();
-    const view = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]; // W,S,E,N
-    const networks = networksInView(view).slice(0, MAX_NETWORKS);
-    if (!networks.length) {
-      this.clearMarkers();
-      if (this.onStatus) this.onStatus('no surface obs in view');
+  async refresh(force = false) {
+    if (!this.enabled || this._loading) return;
+    if (!force && this.obs.length && Date.now() - this._lastLoad < REFRESH_MS - 15000) {
+      this.scheduleRender();
       return;
     }
     const seq = ++this._seq;
+    this._loading = true;
+    if (this.onStatus) this.onStatus('loading global METAR cache');
     try {
-      // One request per network; tolerate individual failures (a network may
-      // briefly 5xx) as long as at least one returns.
-      const settled = await Promise.allSettled(networks.map((net) => fetchNetworkObs(net)));
+      const { obs, source } = await fetchRawMetars();
       if (seq !== this._seq || !this.enabled) return;
-      const ok = settled.filter((s) => s.status === 'fulfilled');
-      if (!ok.length) throw new Error('all state requests failed');
-
-      const seen = new Set();
-      const obs = [];
-      for (const s of ok) {
-        for (const rec of s.value) {
-          if (rec.lat == null || rec.lon == null) continue;
-          // Keep only stations inside the current view.
-          if (rec.lon < view[0] || rec.lon > view[2] || rec.lat < view[1] || rec.lat > view[3]) continue;
-          const id = rec.station;
-          if (id && seen.has(id)) continue;
-          if (id) seen.add(id);
-          obs.push(normalizeIem(rec));
-        }
-      }
       this.obs = obs;
-      this.render();
-      if (this.onStatus) this.onStatus(`${this.markers.size} METARs`);
-    } catch (e) {
+      this._lastLoad = Date.now();
+      this._source = source;
+      this.scheduleRender();
+    } catch (err) {
       if (seq !== this._seq) return;
-      console.error('metar load failed', e);
+      console.error('metar load failed', err);
       if (this.onStatus) this.onStatus('METARs unavailable');
+    } finally {
+      if (seq === this._seq) this._loading = false;
     }
+  }
+
+  ensureOverlay() {
+    if (!this.canvas) {
+      const container = this.map.getContainer();
+      this.canvas = document.createElement('canvas');
+      this.canvas.className = 'metar-canvas';
+      this.ctx = this.canvas.getContext('2d');
+      container.appendChild(this.canvas);
+      container.addEventListener('mousemove', this._mousemove);
+      container.addEventListener('mouseleave', this._mouseleave);
+    }
+    this.canvas.hidden = false;
+  }
+
+  hideOverlay() {
+    if (!this.canvas) return;
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.canvas.hidden = true;
+  }
+
+  ensurePanel() {
+    if (!this.panel) {
+      const container = this.map.getContainer();
+      this.panel = document.createElement('div');
+      this.panel.className = 'metar-panel';
+      this.panel.innerHTML = `
+        <div class="metar-panel-row">
+          <span>METAR</span>
+          <select aria-label="METAR station limit">
+            ${LIMIT_CHOICES.map((n) => `<option value="${n}">${n}</option>`).join('')}
+          </select>
+        </div>
+        <div class="metar-panel-count"></div>
+      `;
+      this.panel.querySelector('select').value = String(this.maxStations);
+      this.panel.querySelector('select').addEventListener('change', (e) => {
+        this.maxStations = Number(e.target.value) || DEFAULT_LIMIT;
+        try { localStorage.setItem(LIMIT_STORAGE_KEY, String(this.maxStations)); } catch {}
+        this.scheduleRender();
+      });
+      container.appendChild(this.panel);
+    }
+    this.panel.hidden = false;
+  }
+
+  hidePanel() {
+    if (this.panel) this.panel.hidden = true;
+  }
+
+  scheduleRender() {
+    if (!this.enabled || !this.canvas) return;
+    cancelAnimationFrame(this._raf);
+    this._raf = requestAnimationFrame(() => this.render());
+  }
+
+  resizeCanvas() {
+    const container = this.map.getContainer();
+    const dpr = window.devicePixelRatio || 1;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (this.canvas.width !== Math.round(w * dpr) || this.canvas.height !== Math.round(h * dpr)) {
+      this.canvas.width = Math.round(w * dpr);
+      this.canvas.height = Math.round(h * dpr);
+      this.canvas.style.width = `${w}px`;
+      this.canvas.style.height = `${h}px`;
+    }
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w, h };
   }
 
   render() {
-    // Thin to the strongest-signal stations if a region is dense: keep those
-    // closest to the view centre so the screen stays readable.
-    let obs = this.obs.filter((o) => o.lat != null && o.lon != null);
-    if (obs.length > MAX_STATIONS) {
-      const c = this.map.getCenter();
-      obs = obs
-        .map((o) => ({ o, d: (o.lat - c.lat) ** 2 + (o.lon - c.lng) ** 2 }))
-        .sort((a, b) => a.d - b.d)
-        .slice(0, MAX_STATIONS)
-        .map((x) => x.o);
+    if (!this.enabled || !this.canvas || !this.ctx) return;
+    const { w, h } = this.resizeCanvas();
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, w, h);
+
+    const selected = this.selectVisible(w, h);
+    this.drawn = selected;
+    for (const item of selected) drawStationPlot(ctx, item.ob, item.x, item.y, this.map.getZoom());
+
+    const count = this.panel?.querySelector('.metar-panel-count');
+    if (count) {
+      const total = this._visibleCount || 0;
+      count.textContent = `${selected.length}/${total} shown`;
     }
-    const keep = new Set();
-    for (const ob of obs) {
-      const id = ob.icaoId || `${ob.lat},${ob.lon}`;
-      keep.add(id);
-      let mk = this.markers.get(id);
-      if (!mk) {
-        const elm = document.createElement('div');
-        elm.className = 'metar-plot';
-        elm.title = ob.rawOb || id;
-        mk = new mapboxgl.Marker({ element: elm, anchor: 'center' })
-          .setLngLat([ob.lon, ob.lat])
-          .addTo(this.map);
-        this.markers.set(id, mk);
+    if (this.onStatus && this.obs.length) {
+      const capped = this._visibleCount > selected.length ? `, capped at ${this.maxStations}` : '';
+      this.onStatus(`${selected.length}/${this._visibleCount || selected.length} METARs${capped}`);
+    }
+  }
+
+  selectVisible(w, h) {
+    if (!this.obs.length) {
+      this._visibleCount = 0;
+      return [];
+    }
+    const bounds = this.map.getBounds();
+    const west = bounds.getWest();
+    const east = bounds.getEast();
+    const south = bounds.getSouth();
+    const north = bounds.getNorth();
+    const zoom = this.map.getZoom();
+    const cell = clamp(86 - zoom * 4, 42, 72);
+    const margin = 74;
+    const grid = new Map();
+    let visible = 0;
+
+    for (const ob of this.obs) {
+      if (ob.lat < south || ob.lat > north || !inLngRange(ob.lon, west, east)) continue;
+      const pt = this.map.project([ob.lon, ob.lat]);
+      if (pt.x < -margin || pt.y < -margin || pt.x > w + margin || pt.y > h + margin) continue;
+      visible++;
+      const gx = Math.floor(pt.x / cell);
+      const gy = Math.floor(pt.y / cell);
+      const key = `${gx}:${gy}`;
+      const cellCx = gx * cell + cell / 2;
+      const cellCy = gy * cell + cell / 2;
+      const score = (pt.x - cellCx) ** 2 + (pt.y - cellCy) ** 2 + agePenalty(ob);
+      const prev = grid.get(key);
+      if (!prev || score < prev.score) grid.set(key, { ob, x: pt.x, y: pt.y, score });
+    }
+
+    this._visibleCount = visible;
+    let selected = Array.from(grid.values());
+    if (selected.length > this.maxStations) {
+      const cx = w / 2;
+      const cy = h / 2;
+      selected = selected
+        .map((item) => ({ ...item, centerScore: (item.x - cx) ** 2 + (item.y - cy) ** 2 + item.score }))
+        .sort((a, b) => a.centerScore - b.centerScore)
+        .slice(0, this.maxStations);
+    }
+    return selected;
+  }
+
+  handleMouseMove(e) {
+    if (!this.enabled || !this.drawn.length) return;
+    const rect = this.map.getContainer().getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    let hit = null;
+    let best = 999999;
+    for (const item of this.drawn) {
+      const dx = item.x - x;
+      const dy = item.y - y;
+      const d = dx * dx + dy * dy;
+      if (d < best && d < 34 * 34) {
+        best = d;
+        hit = item;
       }
-      mk.getElement().innerHTML = plotSVG(ob);
     }
-    for (const [id, mk] of this.markers) {
-      if (!keep.has(id)) { mk.remove(); this.markers.delete(id); }
+    if (!hit) {
+      this.hideTooltip();
+      return;
     }
+    this.showTooltip(hit.ob, x, y);
+  }
+
+  showTooltip(ob, x, y) {
+    if (!this.tooltip) {
+      this.tooltip = document.createElement('div');
+      this.tooltip.className = 'metar-tooltip';
+      this.map.getContainer().appendChild(this.tooltip);
+    }
+    const when = ob.observedAt ? new Date(ob.observedAt).toISOString().slice(11, 16) + 'Z' : '';
+    this.tooltip.innerHTML = `
+      <strong>${escapeHtml(ob.icaoId)}</strong>${when ? ` <span>${when}</span>` : ''}
+      <div>${escapeHtml(ob.rawOb || '')}</div>
+    `;
+    this.tooltip.style.left = `${x + 14}px`;
+    this.tooltip.style.top = `${y + 14}px`;
+    this.tooltip.hidden = false;
+  }
+
+  hideTooltip() {
+    if (this.tooltip) this.tooltip.hidden = true;
   }
 }
 
-// ---- IEM source helpers --------------------------------------------------
-
-// Fetch one IEM network's current obs. `net` is the fully-qualified network name
-// (e.g. `OK_ASOS` for a US state, `FR__ASOS` for a country) so this works for the
-// US and international networks alike.
-async function fetchNetworkObs(net) {
-  const url = `${IEM_URL}?network=${net}&minutes=${MAX_AGE_MIN}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  return (json && Array.isArray(json.data)) ? json.data : [];
+function agePenalty(ob) {
+  if (!ob.observedAt) return 0;
+  return clamp((Date.now() - ob.observedAt) / 60000, 0, MAX_AGE_MIN) * 0.04;
 }
 
-// Up to four reported cloud layers → [{ cover }] for maxCover().
-function cloudsFrom(rec) {
-  const out = [];
-  for (const k of ['skyc1', 'skyc2', 'skyc3', 'skyc4']) {
-    if (rec[k]) out.push({ cover: rec[k] });
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function drawStationPlot(ctx, ob, x, y, zoom) {
+  const scale = clamp(0.82 + zoom * 0.03, 0.9, 1.2);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  drawWindBarb(ctx, ob.wdir, ob.wspd, ob.gust);
+  drawSky(ctx, maxCover(ob.clouds));
+  drawLabels(ctx, ob);
+
+  ctx.restore();
+}
+
+function drawSky(ctx, oktas) {
+  const r = 8;
+  haloStroke(ctx, () => {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }, 1.6, '#dfeaff');
+
+  ctx.fillStyle = '#dfeaff';
+  if (oktas == null) {
+    haloStroke(ctx, () => {
+      ctx.beginPath();
+      ctx.moveTo(-r, 0);
+      ctx.lineTo(r, 0);
+      ctx.moveTo(0, -r);
+      ctx.lineTo(0, r);
+      ctx.stroke();
+    }, 1.4, '#dfeaff');
+    return;
   }
-  return out;
+  if (oktas <= 0) return;
+  if (oktas <= 2) {
+    haloStroke(ctx, () => {
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, -r);
+      ctx.stroke();
+    }, 1.5, '#dfeaff');
+  } else if (oktas <= 4) {
+    ctx.beginPath();
+    ctx.moveTo(0, -r);
+    ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2);
+    ctx.closePath();
+    ctx.fill();
+  } else if (oktas <= 6) {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, -Math.PI / 2, Math.PI * 1.5);
+    ctx.moveTo(0, -r);
+    ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2);
+    ctx.closePath();
+    ctx.fill('evenodd');
+  } else if (oktas === 7) {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    haloStroke(ctx, () => {
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.lineTo(0, r);
+      ctx.stroke();
+    }, 1.2, '#071427');
+  } else {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
-// IEM current-obs record → the `ob` shape the station-plot renderer expects
-// (temps in °C, pressure in hPa, wind in knots).
-function normalizeIem(rec) {
-  // Prefer reported MSLP; fall back to the altimeter setting (QNH, already
-  // sea-level-reduced) converted to hPa so the coded pressure group still shows.
-  const slp = rec.mslp != null ? rec.mslp
-    : (rec.alti != null ? rec.alti * IN_HG_TO_HPA : null);
-  return {
-    icaoId: rec.station,
-    lat: rec.lat,
-    lon: rec.lon,
-    temp: fToC(rec.tmpf),
-    dewp: fToC(rec.dwpf),
-    slp,
-    clouds: cloudsFrom(rec),
-    wdir: rec.drct,          // numeric degrees, or null when variable/missing
-    wspd: rec.sknt,          // knots
-    wxString: rec.wxcodes || '',
-    rawOb: rec.raw || rec.station,
-  };
+function drawWindBarb(ctx, dir, kt, gust) {
+  const d = String(dir || '').toUpperCase();
+  const degrees = d === 'VRB' ? null : num(d);
+  const speed = num(kt);
+  if (speed == null) return;
+  if (speed < 1 || degrees == null) {
+    if (speed < 1) {
+      haloStroke(ctx, () => {
+        ctx.beginPath();
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.stroke();
+      }, 1.2, '#9fd0ff');
+    }
+    return;
+  }
+
+  const r = 8;
+  const len = 34;
+  const rad = (degrees * Math.PI) / 180;
+  const ux = Math.sin(rad);
+  const uy = -Math.cos(rad);
+  const px = -uy;
+  const py = ux;
+  const sx = ux * r;
+  const sy = uy * r;
+  const ex = ux * (r + len);
+  const ey = uy * (r + len);
+  const parts = [];
+
+  parts.push((c) => {
+    c.beginPath();
+    c.moveTo(sx, sy);
+    c.lineTo(ex, ey);
+    c.stroke();
+  });
+
+  let remaining = Math.round((gust || speed) / 5) * 5;
+  let t = r + len;
+  const step = 6;
+  const barbLen = 11;
+  const point = () => ({ x: ux * t, y: uy * t });
+  const pennants = Math.floor(remaining / 50);
+  remaining -= pennants * 50;
+  const fulls = Math.floor(remaining / 10);
+  remaining -= fulls * 10;
+  const halves = Math.floor(remaining / 5);
+
+  for (let i = 0; i < pennants; i++) {
+    const a = point();
+    t -= step * 1.45;
+    const b = point();
+    parts.push((c) => {
+      c.beginPath();
+      c.moveTo(a.x, a.y);
+      c.lineTo(a.x + px * barbLen, a.y + py * barbLen);
+      c.lineTo(b.x, b.y);
+      c.closePath();
+      c.fill();
+    });
+  }
+  if (pennants) t -= step * 0.4;
+  for (let i = 0; i < fulls; i++) {
+    const a = point();
+    parts.push((c) => {
+      c.beginPath();
+      c.moveTo(a.x, a.y);
+      c.lineTo(a.x + px * barbLen, a.y + py * barbLen);
+      c.stroke();
+    });
+    t -= step;
+  }
+  for (let i = 0; i < halves; i++) {
+    if (t >= r + len - 0.1) t -= step;
+    const a = point();
+    parts.push((c) => {
+      c.beginPath();
+      c.moveTo(a.x, a.y);
+      c.lineTo(a.x + px * barbLen * 0.55, a.y + py * barbLen * 0.55);
+      c.stroke();
+    });
+    t -= step;
+  }
+
+  ctx.save();
+  ctx.lineWidth = 3.8;
+  ctx.strokeStyle = 'rgba(4, 10, 24, 0.95)';
+  ctx.fillStyle = 'rgba(4, 10, 24, 0.95)';
+  for (const part of parts) part(ctx);
+  ctx.lineWidth = 1.7;
+  ctx.strokeStyle = '#9fd0ff';
+  ctx.fillStyle = '#9fd0ff';
+  for (const part of parts) part(ctx);
+  ctx.restore();
 }
 
-// IEM networks whose bounding box intersects the view [W,S,E,N], ordered by
-// proximity of the box centre to the view centre so the MAX_NETWORKS cap keeps
-// the most relevant ones. US states map to `{ST}_ASOS`; world countries map to
-// `{ISO2}__ASOS` (double underscore — IEM's international convention).
-function networksInView(view) {
-  const [w, s, e, n] = view;
-  const cx = (w + e) / 2;
-  const cy = (s + n) / 2;
-  const hits = [];
-  const consider = (box, net) => {
-    const [bw, bs, be, bn] = box;
-    if (be < w || bw > e || bn < s || bs > n) return; // no overlap
-    const dx = (bw + be) / 2 - cx;
-    const dy = (bs + bn) / 2 - cy;
-    hits.push({ net, d: dx * dx + dy * dy });
-  };
-  for (const st in STATE_BBOX) consider(STATE_BBOX[st], `${st}_ASOS`);
-  for (const cc in COUNTRY_BBOX) consider(COUNTRY_BBOX[cc], `${cc}__ASOS`);
-  return hits.sort((a, b) => a.d - b.d).map((h) => h.net);
+function drawLabels(ctx, ob) {
+  ctx.font = '700 13px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'middle';
+  const temp = cToF(ob.temp);
+  const dewp = cToF(ob.dewp);
+  const pressure = pressureCode(ob.slp);
+  const wx = String(ob.wxString || '').split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+
+  if (temp != null) text(ctx, Math.round(temp), -12, -12, 'right', '#ff6a6a');
+  if (dewp != null) text(ctx, Math.round(dewp), -12, 14, 'right', '#57d98a');
+  if (pressure) text(ctx, pressure, 12, -12, 'left', '#d8e4f8', 12);
+  if (wx) text(ctx, wx.slice(0, 7), -12, 1, 'right', '#c79bff', 10);
 }
 
-// Approximate [west, south, east, north] bounding boxes for the 50 states + DC.
-// Slightly padded; only used to decide which `{ST}_ASOS` networks to query, so
-// over-selecting a neighbor is harmless (obs are filtered to the exact view).
-const STATE_BBOX = {
-  AL: [-88.5, 30.1, -84.9, 35.1], AZ: [-114.9, 31.3, -109.0, 37.1],
-  AR: [-94.7, 33.0, -89.6, 36.6], CA: [-124.5, 32.5, -114.1, 42.1],
-  CO: [-109.1, 36.9, -102.0, 41.1], CT: [-73.8, 40.9, -71.7, 42.1],
-  DC: [-77.2, 38.7, -76.8, 39.1], DE: [-75.8, 38.4, -75.0, 39.9],
-  FL: [-87.7, 24.4, -79.9, 31.1], GA: [-85.7, 30.3, -80.8, 35.1],
-  IA: [-96.7, 40.3, -90.1, 43.6], ID: [-117.3, 41.9, -111.0, 49.1],
-  IL: [-91.6, 36.9, -87.0, 42.6], IN: [-88.1, 37.7, -84.7, 41.8],
-  KS: [-102.1, 36.9, -94.5, 40.1], KY: [-89.6, 36.4, -81.9, 39.2],
-  LA: [-94.1, 28.9, -88.8, 33.1], MA: [-73.6, 41.2, -69.9, 42.9],
-  MD: [-79.5, 37.8, -75.0, 39.8], ME: [-71.2, 42.9, -66.9, 47.5],
-  MI: [-90.5, 41.6, -82.3, 48.3], MN: [-97.3, 43.4, -89.4, 49.5],
-  MO: [-95.8, 35.9, -89.0, 40.7], MS: [-91.7, 30.1, -88.0, 35.1],
-  MT: [-116.1, 44.3, -104.0, 49.1], NC: [-84.4, 33.8, -75.4, 36.7],
-  ND: [-104.1, 45.9, -96.5, 49.1], NE: [-104.1, 39.9, -95.2, 43.1],
-  NH: [-72.6, 42.6, -70.5, 45.4], NJ: [-75.6, 38.9, -73.8, 41.4],
-  NM: [-109.1, 31.2, -102.9, 37.1], NV: [-120.1, 35.0, -114.0, 42.1],
-  NY: [-79.8, 40.4, -71.8, 45.1], OH: [-84.9, 38.3, -80.5, 42.4],
-  OK: [-103.1, 33.6, -94.4, 37.1], OR: [-124.6, 41.9, -116.4, 46.3],
-  PA: [-80.6, 39.7, -74.6, 42.4], RI: [-71.9, 41.1, -71.1, 42.1],
-  SC: [-83.4, 32.0, -78.5, 35.3], SD: [-104.1, 42.4, -96.4, 46.0],
-  TN: [-90.4, 34.9, -81.6, 36.7], TX: [-106.7, 25.8, -93.5, 36.6],
-  UT: [-114.1, 36.9, -109.0, 42.1], VA: [-83.7, 36.5, -75.2, 39.5],
-  VT: [-73.5, 42.7, -71.5, 45.1], WA: [-124.8, 45.5, -116.9, 49.1],
-  WI: [-92.9, 42.4, -86.8, 47.1], WV: [-82.7, 37.1, -77.7, 40.7],
-  WY: [-111.1, 40.9, -104.0, 45.1],
-  AK: [-179.2, 51.0, -129.9, 71.5], HI: [-160.3, 18.9, -154.8, 22.3],
-};
+function text(ctx, value, x, y, align, fill, size = 13) {
+  ctx.save();
+  ctx.font = `700 ${size}px "JetBrains Mono", monospace`;
+  ctx.textAlign = align;
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(5, 12, 27, 0.96)';
+  ctx.strokeText(String(value), x, y);
+  ctx.fillStyle = fill;
+  ctx.fillText(String(value), x, y);
+  ctx.restore();
+}
 
-// Approximate [west, south, east, north] boxes for world countries with IEM
-// `{ISO2}__ASOS` networks. Only used to decide which networks to query (obs are
-// filtered to the exact view), so coarse boxes and over-selecting neighbours are
-// harmless. The US is omitted — its states above already cover it.
-const COUNTRY_BBOX = {
-  CA: [-141.0, 41.7, -52.6, 70.0], MX: [-117.2, 14.5, -86.7, 32.7],
-  GB: [-8.6, 49.9, 1.8, 60.9], IE: [-10.5, 51.4, -6.0, 55.4],
-  FR: [-5.1, 41.3, 9.6, 51.1], ES: [-9.3, 36.0, 3.3, 43.8],
-  PT: [-9.5, 36.9, -6.2, 42.2], DE: [5.9, 47.3, 15.0, 55.1],
-  NL: [3.4, 50.8, 7.2, 53.6], BE: [2.5, 49.5, 6.4, 51.5],
-  CH: [5.9, 45.8, 10.5, 47.8], AT: [9.5, 46.4, 17.2, 49.0],
-  IT: [6.6, 36.6, 18.5, 47.1], GR: [19.4, 34.8, 28.3, 41.8],
-  PL: [14.1, 49.0, 24.2, 54.9], CZ: [12.1, 48.5, 18.9, 51.1],
-  SK: [16.8, 47.7, 22.6, 49.6], HU: [16.1, 45.7, 22.9, 48.6],
-  RO: [20.2, 43.6, 29.7, 48.3], BG: [22.3, 41.2, 28.6, 44.2],
-  RS: [18.8, 42.2, 23.0, 46.2], HR: [13.4, 42.4, 19.4, 46.6],
-  DK: [8.0, 54.5, 12.7, 57.8], NO: [4.5, 57.9, 31.1, 71.2],
-  SE: [11.1, 55.3, 24.2, 69.1], FI: [20.5, 59.7, 31.6, 70.1],
-  EE: [23.3, 57.5, 28.2, 59.7], LV: [20.9, 55.6, 28.2, 58.1],
-  LT: [20.9, 53.9, 26.8, 56.5], BY: [23.1, 51.2, 32.8, 56.2],
-  UA: [22.1, 44.3, 40.2, 52.4], RU: [27.0, 41.2, 180.0, 77.0],
-  TR: [25.6, 35.8, 44.8, 42.1], IS: [-24.6, 63.3, -13.5, 66.6],
-  MA: [-13.2, 27.6, -1.0, 35.9], DZ: [-8.7, 18.9, 12.0, 37.1],
-  TN: [7.5, 30.2, 11.6, 37.5], EG: [24.7, 22.0, 36.9, 31.7],
-  ZA: [16.4, -34.9, 32.9, -22.1], KE: [33.9, -4.7, 41.9, 5.0],
-  NG: [2.7, 4.3, 14.7, 13.9], ET: [33.0, 3.4, 47.9, 14.9],
-  IN: [68.1, 6.5, 97.4, 35.5], PK: [60.9, 23.7, 77.8, 37.1],
-  CN: [73.5, 18.2, 134.8, 53.6], JP: [129.4, 31.0, 145.8, 45.5],
-  KR: [125.9, 33.1, 129.6, 38.6], TW: [120.0, 21.9, 122.0, 25.3],
-  TH: [97.3, 5.6, 105.6, 20.5], VN: [102.1, 8.4, 109.5, 23.4],
-  MY: [99.6, 0.8, 119.3, 7.4], ID: [95.0, -11.0, 141.0, 6.1],
-  PH: [116.9, 4.6, 126.6, 19.6], SG: [103.6, 1.2, 104.1, 1.5],
-  AE: [51.0, 22.6, 56.4, 26.1], SA: [34.5, 16.4, 55.7, 32.2],
-  IL: [34.2, 29.5, 35.9, 33.3], IR: [44.0, 25.1, 63.3, 39.8],
-  IQ: [38.8, 29.1, 48.6, 37.4], AU: [112.9, -43.7, 153.6, -10.1],
-  NZ: [166.4, -47.3, 178.6, -34.4], BR: [-74.0, -33.8, -34.8, 5.3],
-  AR: [-73.6, -55.1, -53.6, -21.8], CL: [-75.7, -55.9, -66.4, -17.5],
-  PE: [-81.4, -18.4, -68.7, -0.0], CO: [-79.0, -4.2, -66.9, 12.5],
-  VE: [-73.4, 0.6, -59.8, 12.2], EC: [-81.0, -5.0, -75.2, 1.4],
-  BO: [-69.6, -22.9, -57.5, -9.7], PY: [-62.6, -27.6, -54.3, -19.3],
-  UY: [-58.4, -34.9, -53.1, -30.1],
-};
+function haloStroke(ctx, draw, width, stroke) {
+  ctx.save();
+  ctx.lineWidth = width + 3.4;
+  ctx.strokeStyle = 'rgba(4, 10, 24, 0.95)';
+  draw();
+  ctx.lineWidth = width;
+  ctx.strokeStyle = stroke;
+  draw();
+  ctx.restore();
+}

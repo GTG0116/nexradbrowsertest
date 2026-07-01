@@ -865,6 +865,7 @@ function cacheEls() {
   el.toolMeasure = $('#toolMeasure');
   el.toolStorm = $('#toolStorm');
   el.toolMetars = $('#toolMetars');
+  el.toolInspect = $('#toolInspect');
   el.toolWeather = $('#toolWeather');
   el.toolLocate = $('#toolLocate');
   el.weatherPicker = $('#weatherPicker');
@@ -1259,8 +1260,10 @@ function buildSiteSelect() {
 // the right one.
 function activeProductId() {
   const sv = state.splitView;
-  if (sv && sv.active && sv.activePane === 2 &&
-      state.mode !== 'observations' && state.mode !== 'outlooks') return sv.productId;
+  if (sv && sv.active && sv.activePane > 1 &&
+      state.mode !== 'observations' && state.mode !== 'outlooks') {
+    return sv.activeProductId ? sv.activeProductId() : sv.productId;
+  }
   if (state.mode === 'satellite') return state.sat.productId;
   if (state.mode === 'mrms') return state.mrms.productId;
   if (state.mode === 'models') return state.models.productId;
@@ -1268,11 +1271,11 @@ function activeProductId() {
   return state.productId;
 }
 
-// If the bottom UI is aimed at split pane 2, route a product change there and
+// If the bottom UI is aimed at a comparison pane, route a product change there and
 // skip the main-map path. Returns true when it handled the click.
 function routeProductToPane(id) {
   const sv = state.splitView;
-  if (!(sv && sv.active && sv.activePane === 2)) return false;
+  if (!(sv && sv.active && sv.activePane > 1)) return false;
   if (state.mode === 'observations' || state.mode === 'outlooks') return false;
   document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
   sv.setProduct(id);
@@ -1478,15 +1481,15 @@ function updateSplitPaneChrome() {
   const sv = state.splitView;
   if (!sv) return;
   if (!sv.active) {
-    if (sv.setPaneLegends) sv.setPaneLegends('', '');
+    if (sv.setPaneLegends) sv.setPaneLegends('', '', '', '');
     if (sv.setWeatherPickers) sv.setWeatherPickers(false);
     return;
   }
   const canCompareLegend = state.mode === 'radar' || state.mode === 'mrms' || state.mode === 'models';
-  sv.setPaneLegends(
-    canCompareLegend ? splitPaneLegendHTML(sv._mainProduct ? sv._mainProduct() : state.productId) : '',
-    canCompareLegend ? splitPaneLegendHTML(sv.productId) : ''
-  );
+  const products = sv.paneProducts
+    ? sv.paneProducts()
+    : [sv._mainProduct ? sv._mainProduct() : state.productId, sv.productId];
+  sv.setPaneLegends(products.map((id) => (canCompareLegend ? splitPaneLegendHTML(id) : '')));
   if (sv.setWeatherPickers) sv.setWeatherPickers(!!(state.weather && state.weather.active));
 }
 
@@ -2150,6 +2153,7 @@ function applyModePanels() {
     : state.mode === 'mrms' ? 'MRMS frames'
     : state.mode === 'models' ? 'Model runs'
     : state.mode === 'observations' ? 'RTMA frames' : 'Outlook detail';
+  placeDesktopVolumePanel();
   document.querySelectorAll('.mode-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
 }
@@ -2911,10 +2915,11 @@ function initModelSelects() {
     // Switch to a supported product if this model can't supply the current one.
     if (!modelSupports(state.models.modelKey, state.models.productId))
       state.models.productId = defaultProductFor(state.models.modelKey);
-    // Keep split pane 2 valid too (it shares the model).
-    if (state.splitView && state.splitView.active &&
-        !modelSupports(state.models.modelKey, state.splitView.productId))
-      state.splitView.onModeChange();
+    // Keep comparison panes valid too (they share the selected model).
+    if (state.splitView && state.splitView.active) {
+      const paneProducts = state.splitView.paneProducts ? state.splitView.paneProducts().slice(1) : [state.splitView.productId];
+      if (paneProducts.some((id) => !modelSupports(state.models.modelKey, id))) state.splitView.onModeChange();
+    }
     state._forceLatest = true;
     buildModelProductButtons();
     buildModelLegend();
@@ -3041,7 +3046,16 @@ async function loadModelList() {
     setStatus(`${runs.length} model runs`);
     if (!runs.length) return;
     const latest = runs[runs.length - 1].key;
-    if (state._forceLatest || !state.models.grid || state.live || !currentModelRun()) {
+    // LIVE must not trap the user on the newest cycle: a 60 s auto-refresh used
+    // to force-select `latest` here, snapping back any older run the user had
+    // picked (and re-downloading the same frame). Follow new cycles only when
+    // the user is (or was) on the latest one; otherwise honor their selection.
+    const prevLatest = state.models._latestRunKey;
+    state.models._latestRunKey = latest;
+    const followingLatest = !state.models.runKey ||
+      state.models.runKey === latest || state.models.runKey === prevLatest;
+    if (state._forceLatest || !state.models.grid || !currentModelRun() ||
+        (state.live && followingLatest && state.models.runKey !== latest)) {
       state._forceLatest = false;
       selectModelRun(latest);
     } else {
@@ -3155,8 +3169,10 @@ function modelGridForReadouts() {
 }
 
 function sampleGridRaw(grid, lat, lon) {
-  const i = Math.floor((lon - grid.lon1) / grid.di);
-  const j = Math.floor((grid.lat1 - lat) / grid.dj);
+  // (lon1, lat1) is the center of cell (0,0) — round to the nearest center so
+  // readouts match the raster exactly (same half-cell offset as the shader).
+  const i = Math.round((lon - grid.lon1) / grid.di);
+  const j = Math.round((grid.lat1 - lat) / grid.dj);
   if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return undefined;
   return grid.values[j * grid.ni + i];
 }
@@ -3593,6 +3609,7 @@ function toggleInspect(on) {
   state.inspect = on == null ? !state.inspect : on;
   if (state.inspect) clearOtherTools('inspect');
   el.inspectBtn.classList.toggle('active', state.inspect);
+  if (el.toolInspect) el.toolInspect.classList.toggle('active', state.inspect);
   const desktop = isDesktopPointer();
   // Desktop: no centre picker — the mouse readout is the inspector. Touch: the
   // fixed centre crosshair reads the value beneath it as you pan.
@@ -3690,8 +3707,8 @@ function sampleMrmsAt(lat, lon) {
   const grid = state.mrms.grid;
   if (!grid) return null;
   const p = resolveGridProduct(grid.product);
-  const i = Math.floor((lon - grid.lon1) / grid.di);
-  const j = Math.floor((grid.lat1 - lat) / grid.dj);
+  const i = Math.round((lon - grid.lon1) / grid.di);
+  const j = Math.round((grid.lat1 - lat) / grid.dj);
   if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
   const v = grid.values[j * grid.ni + i];
   if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no data', sub: p.id };
@@ -4127,6 +4144,12 @@ function setupSpcOutlook() {
     detailWrap: el.alertDetail,
     detailPanel: el.alertDetailPanel,
     closeBtn: el.alertClose,
+    // Briefing chrome resizes the map area; cover the split/quad panes too.
+    resizeMaps: () => {
+      if (state.map) state.map.resize();
+      if (state.splitView && state.splitView.getMaps)
+        for (const m of state.splitView.getMaps()) m.resize();
+    },
     alertController: () => state.alerts,
     extraLegend: () => state.mode === 'outlooks' ? el.legend : null,
     extraStatus: (text) => {
@@ -4243,12 +4266,26 @@ function layoutDesktopSidebar() {
     el.sourcePanel, el.layoutPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
     el.settingsBtn, el.sidebarFoot
   );
+  placeDesktopVolumePanel();
 }
 function layoutDesktopDrawer() {
   el.pageControls.append(el.volumePanel);
   el.pageSettings.append(el.displayPanel, el.satOptsPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Scans', 'Display', 'Map');
+  placeDesktopVolumePanel();
+}
+function placeDesktopVolumePanel() {
+  if (!el.volumePanel || mqSmallScreen.matches) return;
+  if (state.mode === 'models') {
+    if (el.volumePanel.parentElement !== el.sidebar) {
+      el.sidebar.insertBefore(el.volumePanel, el.fhourPanel || el.alertsPanel || el.settingsBtn);
+    } else if (el.fhourPanel && el.volumePanel.nextElementSibling !== el.fhourPanel) {
+      el.sidebar.insertBefore(el.volumePanel, el.fhourPanel);
+    }
+  } else if (el.volumePanel.parentElement !== el.pageControls) {
+    el.pageControls.append(el.volumePanel);
+  }
 }
 function setSheetTabLabels(a, b, c) {
   if (!el.sheetTabs) return;
@@ -4308,7 +4345,7 @@ function applyResponsiveLayout() {
   document.querySelector('.app').classList.toggle('mobile', mobile);
   // The dock stays visible during playback now — the scrubber lives inside it and
   // only replaces the product + play slot (see `.app.playing` CSS).
-  el.mobileDock.hidden = !mobile;
+  el.mobileDock.hidden = false;
   el.sidebar.hidden = mobile;
   if (!mobile && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
@@ -4322,12 +4359,14 @@ function applyResponsiveLayout() {
   } else {
     closeSheet();
     if (state.inspect) toggleInspect(false);
-    // volumePanel starts as a raw sibling of .sidebar/.stage in the markup
-    // (outside both the sidebar and the sheet), so — unlike sourcePanel,
-    // which is already nested inside #sidebar in the raw HTML — checking its
-    // parent reliably detects "first desktop layout pass" too, not just a
-    // mobile→desktop transition.
-    if (el.volumePanel.parentElement !== el.pageControls) {
+    // displayPanel starts as a raw sibling of .sidebar/.stage in the markup
+    // (outside both the sidebar and the sheet), so checking its parent
+    // reliably detects "first desktop layout pass" too, not just a
+    // mobile→desktop transition. (volumePanel is NOT a safe sentinel: the
+    // mode-panel pass moves it into pageControls on its own, which used to
+    // make this check skip the whole desktop layout and leave every drawer
+    // panel strewn inline next to the map.)
+    if (el.displayPanel.parentElement !== el.pageSettings) {
       layoutDesktopSidebar();
       layoutDesktopDrawer();
       requestAnimationFrame(() => setSheetPage(state._sheetPage || 0, false));
@@ -5071,6 +5110,10 @@ function startLive() {
   el.liveBtn.classList.add('active');
   el.liveBtn.textContent = '● LIVE';
   syncDateToUtcToday();
+  // Explicitly going live means "show me the newest data now" — jump to the
+  // latest run/frame even if an older one was selected. (The 60 s auto-refresh
+  // itself no longer yanks a deliberately-selected older model run back.)
+  state._forceLatest = true;
   refreshActive();
   if (state.liveTimer) clearInterval(state.liveTimer);
   state.liveTimer = setInterval(() => refreshActive(), 60000);
@@ -5314,7 +5357,7 @@ function setupMapTools() {
 
   setupWeatherTool();
 
-  // Split screen — a second synced pane showing a different product.
+  // Split screen - synced comparison panes showing different products.
   state.splitView = new SplitView({
     state,
     MAPBOX_TOKEN,
@@ -5326,33 +5369,81 @@ function setupMapTools() {
     onSplitProductsChange: () => updateSplitPaneChrome(),
   });
   el.toolSplit.addEventListener('click', () => {
-    const on = state.splitView.toggle();
+    const on = state.splitView.toggle(2);
     setToggleBtn(el.toolSplit, on);
     if (on) state.splitView.setDrawings(state.mapTools.getFeatureCollection());
     updateSplitPaneChrome();
     updateLayoutSwitchUI();
   });
-  // Sidebar Layout switch (single / split) — a friendlier face on the same
-  // split-view toggle above; it just clicks the real control so every other
-  // split-view listener (state, chrome, drawings) fires unchanged.
+  // Sidebar Layout switch (single / split / quad) - a friendlier face on the
+  // same comparison controller.
   if (el.layoutSwitch) {
     el.layoutSwitch.addEventListener('click', (e) => {
       const btn = e.target.closest('.layout-btn');
       if (!btn) return;
-      const wantSplit = btn.dataset.layout === 'split2';
-      if (wantSplit !== state.splitView.active) el.toolSplit.click();
-      else updateLayoutSwitchUI();
+      const layout = btn.dataset.layout;
+      if (layout === 'single') {
+        if (state.splitView.active) state.splitView.disable();
+      } else {
+        state.splitView.enable(layout === 'quad4' ? 4 : 2);
+        state.splitView.setDrawings(state.mapTools.getFeatureCollection());
+      }
+      setToggleBtn(el.toolSplit, !!state.splitView.active);
+      updateSplitPaneChrome();
+      updateLayoutSwitchUI();
     });
   }
 
   // Export / share — snapshot the live map(s) to a PNG with a caption banner.
+  // Before capturing, the basemap's town labels are temporarily enlarged on
+  // every pane so place names survive social-media downscaling — readable on a
+  // phone timeline without zooming the map in (which would crop the scene).
+  // The boost rides the normal map-style machinery (so zoom expressions are
+  // rebuilt safely and native sizes aren't compounded) and is restored right
+  // after the pixels are read.
   state.exportTool = new ExportTool({ getScene: buildExportScene });
-  el.toolExport.addEventListener('click', () => {
+  const exportPaneMaps = () => {
+    const maps = [state.map];
+    if (state.splitView && state.splitView.active && state.splitView.getMaps)
+      maps.push(...state.splitView.getMaps());
+    return maps.filter((m) => m && m.getStyle);
+  };
+  const applyExportLabelStyle = (maps, boost) => {
+    const base = normalizeMapStyle(state.mapStyle);
+    const opts = boost
+      ? {
+          ...base,
+          townSize: Math.min(3, base.townSize * 1.4),
+          townThickness: Math.min(6, Math.max(base.townThickness * 1.25, 1.6)),
+        }
+      : state.mapStyle;
+    for (const m of maps) {
+      try { applyMapStyle(m, opts, firstLabelLayerId(m), { fresh: false }); } catch (_) {}
+    }
+  };
+  // Resolve once the map has re-laid-out its labels (or after a short cap —
+  // label placement runs in workers, so 'idle' is the only reliable signal).
+  const waitMapIdle = (map) => new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    map.once('idle', finish);
+    setTimeout(finish, 1200);
+  });
+  let exporting = false;
+  el.toolExport.addEventListener('click', async () => {
+    if (exporting) return;
+    exporting = true;
+    const maps = exportPaneMaps();
     try {
+      applyExportLabelStyle(maps, true);
+      await Promise.all(maps.map(waitMapIdle));
       state.exportTool.run();
     } catch (e) {
       console.error('export failed:', e);
       setStatus('Export failed');
+    } finally {
+      applyExportLabelStyle(maps, false);
+      exporting = false;
     }
   });
 }
@@ -5818,7 +5909,7 @@ const DOCK_TOOLS = [
   { id: 'storm', icon: '➤', label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'metars', icon: '⛅', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  { id: 'metars', icon: '📡', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: '📍', label: 'My live location', btn: () => el.toolLocate },
   // The model sounding isn't a slot tool anymore — in models mode you long-press
@@ -5832,7 +5923,7 @@ const MOBILE_TOOL_DEFS = [
   { id: 'storm', icon: 'navigation', label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'metars', icon: 'cloud-sun', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
+  { id: 'metars', icon: 'radio-tower', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: 'sun', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: 'locate-fixed', label: 'My live location', btn: () => el.toolLocate },
   { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
@@ -5947,9 +6038,12 @@ function buildExportScene() {
   // created with preserveDrawingBuffer, so the read itself is then safe).
   if (state.map && state.map.redraw) state.map.redraw();
   const canvases = [state.map.getCanvas()];
-  if (state.splitView && state.splitView.active && state.splitView.map) {
-    if (state.splitView.map.redraw) state.splitView.map.redraw();
-    canvases.push(state.splitView.map.getCanvas());
+  if (state.splitView && state.splitView.active) {
+    const maps = state.splitView.getMaps ? state.splitView.getMaps() : (state.splitView.map ? [state.splitView.map] : []);
+    for (const map of maps) {
+      if (map.redraw) map.redraw();
+      canvases.push(map.getCanvas());
+    }
   }
   // Alert overlays: if the full briefing is open, capture the whole detail view
   // as it appears on screen (a side panel over the scope). Otherwise, if the
@@ -5957,7 +6051,12 @@ function buildExportScene() {
   // briefing" footer). The full briefing takes precedence over the card.
   const briefing = state.alerts ? state.alerts.exportDetail() : null;
   const alert = briefing ? null : (state.alerts ? state.alerts.exportPreview() : null);
-  return { canvases, caption: buildExportCaption(), legendEl: el.legend, alert, briefing, theme: exportTheme() };
+  // Per-pane product ids so multi-pane exports can label each pane (the live
+  // pane badges are DOM overlays and never reach the captured canvases).
+  const paneLabels = state.splitView && state.splitView.active && state.splitView.paneProducts
+    ? state.splitView.paneProducts()
+    : null;
+  return { canvases, paneLabels, caption: buildExportCaption(), legendEl: el.legend, alert, briefing, theme: exportTheme() };
 }
 
 // Describe what's on screen for the export banner: a title, a product/source
@@ -6063,7 +6162,7 @@ const KEYBIND_SCOPES = ['global', 'radar', 'satellite', 'mrms', 'models'];
 
 const DEFAULT_KEYBINDS = {
   global: {
-    'Shift+KeyI': 'tool:inspect',
+    'KeyI': 'tool:inspect',
     'KeyT': 'tool:storm',
     'KeyM': 'tool:measure',
     'KeyD': 'tool:draw',
@@ -6112,6 +6211,7 @@ const PLAYBACK_ACTIONS = [
 ];
 
 const TOOL_KEYBIND_MIGRATIONS = [
+  ['Shift+KeyI', 'KeyI', 'tool:inspect'],
   ['Shift+Digit1', 'KeyT', 'tool:storm'],
   ['Shift+Digit2', 'KeyM', 'tool:measure'],
   ['Shift+Digit3', 'KeyD', 'tool:draw'],
@@ -6205,10 +6305,10 @@ function initKeybinds() {
   // Existing users may have a saved shortcut map from before inspect was
   // bindable. Add the new default only when it does not collide with a custom
   // combo or an already-bound inspect action.
-  if (stored && !findActionForCombo('Shift+KeyI')) {
+  if (stored && !findActionForCombo('KeyI')) {
     const hasInspect = KEYBIND_SCOPES.some((scope) =>
       Object.values(state.keybinds[scope] || {}).includes('tool:inspect'));
-    if (!hasInspect) state.keybinds.global['Shift+KeyI'] = 'tool:inspect';
+    if (!hasInspect) state.keybinds.global['KeyI'] = 'tool:inspect';
   }
 }
 
@@ -6863,8 +6963,13 @@ function setToggleBtn(btn, on) {
 function updateLayoutSwitchUI() {
   if (!el.layoutSwitch) return;
   const split = !!(state.splitView && state.splitView.active);
+  const paneCount = split ? (state.splitView.paneCount || 2) : 1;
   el.layoutSwitch.querySelectorAll('.layout-btn').forEach((b) => {
-    b.classList.toggle('active', (b.dataset.layout === 'split2') === split);
+    const active =
+      (!split && b.dataset.layout === 'single') ||
+      (split && paneCount === 2 && b.dataset.layout === 'split2') ||
+      (split && paneCount === 4 && b.dataset.layout === 'quad4');
+    b.classList.toggle('active', active);
   });
 }
 
@@ -7205,9 +7310,10 @@ function init() {
   setupDockTools();
 
   // ---- Mobile dock + sheet + playback + inspect wiring ----
-  el.dockStatus.addEventListener('click', () =>
-    el.sheet.hidden ? openSheet() : closeSheet()
-  );
+  el.dockStatus.addEventListener('click', () => {
+    if (!mqSmallScreen.matches) return;
+    el.sheet.hidden ? openSheet() : closeSheet();
+  });
   el.sheetScrim.addEventListener('click', closeSheet);
   el.sheetGrip.addEventListener('click', closeSheet);
   enableSheetSwipe();
@@ -7244,6 +7350,7 @@ function init() {
     });
   }
   el.inspectBtn.addEventListener('click', () => toggleInspect());
+  if (el.toolInspect) el.toolInspect.addEventListener('click', () => toggleInspect());
 
   // ---- Model sounding launcher: right-click (desktop) / long-press (mobile) ----
   // In models mode, opening a sounding is a map gesture on the point of interest

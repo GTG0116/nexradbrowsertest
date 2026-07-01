@@ -42,9 +42,15 @@ export class ExportTool {
     const legend = readLegend(scene.legendEl);
     const theme = normalizeTheme(scene.theme);
 
+    // Pane grid: 4 panes compose as a 2×2 grid (matching the on-screen quad
+    // layout — panes 1/2 on top, 3/4 below); anything else stays one row.
     const gap = maps.length > 1 ? 2 : 0;
-    const mapW = maps.reduce((s, c) => s + c.width, 0) + gap * (maps.length - 1);
-    const mapH = Math.max(...maps.map((c) => c.height));
+    const cols = maps.length === 4 ? 2 : maps.length;
+    const rows = Math.ceil(maps.length / cols);
+    const cellW = Math.max(...maps.map((c) => c.width));
+    const cellH = Math.max(...maps.map((c) => c.height));
+    const mapW = cols * cellW + gap * (cols - 1);
+    const mapH = rows * cellH + gap * (rows - 1);
 
     // Size the banners relative to the image width so the layout keeps the same
     // proportions whatever the map's resolution/DPR — with a floor so a small
@@ -57,15 +63,30 @@ export class ExportTool {
     const mobile =
       typeof window !== 'undefined' &&
       Math.min(window.innerWidth || Infinity, window.innerHeight || Infinity) <= 820;
-    const u = mobile
-      ? clamp(mapW / 44, 22, 40) // phones: chunkier, readable banners
-      : clamp(mapW / 78, 13, 30); // base text unit, ~px
+    // Sized so the banner text stays clearly readable when the image is
+    // shared/downscaled to a phone timeline, but capped against the map height
+    // so a short capture isn't dominated by the bands.
+    const u = Math.min(
+      mobile
+        ? clamp(mapW / 34, 28, 56) // phones: chunkier, readable banners
+        : clamp(mapW / 42, 22, 56), // base text unit, ~px
+      Math.max(18, mapH / 12));
     const padX = Math.round(u * 1.4);
     const headerH = Math.round(u * 4.4);
     const footerH = Math.round(legend ? u * 4.6 : u * 2.4);
 
+    // Desktop alert briefings make the stage yield room to the side panel.
+    // Mirror that in the export: draw the briefing beside the pane grid instead
+    // of over the left column, or quad/split exports lose the left panes.
+    const dockBriefing = !!scene.briefing && !mobile;
+    const briefingW = scene.briefing
+      ? briefingPanelWidth(mapW, u, mobile, maps.length > 1)
+      : 0;
+    const mapX = dockBriefing ? briefingW : 0;
+    const outW = mapW + (dockBriefing ? briefingW : 0);
+
     const out = document.createElement('canvas');
-    out.width = mapW;
+    out.width = outW;
     out.height = headerH + mapH + footerH;
     const ctx = out.getContext('2d');
     ctx.fillStyle = theme.bg;
@@ -76,18 +97,42 @@ export class ExportTool {
     ctx.fillRect(0, 0, out.width, headerH);
     drawHeader(ctx, cap, out.width, headerH, u, padX, theme);
 
-    // The map panes.
-    let x = 0;
-    for (const c of maps) {
-      ctx.drawImage(c, x, headerH, c.width, c.height);
-      x += c.width + gap;
+    // The map panes, laid out on the grid (centred in their cell if smaller).
+    maps.forEach((c, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const px = mapX + col * (cellW + gap) + Math.round((cellW - c.width) / 2);
+      const py = headerH + row * (cellH + gap) + Math.round((cellH - c.height) / 2);
+      ctx.drawImage(c, px, py, c.width, c.height);
+    });
+
+    // Multi-pane exports lose the on-screen pane badges (DOM overlays, not part
+    // of the canvas), so stamp each pane's product in its top-left corner.
+    if (maps.length > 1 && scene.paneLabels && scene.paneLabels.length) {
+      maps.forEach((c, i) => {
+        const label = scene.paneLabels[i];
+        if (!label) return;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        drawPaneTag(ctx, String(label),
+          mapX + col * (cellW + gap), headerH + row * (cellH + gap), u, theme);
+      });
     }
 
     // The full alert briefing reproduced as the on-screen side panel takes
     // precedence; otherwise the floating preview card is stamped over the map
     // near the bottom (matching where it sits live), without its "View full
     // briefing" footer.
-    if (scene.briefing) drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
+    if (scene.briefing) {
+      if (dockBriefing) {
+        drawAlertBriefing(ctx, scene.briefing, 0, headerH, briefingW, mapH, u, mobile, theme, {
+          panelW: briefingW,
+          compact: maps.length > 1,
+        });
+      } else {
+        drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
+      }
+    }
     else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile, theme);
 
     // Footer band: legend (left) + credit/timestamp (right), measured so they
@@ -269,38 +314,63 @@ function drawHeader(ctx, cap, W, H, u, padX, theme) {
   if (cap.time) {
     ctx.textAlign = 'right';
     ctx.fillStyle = AZURE;
-    ctx.font = `700 ${Math.round(u * 1.05)}px ${MONO}`;
+    ctx.font = `700 ${Math.round(u * 1.1)}px ${MONO}`;
     ctx.fillText(cap.time, W - padX, midY);
     timeLeft = W - padX - ctx.measureText(cap.time).width;
   }
 
-  // Title + sub (middle block) between the wordmark and the time.
+  // Title + sub (middle block) between the wordmark and the time. The sub-line
+  // carries the product/source details, so it gets nearly title-sized text —
+  // it must survive social-media downscaling too.
   const tx = brandRight + Math.round(u * 1.3);
   const availW = timeLeft - Math.round(u * 1.3) - tx;
   if (availW > u * 2) {
     ctx.textAlign = 'left';
     ctx.fillStyle = theme.text;
-    ctx.font = `700 ${Math.round(u * 1.25)}px ${SANS}`;
-    ctx.fillText(clip(ctx, cap.title || '', availW), tx, Math.round(H * 0.36));
+    ctx.font = `700 ${Math.round(u * 1.32)}px ${SANS}`;
+    ctx.fillText(clip(ctx, cap.title || '', availW), tx, Math.round(H * 0.34));
     ctx.fillStyle = theme.dim;
-    ctx.font = `500 ${Math.round(u * 0.82)}px ${SANS}`;
-    ctx.fillText(clip(ctx, cap.sub || '', availW), tx, Math.round(H * 0.68));
+    ctx.font = `600 ${Math.round(u * 0.98)}px ${SANS}`;
+    ctx.fillText(clip(ctx, cap.sub || '', availW), tx, Math.round(H * 0.7));
   }
   ctx.textAlign = 'left';
+}
+
+// Small product chip stamped in a pane's top-left corner on multi-pane exports
+// (the live pane badges are DOM overlays, so they never reach the canvas).
+function drawPaneTag(ctx, label, paneX, paneY, u, theme) {
+  const fs = Math.round(u * 0.85);
+  ctx.font = `700 ${fs}px ${MONO}`;
+  const padX = Math.round(u * 0.55);
+  const w = Math.ceil(ctx.measureText(label).width) + padX * 2;
+  const h = Math.round(u * 1.5);
+  const x = paneX + Math.round(u * 0.6);
+  const y = paneY + Math.round(u * 0.6);
+  roundRectPath(ctx, x, y, w, h, Math.round(u * 0.35));
+  ctx.fillStyle = 'rgba(8,11,17,0.82)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = Math.max(1, Math.round(u / 20));
+  ctx.stroke();
+  ctx.fillStyle = theme.accent;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + padX, y + h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
 }
 
 // Legend: caption above a gradient bar with low/mid/high ticks beneath. Returns
 // the x of its right edge so the credit can be placed clear of it.
 function drawLegend(ctx, legend, x, y, H, u, maxW, theme) {
   const barW = Math.round(clamp(maxW * 0.42, u * 8, u * 16));
-  const barH = Math.round(u * 0.62);
+  const barH = Math.round(u * 0.7);
   const barY = y + Math.round(H * 0.42);
 
   // Caption above the bar.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = theme.dim;
-  ctx.font = `600 ${Math.round(u * 0.72)}px ${MONO}`;
+  ctx.font = `600 ${Math.round(u * 0.85)}px ${MONO}`;
   ctx.fillText(clip(ctx, (legend.title || '').toUpperCase(), barW + u * 4), x, barY - Math.round(u * 0.45));
 
   // Gradient bar.
@@ -317,7 +387,7 @@ function drawLegend(ctx, legend, x, y, H, u, maxW, theme) {
   // Low / mid / high ticks under the bar.
   const ticks = legend.ticks || [];
   ctx.fillStyle = theme.faint;
-  ctx.font = `400 ${Math.round(u * 0.7)}px ${MONO}`;
+  ctx.font = `500 ${Math.round(u * 0.85)}px ${MONO}`;
   const ty = barY + barH + Math.round(u * 0.95);
   if (ticks[0]) { ctx.textAlign = 'left'; ctx.fillText(ticks[0], x, ty); }
   if (ticks[1]) { ctx.textAlign = 'center'; ctx.fillText(ticks[1], x + barW / 2, ty); }
@@ -334,7 +404,7 @@ function drawCredit(ctx, cap, minX, maxX, y, H, u, theme) {
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = theme.faint;
-  ctx.font = `400 ${Math.round(u * 0.72)}px ${MONO}`;
+  ctx.font = `500 ${Math.round(u * 0.8)}px ${MONO}`;
   const full = `${cap.stamp || ''}  ·  radarnexus`;
   const text = ctx.measureText(full).width <= avail ? full : (cap.stamp || '');
   ctx.fillText(clip(ctx, text, avail), maxX, y + H / 2);
@@ -428,8 +498,10 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile, theme) {
 // sees. The panel runs the full height of the map region and its content is
 // clipped to that box (rendered from the top, like the live panel scrolled to
 // its start). On phones the live panel is full-width, so the export panel is too.
-function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme) {
-  const panelW = mobile ? mapW : Math.round(clamp(mapW * 0.36, u * 16, u * 30));
+function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opts = {}) {
+  const panelW = opts.panelW || briefingPanelWidth(mapW, u, mobile, opts.multiPane);
+  const compact = !!opts.compact;
+  if (compact) u = Math.min(u, clamp(panelW / 22, 16, 25));
   const x0 = mapX;
   const y0 = mapY;
   const panelH = mapH;
@@ -465,18 +537,19 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme) {
   }
 
   // Coloured header band: warning icon + (wrapping) event title.
-  const headH = Math.round(u * 3.0);
+  const headH = Math.round(u * (compact ? 3.6 : 3.0));
   ctx.fillStyle = b.color || '#e0152d';
   ctx.fillRect(x0, y, panelW, headH);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.fillStyle = '#fff';
-  ctx.font = `700 ${Math.round(u * 1.3)}px ${SANS}`;
+  ctx.font = `700 ${Math.round(u * (compact ? 1.1 : 1.3))}px ${SANS}`;
   ctx.fillText('⚠', x0 + pad, y + headH / 2);
   const hx = x0 + pad + ctx.measureText('⚠').width + Math.round(u * 0.5);
-  ctx.font = `700 ${Math.round(u * 1.12)}px ${SANS}`;
-  const titleLines = wrapText(ctx, (b.title || '').toUpperCase(), x0 + panelW - pad - hx).slice(0, 2);
-  const tlh = Math.round(u * 1.3);
+  ctx.font = `700 ${Math.round(u * (compact ? 0.95 : 1.12))}px ${SANS}`;
+  const titleLines = wrapText(ctx, (b.title || '').toUpperCase(), x0 + panelW - pad - hx)
+    .slice(0, compact ? 3 : 2);
+  const tlh = Math.round(u * (compact ? 1.05 : 1.3));
   let ty = y + headH / 2 - ((titleLines.length - 1) * tlh) / 2;
   for (const ln of titleLines) {
     ctx.fillText(ln, hx, ty);
@@ -649,6 +722,15 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+function briefingPanelWidth(mapW, u, mobile, multiPane = false) {
+  if (mobile) return mapW;
+  return Math.round(
+    multiPane
+      ? clamp(mapW * 0.34, u * 12, u * 16)
+      : clamp(mapW * 0.36, u * 16, u * 30)
+  );
 }
 
 function normalizeTheme(theme) {

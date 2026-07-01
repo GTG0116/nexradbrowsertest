@@ -102,7 +102,16 @@ function downsample(grid, values) {
       out[j * w + i] = n ? sum / n : NaN;
     }
   }
-  return { v: out, w, h, lon1, lat1, di: di * sx, dj: dj * sy };
+  // Each output cell averages an sx×sy block of source cells; anchor it at the
+  // block's *center*, not the block's first (north-west) cell. Anchoring on the
+  // first cell dragged every contour/H-L marker ~half a block west and north —
+  // most visible on coarse grids like the 12 km NAM.
+  return {
+    v: out, w, h,
+    lon1: lon1 + ((sx - 1) / 2) * di,
+    lat1: lat1 - ((sy - 1) / 2) * dj,
+    di: di * sx, dj: dj * sy,
+  };
 }
 
 // Linear crossing point between two grid corners for a contour level.
@@ -380,19 +389,30 @@ export function setupModelOverlayLayers(map, anchor) {
       id: 'pressure-centers', type: 'symbol', source: 'pressure-centers',
       layout: {
         visibility: 'none',
-        'text-field': ['format',
-          ['get', 'kind'], { 'font-scale': 1 },
-          '\n', {},
-          ['concat', ['to-string', ['get', 'pressure']], ' mb'], { 'font-scale': 0.42 },
-        ],
+        'text-field': ['get', 'kind'],
         'text-size': 30,
-        'text-line-height': 0.82,
         'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
         'text-allow-overlap': true, 'text-ignore-placement': true,
       },
       paint: {
         'text-color': ['match', ['get', 'kind'], 'H', '#c92a2a', 'L', '#1864ab', '#111318'],
         'text-halo-color': 'rgba(255,255,255,0.9)', 'text-halo-width': 2,
+      },
+    }, anchor);
+  if (!map.getLayer('pressure-center-labels'))
+    map.addLayer({
+      id: 'pressure-center-labels', type: 'symbol', source: 'pressure-centers',
+      layout: {
+        visibility: 'none',
+        'text-field': ['concat', ['to-string', ['get', 'pressure']], ' mb'],
+        'text-size': 12,
+        'text-offset': [0, 1.35],
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-allow-overlap': true, 'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': ['match', ['get', 'kind'], 'H', '#c92a2a', 'L', '#1864ab', '#111318'],
+        'text-halo-color': 'rgba(255,255,255,0.92)', 'text-halo-width': 1.6,
       },
     }, anchor);
 }
@@ -432,7 +452,8 @@ export function showPreparedModelOverlays(map, data) {
   if (map.getLayer('wind-barbs')) map.setLayoutProperty('wind-barbs', 'visibility', data.hasWind ? 'visible' : 'none');
   for (const id of ['mslp-contours', 'mslp-labels'])
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasMslp ? 'visible' : 'none');
-  if (map.getLayer('pressure-centers')) map.setLayoutProperty('pressure-centers', 'visibility', data.hasMslp ? 'visible' : 'none');
+  for (const id of ['pressure-centers', 'pressure-center-labels'])
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasMslp ? 'visible' : 'none');
   for (const id of ['wind-contours', 'wind-contour-labels'])
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', data.hasWindContours ? 'visible' : 'none');
 }
@@ -444,7 +465,7 @@ export function renderModelOverlays(map, grid) {
 
 export function clearModelOverlays(map) {
   for (const id of ['hgt-contours', 'hgt-labels', 'wind-barbs', 'mslp-contours', 'mslp-labels',
-    'pressure-centers', 'wind-contours', 'wind-contour-labels'])
+    'pressure-centers', 'pressure-center-labels', 'wind-contours', 'wind-contour-labels'])
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
   for (const id of ['hgt-contours', 'wind-barbs', 'mslp-contours', 'pressure-centers', 'wind-contours'])
     if (map.getSource(id)) map.getSource(id).setData(EMPTY);
