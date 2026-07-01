@@ -486,25 +486,11 @@ button {
   inset: 0;
   background: #04080f;
 }
-/* Flat backdrop for the top device inset (status bar / notch / Dynamic Island).
-   The map is full-bleed under a black-translucent status bar, so iOS/Safari
-   blurs the live map that shows through the status-bar glass into a band at the
-   top of the screen. Painting an opaque strip the exact height of the inset,
-   above the map but below all floating UI, gives that glass a uniform surface —
-   the blur then resolves to a single clean color instead of a smeared map. It
-   matches the map canvas (#04080f) so it reads as the map running clean to the
-   top edge, and keeps the white black-translucent status text legible. On
-   devices with no top inset the height is 0, so it renders nothing. */
-.ios-safe-top {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: env(safe-area-inset-top, 0px);
-  background: #04080f;
-  z-index: 400;
-  pointer-events: none;
-}
+/* The top device inset (status bar / notch / Dynamic Island) is left uncovered
+   so the full-bleed map runs clean under it — the live radar fills the whole
+   viewport up to the very top edge instead of sitting below an opaque band. iOS
+   still draws its black-translucent status text over the map there, which stays
+   legible against the dark radar canvas. */
 .mapboxgl-canvas {
   touch-action: none;
 }

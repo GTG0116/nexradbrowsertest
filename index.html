@@ -40,14 +40,6 @@
     <link rel="stylesheet" href="css/style.css" />
   </head>
   <body>
-    <!-- Opaque backdrop for the top safe-area (status bar / Dynamic Island).
-         With viewport-fit=cover + black-translucent, the live map runs edge to
-         edge under the status bar, and iOS/Safari draws its translucent "glass"
-         over whatever sits there — blurring the map into a band at the very top.
-         A flat, opaque strip the height of the top inset gives that glass a
-         uniform surface to sample, so the blur reads as a clean color instead of
-         a smeared map. Collapses to 0 height (no-op) on devices with no inset. -->
-    <div class="ios-safe-top" aria-hidden="true"></div>
     <!-- First-run gate: the viewer needs a Mapbox public access token, which the
          user supplies themselves (kept in localStorage) so the deployment carries
          no shared/billable key. Shown only when no token is stored yet. -->
