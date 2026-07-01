@@ -14,9 +14,9 @@ the radar imagery — entirely client-side.
   the NWS realtime feed and exposes volumes as they are ingested — so it carries
   the freshest scans. When IEM is unreachable or lacks data for the requested
   day (it keeps only a rolling window), the viewer transparently falls back to
-  the open `unidata-nexrad-level2` AWS S3 bucket (NOAA Open Data Dissemination),
-  which is CORS-enabled (`Access-Control-Allow-Origin: *`) and retains the recent
-  archive for history browsing.
+  NCEP NOMADS (`nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/`) and
+  uses the open `unidata-nexrad-level2` AWS S3 bucket (NOAA Open Data
+  Dissemination) only as the last resort for history browsing.
 - **Client-side bzip2** decompression of the LDM records (`js/bzip2.js`), a
   self-contained, dependency-free implementation (Huffman + MTF + RLE2 + inverse
   BWT + RLE1).
@@ -393,7 +393,7 @@ to the current day as soon as its first scan lands.
 ```
 index.html ─ css/style.css        UI shell + console styling
 js/app.js                         controller: UI, state, interaction
- ├─ js/s3.js                      list/download volumes (IEM live → AWS S3 fallback)
+ ├─ js/s3.js                      list/download volumes (IEM live → NOMADS → AWS fallback)
  ├─ js/products.js                color scales + LUTs per product
  ├─ js/radarLayer.js              custom WebGL layer: polar gates → GPU, per pixel
  ├─ js/renderer.js                sweep range + point-sample helpers
@@ -427,10 +427,12 @@ primary live source: it indexes each site's recent volumes in a `dir.list` file
 and serves them as ordinary AR2V Archive II files (the `.bz2` extension
 notwithstanding), often a scan or two ahead of the AWS mirror. It keeps only a
 rolling window and does not advertise CORS, so the viewer falls back to the
-Unidata AWS S3 mirror — which is CORS-enabled and retains a longer recent
-archive — whenever IEM is blocked, errors, or has no data for the requested day
-(as when browsing history). If a deployment's origin can't reach IEM directly
-because of CORS, point `setProxy()` in `js/s3.js` at a CORS proxy.
+NCEP NOMADS Level II feed (`nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/<SITE>/`)
+whenever IEM is blocked, errors, or has no data for the requested day. If NOMADS
+also fails or lacks the requested scan, the viewer uses the Unidata AWS S3 mirror
+— which is CORS-enabled and retains a longer recent archive — as the last resort
+(as when browsing history). If a deployment's origin can't reach IEM or NOMADS
+directly because of CORS, point `setProxy()` in `js/s3.js` at a CORS proxy.
 
 NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
 disables anonymous bucket listing, so it cannot be browsed from the client.

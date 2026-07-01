@@ -1,6 +1,6 @@
 // s3.js — discover and download NEXRAD Level II volumes for the live viewer.
 //
-// Two public sources are used, in priority order:
+// Three public sources are used, in priority order:
 //
 //   1. PRIMARY — the Iowa Environmental Mesonet (IEM) raw Level II feed at
 //      mesonet-nexrad.agron.iastate.edu/level2/raw/<SITE>/ . IEM relays the NWS
@@ -12,26 +12,35 @@
 //      AR2V "Archive II" files (internally bzip2-compressed LDM records), so the
 //      decoder reads them unchanged.
 //
-//   2. FALLBACK — Unidata's realtime full-volume feed `unidata-nexrad-level2`,
+//   2. FALLBACK — NCEP NOMADS' Level II radar feed at
+//      nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/<SITE>/ . It
+//      exposes Apache-style directory indexes plus `dir.list`, with volumes named
+//      like IEM (<SITE>_YYYYMMDD_HHMMSS.bz2).
+//
+//   3. LAST RESORT — Unidata's realtime full-volume feed `unidata-nexrad-level2`,
 //      mirrored openly on AWS as part of the NOAA Open Data Dissemination
 //      program. Objects are keyed  YYYY/MM/DD/SITE/SITEYYYYMMDD_HHMMSS_V06  and
 //      the bucket returns `Access-Control-Allow-Origin: *` for listing and GET.
 //
-// IEM is tried first. We fall back to the AWS bucket whenever IEM is unreachable
+// IEM is tried first. We fall back to NOMADS and then the AWS bucket whenever
+// IEM is unreachable
 // (it does not advertise CORS, so a cross-origin browser fetch can be blocked —
 // set a proxy below if so), errors out, or simply has no data for the requested
 // UTC day. That last case covers history browsing: IEM keeps only a rolling
-// window, while AWS retains the full recent archive.
+// window, while NOMADS provides another realtime feed and AWS retains the full
+// recent archive.
 //
 // (NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
 // disables anonymous bucket listing, so it can't be browsed from the client.)
 
 const IEM_BASE = 'https://mesonet-nexrad.agron.iastate.edu/level2/raw';
+const NOMADS_BASE = 'https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2';
 const BUCKET = 'https://unidata-nexrad-level2.s3.amazonaws.com';
 
-// Keys for IEM volumes carry this prefix so fetchVolume can route them back to
-// the right source; AWS keys are bare S3 object keys.
+// Keys for IEM/NOMADS volumes carry a prefix so fetchVolume can route them back
+// to the right source; AWS keys are bare S3 object keys.
 const IEM_PREFIX = 'iem:';
+const NOMADS_PREFIX = 'nomads:';
 
 // Optional CORS proxy. Left empty: we talk to each source directly. If a user's
 // network blocks a source, they can set a proxy prefix here.
@@ -48,13 +57,20 @@ function pad(n) {
 }
 
 // List the volume scan keys for a given site and UTC day, newest last. Prefers
-// the IEM feed and falls back to the AWS bucket when IEM has nothing usable.
+// the IEM feed, then NOMADS, and falls back to the AWS bucket when neither has
+// anything usable.
 export async function listVolumes(site, date) {
   try {
     const vols = await listVolumesIem(site, date);
     if (vols.length) return vols;
   } catch (e) {
-    console.warn('IEM list failed, falling back to AWS:', e.message);
+    console.warn('IEM list failed, falling back to NOMADS:', e.message);
+  }
+  try {
+    const vols = await listVolumesNomads(site, date);
+    if (vols.length) return vols;
+  } catch (e) {
+    console.warn('NOMADS list failed, falling back to AWS:', e.message);
   }
   return listVolumesAws(site, date);
 }
@@ -91,7 +107,39 @@ async function listVolumesIem(site, date) {
   return vols;
 }
 
-// --- AWS S3 (fallback) ---------------------------------------------------
+
+// --- NCEP NOMADS (secondary fallback) ------------------------------------
+
+async function listVolumesNomads(site, date) {
+  const SITE = site.toUpperCase();
+  const res = await fetch(viaProxy(`${NOMADS_BASE}/${SITE}/dir.list`));
+  if (!res.ok) throw new Error(`NOMADS list failed: ${res.status}`);
+  const text = await res.text();
+
+  const y = date.getUTCFullYear();
+  const m = pad(date.getUTCMonth() + 1);
+  const d = pad(date.getUTCDate());
+  const day = `${y}${m}${d}`;
+
+  const vols = [];
+  for (const line of text.split('\n')) {
+    // NOMADS dir.list follows the same "<bytes> <filename>" shape as IEM.
+    const name = line.trim().split(/\s+/).pop();
+    if (!name || !name.endsWith('.bz2')) continue;
+    const t = timeForName(name);
+    if (!t) continue;
+    if (name.indexOf(`_${day}_`) === -1) continue;
+    vols.push({
+      key: `${NOMADS_PREFIX}${SITE}/${name}`,
+      label: labelForTime(t),
+      time: t,
+    });
+  }
+  vols.sort((a, b) => a.time - b.time);
+  return vols;
+}
+
+// --- AWS S3 (last resort) -----------------------------------------------
 
 async function listVolumesAws(site, date) {
   const y = date.getUTCFullYear();
@@ -128,12 +176,26 @@ async function listVolumesAws(site, date) {
 // if none can be found (used to flag "down" radars on the map). Prefers the IEM
 // dir.list — a rolling recent window, so it answers in one small fetch and isn't
 // fooled by the day boundary (a radar that last scanned at 23:55Z still shows up
-// just after 00Z). Falls back to the AWS bucket (today, then yesterday) when IEM
-// is unreachable (e.g. blocked by CORS) or empty.
+// just after 00Z). Falls back to NOMADS, then the AWS bucket (today, then
+// yesterday) when IEM is unreachable (e.g. blocked by CORS) or empty.
 export async function latestScanTime(site) {
   try {
     const SITE = site.toUpperCase();
     const res = await fetch(viaProxy(`${IEM_BASE}/${SITE}/dir.list`));
+    if (res.ok) {
+      const text = await res.text();
+      let newest = null;
+      for (const line of text.split('\n')) {
+        const name = line.trim().split(/\s+/).pop();
+        const t = name && timeForName(name);
+        if (t && (!newest || t > newest)) newest = t;
+      }
+      if (newest) return newest;
+    }
+  } catch (_) { /* fall through to NOMADS */ }
+  try {
+    const SITE = site.toUpperCase();
+    const res = await fetch(viaProxy(`${NOMADS_BASE}/${SITE}/dir.list`));
     if (res.ok) {
       const text = await res.text();
       let newest = null;
@@ -253,8 +315,8 @@ async function downloadBytes(fullUrl, onProgress) {
 }
 
 // Download one volume scan as raw bytes, reporting progress 0..1. The key picks
-// the source: IEM keys are prefixed (see IEM_PREFIX), AWS keys are bare. If an
-// IEM scan fails (outage/timeout) we retry the equivalent AWS mirror object
+// the source: IEM/NOMADS keys are prefixed, AWS keys are bare. If an IEM or
+// NOMADS scan fails (outage/timeout) we retry the equivalent AWS mirror object
 // once before giving up.
 export async function fetchVolume(key, onProgress) {
   if (key.startsWith(IEM_PREFIX)) {
@@ -264,7 +326,23 @@ export async function fetchVolume(key, onProgress) {
     } catch (e) {
       const awsKey = awsKeyForIemName(path.split('/').pop());
       if (!awsKey) throw e;
-      console.warn('IEM volume fetch failed, trying AWS mirror:', e.message);
+      console.warn('IEM volume fetch failed, trying NOMADS then AWS mirror:', e.message);
+      try {
+        return await downloadBytes(`${NOMADS_BASE}/${path}`, onProgress);
+      } catch (nomadsError) {
+        console.warn('NOMADS volume fetch failed, trying AWS mirror:', nomadsError.message);
+        return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
+      }
+    }
+  }
+  if (key.startsWith(NOMADS_PREFIX)) {
+    const path = key.slice(NOMADS_PREFIX.length);
+    try {
+      return await downloadBytes(`${NOMADS_BASE}/${path}`, onProgress);
+    } catch (e) {
+      const awsKey = awsKeyForIemName(path.split('/').pop());
+      if (!awsKey) throw e;
+      console.warn('NOMADS volume fetch failed, trying AWS mirror:', e.message);
       return downloadBytes(`${BUCKET}/${awsKey}`, onProgress);
     }
   }
