@@ -18,6 +18,7 @@ import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from './mrms.js';
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, loadModel, forecastHours,
   modelSupports, defaultProductFor } from './models.js';
+import { OBS_PRODUCTS, OBS_CATEGORIES, listObservations, loadObservation } from './observations.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
   prepareModelOverlayData, showPreparedModelOverlays } from './modelOverlays.js';
@@ -43,6 +44,7 @@ function isSmallScreenNow() {
 
 const MODEL_CITY_VALUE_SOURCE = 'model-city-values';
 const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
+const GRID_CITY_VALUE_MODES = new Set(['models', 'observations']);
 
 // ---------------------------------------------------------------------------
 // Basemap — Mapbox GL JS vector styles. Rendering with GL (rather than raster
@@ -63,9 +65,14 @@ let MAPBOX_TOKEN = '';
 function getStoredMapProvider() {
   try {
     const provider = (localStorage.getItem(MAP_PROVIDER_KEY) || '').trim();
-    return provider === 'maptiler' ? 'maptiler' : 'mapbox';
+    if (provider === 'maptiler' || provider === 'mapbox') return provider;
+    // No explicit choice yet. Honor a legacy Mapbox token from before the
+    // provider key existed; otherwise default new users to MapTiler, whose
+    // free keys are the easier of the two to obtain.
+    if ((localStorage.getItem(MAPBOX_TOKEN_KEY) || '').trim()) return 'mapbox';
+    return 'maptiler';
   } catch {
-    return 'mapbox';
+    return 'maptiler';
   }
 }
 function getStoredMapToken(provider = getStoredMapProvider()) {
@@ -508,8 +515,9 @@ function setupOverlays(map) {
   else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
   else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
   else if (state.mode === 'models' && state.models.grid) renderModels();
+  else if (state.mode === 'observations' && state.observations.grid) renderObservations();
   // Re-apply the single-site radar overlay if it's enabled in a non-radar mode.
-  if (state.mode !== 'radar' && state.radarOverlay) applyRadarOverlay();
+  if (state.mode !== 'radar' && state.mode !== 'outlooks' && state.radarOverlay) applyRadarOverlay();
   if (state.alerts) state.alerts.refreshVisible();
   if (state.spc) state.spc.reapply();
 }
@@ -582,7 +590,7 @@ const state = {
   l3: { decoded: null },
   productId: 'REF',
   opacity: 0.85,
-  // Smoothing level for the plotted data (radar / satellite / model / MRMS):
+  // Smoothing level for the plotted data (radar / satellite / grid sources):
   // 0 none (crisp native pixels), 1 low, 2 medium, 3 high. Opt-in; defaults off.
   smooth: 0,
   // Unfold aliased velocities by default: without this, gates beyond the Nyquist
@@ -614,7 +622,7 @@ const state = {
   // Persist the map view, last product and settings between visits (toggleable).
   persist: true,
   radarLayer: null,
-  // In satellite / MRMS / model modes the single-site radar is hidden unless
+  // In satellite / MRMS / model / observation modes the single-site radar is hidden unless
   // this overlay toggle is switched on.
   radarOverlay: false,
   modelCityValues: true,
@@ -633,6 +641,8 @@ const state = {
   // Outlook fill shading opacity (0–1), user-adjustable + persisted. The risk-area
   // boundaries (outline) stay full so they read even at a faint fill.
   spcOpacity: 0.3,
+  _outlookSourceForced: false,
+  _outlookSourcePrevOn: null,
   shownSweep: null,
   shownSite: null,
   inspect: false,
@@ -654,7 +664,7 @@ const state = {
   _storedKeybinds: null,
   weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', expanded: false, touchStart: null, touchMove: null, anim: null },
 
-  // Source mode: 'radar' | 'satellite' | 'mrms' | 'models'.
+  // Source mode: 'radar' | 'satellite' | 'mrms' | 'models' | 'observations' | 'outlooks'.
   mode: 'radar',
   // Satellite (GOES ABI) state.
   sat: {
@@ -691,6 +701,14 @@ const state = {
     overlayData: null,
     layer: null,
   },
+  observations: {
+    productId: 'TMP',
+    frames: [],
+    frameKey: null,
+    grid: null,
+    displayGrid: null,
+    layer: null,
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -719,6 +737,7 @@ function cacheEls() {
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
   el.opacityVal = $('#opacityVal');
+  el.overlayOpacityField = $('#overlayOpacityField') || (el.opacity && el.opacity.closest('.opacity-field'));
   el.smooth = $('#smooth');
   el.smoothVal = $('#smoothVal');
   el.ringsToggle = $('#ringsToggle');
@@ -761,12 +780,15 @@ function cacheEls() {
   el.spcToggle = $('#spcToggle');
   el.outlookSelect = $('#outlookSelect');
   el.outlookDetail = $('#outlookDetail');
+  el.outlookDetailLabel = $('#outlookDetailLabel');
+  el.outlookDayField = $('#outlookDayField');
+  el.outlookDay = $('#outlookDay');
   el.spcOpacity = $('#spcOpacity');
   el.spcOpacityVal = $('#spcOpacityVal');
   el.spcStatus = $('#spcStatus');
   el.spcLegend = $('#spcLegend');
 
-  // Source modes (radar / satellite / MRMS).
+  // Source modes (radar / satellite / MRMS / models / observations / outlooks).
   el.modeSwitch = $('#modeSwitch');
   el.siteField = $('#siteField');
   el.satFields = $('#satFields');
@@ -775,10 +797,13 @@ function cacheEls() {
   el.conusViewField = $('#conusViewField');
   el.conusViewSelect = $('#conusViewSelect');
   el.mrmsFields = $('#mrmsFields');
+  el.obsFields = $('#obsFields');
   el.modelFields = $('#modelFields');
   el.modelSelect = $('#modelSelect');
   el.fhourPanel = $('#fhourPanel');
   el.fhourList = $('#fhourList');
+  el.outlookDetailPanel = $('#outlookDetailPanel');
+  el.outlookDetailList = $('#outlookDetailList');
   el.volumeTitle = $('#volumeTitle');
   el.tiltPanel = $('#tiltPanel');
   el.satOptsPanel = $('#satOptsPanel');
@@ -1234,10 +1259,12 @@ function buildSiteSelect() {
 // the right one.
 function activeProductId() {
   const sv = state.splitView;
-  if (sv && sv.active && sv.activePane === 2) return sv.productId;
+  if (sv && sv.active && sv.activePane === 2 &&
+      state.mode !== 'observations' && state.mode !== 'outlooks') return sv.productId;
   if (state.mode === 'satellite') return state.sat.productId;
   if (state.mode === 'mrms') return state.mrms.productId;
   if (state.mode === 'models') return state.models.productId;
+  if (state.mode === 'observations') return state.observations.productId;
   return state.productId;
 }
 
@@ -1246,6 +1273,7 @@ function activeProductId() {
 function routeProductToPane(id) {
   const sv = state.splitView;
   if (!(sv && sv.active && sv.activePane === 2)) return false;
+  if (state.mode === 'observations' || state.mode === 'outlooks') return false;
   document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
   sv.setProduct(id);
   return true;
@@ -1319,6 +1347,8 @@ function buildProductButtons() {
   if (state.mode === 'satellite') return buildSatProductButtons();
   if (state.mode === 'mrms') return buildMrmsProductButtons();
   if (state.mode === 'models') return buildModelProductButtons();
+  if (state.mode === 'observations') return buildObservationProductButtons();
+  if (state.mode === 'outlooks') return buildOutlookProductButtons();
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-stack';
   const avail = new Set(availableProductOrder());
@@ -1404,6 +1434,8 @@ function buildLegend() {
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   if (state.mode === 'models') return buildModelLegend();
+  if (state.mode === 'observations') return buildObservationLegend();
+  if (state.mode === 'outlooks') return buildOutlookLegend();
   const p = radarProduct(state.productId);
   el.legend.innerHTML = legendHTML(p, p.scale);
   updateSplitPaneChrome();
@@ -1433,6 +1465,7 @@ function splitPaneProduct(id) {
   if (state.mode === 'radar') return PRODUCTS[id];
   if (state.mode === 'mrms') return MRMS_PRODUCTS[id] && resolveGridProduct(MRMS_PRODUCTS[id]);
   if (state.mode === 'models') return MODEL_PRODUCTS[id] && resolveGridProduct(MODEL_PRODUCTS[id]);
+  if (state.mode === 'observations') return OBS_PRODUCTS[id] && resolveGridProduct(OBS_PRODUCTS[id]);
   return null;
 }
 
@@ -2094,21 +2127,29 @@ function applyModePanels() {
   el.siteField.hidden = state.mode !== 'radar';
   el.satFields.hidden = state.mode !== 'satellite';
   el.mrmsFields.hidden = state.mode !== 'mrms';
+  if (el.obsFields) el.obsFields.hidden = state.mode !== 'observations';
   if (el.modelFields) el.modelFields.hidden = state.mode !== 'models';
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
+  // Outlook mode carries its day/product picker in a dedicated sidebar panel;
+  // the generic scan list (volumePanel) has nothing to show, so swap them.
+  if (el.outlookDetailPanel) el.outlookDetailPanel.hidden = state.mode !== 'outlooks';
+  if (el.volumePanel) el.volumePanel.hidden = state.mode === 'outlooks';
   el.satOptsPanel.hidden = state.mode !== 'satellite';
   // Keep the dock tool slot in sync with the active source.
   if (state._refreshDockTools) state._refreshDockTools();
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
   // The single-site radar overlay control only makes sense outside radar mode.
-  if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar';
-  if (el.modelCityValuesField) el.modelCityValuesField.hidden = state.mode !== 'models';
+  if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar' || state.mode === 'outlooks';
+  if (el.modelCityValuesField) el.modelCityValuesField.hidden = !GRID_CITY_VALUE_MODES.has(state.mode);
+  if (el.overlayOpacityField) el.overlayOpacityField.hidden = state.mode === 'outlooks';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
     state.mode === 'radar' ? 'Volume scans'
     : state.mode === 'satellite' ? 'Satellite scans'
-    : state.mode === 'mrms' ? 'MRMS frames' : 'Model runs';
+    : state.mode === 'mrms' ? 'MRMS frames'
+    : state.mode === 'models' ? 'Model runs'
+    : state.mode === 'observations' ? 'RTMA frames' : 'Outlook detail';
   document.querySelectorAll('.mode-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
 }
@@ -2117,11 +2158,15 @@ function setMode(mode) {
   if (state.mode === mode) return;
   if (state.playback && state.playback.active) state.playback.stop();
   cancelFrameWarm();
+  const prevMode = state.mode;
+  if (prevMode === 'outlooks' && mode !== 'outlooks') leaveOutlookSourceMode();
   state.mode = mode;
   if (mode !== 'satellite') clearSatellite();
   if (mode !== 'mrms') clearMrms();
   if (mode !== 'models') clearModels();
-  if (mode !== 'radar') applyRadarOverlay(); // hide radar unless its overlay is on
+  if (mode !== 'observations') clearObservations();
+  if (mode === 'outlooks') { clearRadarSource(state.map); drawRings(null, 0); }
+  else if (mode !== 'radar') applyRadarOverlay(); // hide radar unless its overlay is on
   applyModePanels();
   refreshSiteDots(); // show the radar dots only in radar mode
   buildProductButtons();
@@ -2139,6 +2184,10 @@ function setMode(mode) {
     loadMrmsList();
   } else if (mode === 'models') {
     loadModelList();
+  } else if (mode === 'observations') {
+    loadObservationList();
+  } else if (mode === 'outlooks') {
+    enterOutlookSourceMode();
   }
   if (state.splitView) state.splitView.onModeChange();
   updateMeta();
@@ -2151,7 +2200,9 @@ function refreshActive() {
   if (state.mode === 'radar') return loadVolumeList();
   if (state.mode === 'satellite') return loadSatScenes();
   if (state.mode === 'mrms') return loadMrmsList();
-  return loadModelList();
+  if (state.mode === 'models') return loadModelList();
+  if (state.mode === 'observations') return loadObservationList();
+  if (state.mode === 'outlooks') return refreshOutlookSource();
 }
 
 // ---------------------------------------------------------------------------
@@ -2653,6 +2704,188 @@ function buildMrmsLegend() {
 }
 
 // ---------------------------------------------------------------------------
+// Observations (RTMA)
+// ---------------------------------------------------------------------------
+const obsCatOpen = {};
+
+function buildObservationProductButtons() {
+  el.productButtons.innerHTML = '';
+  el.productButtons.className = 'product-stack';
+  const active = state.observations.productId;
+  for (const cat of OBS_CATEGORIES) {
+    const ids = cat.products.filter((id) => OBS_PRODUCTS[id]);
+    if (!ids.length) continue;
+    const hasActive = ids.includes(active);
+    const open = obsCatOpen[cat.id] != null ? !!obsCatOpen[cat.id] : hasActive;
+
+    const section = document.createElement('div');
+    section.className = 'product-cat-section' + (open ? '' : ' collapsed');
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'product-cat';
+    head.innerHTML = `<span class="cat-caret">▾</span><span>${cat.name}</span>`;
+    head.addEventListener('click', () => {
+      obsCatOpen[cat.id] = section.classList.toggle('collapsed') === false;
+    });
+    section.appendChild(head);
+
+    const grid = document.createElement('div');
+    grid.className = 'product-grid';
+    for (const id of ids) {
+      const p = OBS_PRODUCTS[id];
+      const btn = document.createElement('button');
+      btn.className = 'product-btn';
+      btn.dataset.id = id;
+      btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+      if (id === active) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        if (routeProductToPane(id)) return;
+        ensureLiveForSwitch();
+        cancelFrameWarm();
+        state.observations.productId = id;
+        document.querySelectorAll('.product-btn')
+          .forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+        buildObservationLegend();
+        loadObservationFrame(state.observations.frameKey);
+        saveSettings();
+      });
+      grid.appendChild(btn);
+    }
+    section.appendChild(grid);
+    el.productButtons.appendChild(section);
+  }
+}
+
+function buildObservationList() {
+  el.volumeList.innerHTML = '';
+  if (!state.observations.frames.length) {
+    el.volumeList.innerHTML = '<div class="empty">No RTMA frames found for this day.</div>';
+    return;
+  }
+  [...state.observations.frames].reverse().forEach((v) => {
+    const btn = document.createElement('button');
+    btn.className = 'vol-btn';
+    if (v.key === state.observations.frameKey) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.addEventListener('click', () => loadObservationFrame(v.key));
+    el.volumeList.appendChild(btn);
+  });
+}
+
+async function loadObservationList() {
+  if (state.mode !== 'observations') return;
+  setStatus('listing RTMA...', true);
+  buildObservationList();
+  try {
+    const when = state.live ? new Date() : state.date;
+    const frames = await listObservations(when);
+    state.observations.frames = frames;
+    buildObservationList();
+    setStatus(`${frames.length} RTMA frames`);
+    if (!frames.length) return;
+    scheduleFrameWarm();
+    const latest = frames[frames.length - 1].key;
+    if (state._forceLatest || !state.observations.grid || state.live) {
+      state._forceLatest = false;
+      loadObservationFrame(latest);
+    }
+  } catch (e) {
+    setStatus(`RTMA list error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+let observationLoadSeq = 0;
+async function loadObservationFrame(key) {
+  if (!key) return;
+  state.observations.frameKey = key;
+  buildObservationList();
+  const seq = ++observationLoadSeq;
+  const product = OBS_PRODUCTS[state.observations.productId];
+  setStatus(`downloading RTMA ${product ? product.name : ''}...`, true);
+  el.progress.style.width = '0%';
+  el.progress.classList.add('show');
+  try {
+    const grid = await loadObservation(state.observations.productId, key, (p) => {
+      el.progress.style.width = Math.round(p * 100) + '%';
+    });
+    if (seq !== observationLoadSeq || state.mode !== 'observations') return;
+    setStatus('decoding RTMA...', true);
+    el.decoding.classList.add('show');
+    state.observations.grid = grid;
+    renderObservations();
+    setStatus(`RTMA ${grid.product.name} loaded`);
+  } catch (e) {
+    if (seq === observationLoadSeq) setStatus(`RTMA error: ${e.message}`);
+    console.error(e);
+  } finally {
+    if (seq === observationLoadSeq) {
+      el.progress.classList.remove('show');
+      el.decoding.classList.remove('show');
+    }
+  }
+}
+
+function setObservationSource(map) {
+  if (!state.observations.layer) state.observations.layer = createGridLayer('observations');
+  if (!map.getLayer('observations'))
+    map.addLayer(state.observations.layer, dataLayerAnchor(map));
+}
+
+function clearObservations() {
+  state.observations.displayGrid = null;
+  if (state.observations.layer) state.observations.layer.clear();
+  clearModelCityValues();
+}
+
+function observationGridForReadouts() {
+  return (state.playback && state.playback.active && state.observations.displayGrid) ||
+    state.observations.grid;
+}
+
+function renderObservations() {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  const grid = state.observations.grid;
+  if (!grid) { clearObservations(); return; }
+  state.observations.displayGrid = grid;
+  setObservationSource(map);
+  state.observations.layer.setGrid(grid, resolveGridProduct(grid.product));
+  state.observations.layer.setOpacity(state.opacity);
+  state.observations.layer.setSmooth(state.smooth);
+  renderModelCityValues();
+  syncSplit();
+  updateDock();
+}
+
+function drawObservationPayload(payload) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  if (payload && payload.grid) state.observations.displayGrid = payload.grid;
+  setObservationSource(map);
+  state.observations.layer.showPrepared(payload);
+  state.observations.layer.setOpacity(state.opacity);
+  state.observations.layer.setSmooth(state.smooth);
+  renderModelCityValues();
+}
+
+function buildObservationLegend() {
+  const p = resolveGridProduct(OBS_PRODUCTS[state.observations.productId]);
+  el.legend.innerHTML = legendHTML(p, p.scale);
+  updateSplitPaneChrome();
+}
+
+function sampleObservationAt(lat, lon) {
+  const grid = observationGridForReadouts();
+  if (!grid) return null;
+  const p = resolveGridProduct(grid.product);
+  const v = sampleGridRaw(grid, lat, lon);
+  if (v == null) return { out: true };
+  if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no data', sub: p.id };
+  return { main: fmtValue(p, v), sub: `RTMA ${p.id}` };
+}
+
+// ---------------------------------------------------------------------------
 // Weather models (HRRR, NAM, NAM Nest, RAP, GFS)
 //
 // Models reuse the lat/lon grid layer and the time-list / opacity / playback
@@ -2917,6 +3150,7 @@ function setupModelCityValueLayer(map) {
 }
 
 function modelGridForReadouts() {
+  if (state.mode === 'observations') return observationGridForReadouts();
   return (state.playback && state.playback.active && state.models.displayGrid) || state.models.grid;
 }
 
@@ -3018,7 +3252,7 @@ function renderModelCityValues() {
   const grid = modelGridForReadouts();
   if (!map || !state.styleReady || !grid) return;
   setupModelCityValueLayer(map);
-  const on = state.mode === 'models' && state.modelCityValues;
+  const on = GRID_CITY_VALUE_MODES.has(state.mode) && state.modelCityValues;
   if (!on) { clearModelCityValues(); return; }
   map.getSource(MODEL_CITY_VALUE_SOURCE).setData(modelCityValueGeoJSON(grid));
   map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'visibility', 'visible');
@@ -3416,6 +3650,8 @@ function sampleActive(lat, lon) {
   if (state.mode === 'satellite') return sampleSatAt(lat, lon);
   if (state.mode === 'mrms') return sampleMrmsAt(lat, lon);
   if (state.mode === 'models') return sampleModelAt(lat, lon);
+  if (state.mode === 'observations') return sampleObservationAt(lat, lon);
+  if (state.mode === 'outlooks') return null;
   return sampleRadarAt(lat, lon);
 }
 
@@ -3523,6 +3759,26 @@ function dockInfo() {
       time: `F${String(currentModelFhour()).padStart(2, '0')}`,
     };
   }
+  if (state.mode === 'observations') {
+    const p = OBS_PRODUCTS[state.observations.productId];
+    const t = state.observations.frames.find((x) => x.key === state.observations.frameKey);
+    return {
+      prod: state.observations.productId,
+      name: p ? p.name : state.observations.productId,
+      source: 'RTMA',
+      time: t ? t.label : '—',
+    };
+  }
+  if (state.mode === 'outlooks') {
+    const product = state.spc && OUTLOOKS[state.spc.product];
+    const detail = state.spc && product && product.details.find((d) => d.id === state.spc.detail);
+    return {
+      prod: 'OUTLOOK',
+      name: detail ? detail.label : (product ? product.label : 'Forecast outlook'),
+      source: product ? product.label : 'Outlooks',
+      time: 'active',
+    };
+  }
   // Radar (default) — Level II moment or Level III product.
   const p = radarProduct(state.productId);
   const t = state.volumes.find((x) => x.key === state.volumeKey);
@@ -3534,7 +3790,14 @@ function dockInfo() {
   };
 }
 
-const BREADCRUMB_ICON = { radar: 'radar', satellite: 'satellite', mrms: 'layers-3', models: 'line-chart' };
+const BREADCRUMB_ICON = {
+  radar: 'radar',
+  satellite: 'satellite',
+  mrms: 'layers-3',
+  models: 'line-chart',
+  observations: 'eye',
+  outlooks: 'cloud-sun',
+};
 function updateDock() {
   if (!el.dockProd) return;
   const info = dockInfo();
@@ -3640,9 +3903,185 @@ function enableSheetSwipe() {
 // Fill the detail picker with the sub-options the current outlook product offers
 // (e.g. the day+hazard for SPC convective, the lead window for CPC), keeping the
 // controller's selection or falling back to the product's first detail.
+const OUTLOOK_PRODUCT_SHORT = {
+  spc_conv: 'SPC',
+  spc_fire: 'FIRE',
+  spc_md: 'MD',
+  wpc_ero: 'ERO',
+  cpc_temp: 'TEMP',
+  cpc_precip: 'PCPN',
+};
+
+function buildOutlookProductButtons() {
+  el.productButtons.innerHTML = '';
+  el.productButtons.className = 'product-grid';
+  if (!state.spc) {
+    el.productButtons.innerHTML = '<div class="empty">Loading outlooks...</div>';
+    return;
+  }
+  for (const id of OUTLOOK_ORDER) {
+    const product = OUTLOOKS[id];
+    const btn = document.createElement('button');
+    btn.className = 'product-btn';
+    btn.dataset.id = id;
+    btn.innerHTML = `<span class="pb-id">${OUTLOOK_PRODUCT_SHORT[id] || id}</span><span class="pb-name">${product.label}</span>`;
+    if (id === state.spc.product) btn.classList.add('active');
+    btn.addEventListener('click', () => selectOutlookProduct(id));
+    el.productButtons.appendChild(btn);
+  }
+}
+
+function buildOutlookDetailList() {
+  if (state.mode !== 'outlooks') return;
+  const list = el.outlookDetailList;
+  if (!list) return;
+  list.innerHTML = '';
+  if (!state.spc) {
+    list.innerHTML = '<div class="empty">Loading outlooks...</div>';
+    return;
+  }
+  const ax = state.spc.axesForProduct(state.spc.product);
+  // Two-axis products (SPC convective): a Day group and a Product group, so the
+  // day and hazard product can be switched independently.
+  if (ax) {
+    const { day, type } = ax.split(state.spc.detail);
+    const group = (label, items, activeId, onPick) => {
+      const head = document.createElement('div');
+      head.className = 'vol-group-label';
+      head.textContent = label;
+      list.appendChild(head);
+      for (const it of items) {
+        const btn = document.createElement('button');
+        btn.className = 'vol-btn';
+        if (it.id === activeId) btn.classList.add('active');
+        btn.innerHTML = `<span class="dot"></span>${it.label}`;
+        btn.addEventListener('click', () => onPick(it.id));
+        list.appendChild(btn);
+      }
+    };
+    group(ax.primaryLabel, ax.days(), day, selectOutlookDay);
+    group(ax.secondaryLabel, ax.types(day), type, selectOutlookType);
+    return;
+  }
+  for (const d of state.spc.detailsForProduct(state.spc.product)) {
+    const btn = document.createElement('button');
+    btn.className = 'vol-btn';
+    if (d.id === state.spc.detail) btn.classList.add('active');
+    btn.innerHTML = `<span class="dot"></span>${d.label}`;
+    btn.addEventListener('click', () => selectOutlookDetail(d.id));
+    list.appendChild(btn);
+  }
+}
+
+function buildOutlookLegend() {
+  if (!el.legend) return;
+  el.legend.className = 'legend spc-legend';
+  el.legend.innerHTML = (state.spc && state.spc._legendHTML) || '<div class="empty">No outlook loaded.</div>';
+  updateSplitPaneChrome();
+}
+
+function selectOutlookProduct(id) {
+  if (!state.spc || !OUTLOOKS[id]) return;
+  state.spc.setProduct(id);
+  if (el.outlookSelect) el.outlookSelect.value = state.spc.product;
+  populateOutlookDetails();
+  buildOutlookProductButtons();
+  buildOutlookDetailList();
+  if (state.mode === 'outlooks') enterOutlookSourceMode(false);
+  saveSettings();
+}
+
+function selectOutlookDetail(id) {
+  if (!state.spc) return;
+  state.spc.setDetail(id);
+  if (el.outlookDetail) el.outlookDetail.value = state.spc.detail;
+  buildOutlookDetailList();
+  if (state.mode === 'outlooks') enterOutlookSourceMode(false);
+  saveSettings();
+}
+
+function selectOutlookDay(dayId) {
+  if (!state.spc) return;
+  state.spc.setDay(dayId);
+  populateOutlookDetails();
+  buildOutlookDetailList();
+  if (state.mode === 'outlooks') enterOutlookSourceMode(false);
+  saveSettings();
+}
+
+function selectOutlookType(typeId) {
+  if (!state.spc) return;
+  state.spc.setType(typeId);
+  populateOutlookDetails();
+  buildOutlookDetailList();
+  if (state.mode === 'outlooks') enterOutlookSourceMode(false);
+  saveSettings();
+}
+
+function enterOutlookSourceMode(reload = true) {
+  if (!state.spc) return;
+  if (!state._outlookSourceForced) {
+    state._outlookSourcePrevOn = !!state.spc.enabled;
+    state._outlookSourceForced = true;
+  }
+  clearRadarSource(state.map);
+  drawRings(null, 0);
+  setToggleBtn(el.spcToggle, true);
+  if (!state.spc.enabled) state.spc.setEnabled(true);
+  else if (reload) state.spc.load();
+  buildOutlookProductButtons();
+  buildOutlookDetailList();
+  buildOutlookLegend();
+  updateDock();
+}
+
+function leaveOutlookSourceMode() {
+  if (!state.spc || !state._outlookSourceForced) return;
+  const restore = !!state._outlookSourcePrevOn;
+  state._outlookSourceForced = false;
+  state._outlookSourcePrevOn = null;
+  setToggleBtn(el.spcToggle, restore);
+  state.spc.setEnabled(restore);
+}
+
+function refreshOutlookSource() {
+  if (!state.spc) return;
+  enterOutlookSourceMode();
+  setStatus('loading outlook...', true);
+}
+
 function populateOutlookDetails() {
   const sel = el.outlookDetail;
   if (!sel) return;
+  const ax = state.spc.axesForProduct(state.spc.product);
+  // Two-axis products (SPC convective): a Day select plus a product/type select
+  // sharing the "Detail" control. Everything else keeps the single flat list.
+  if (ax) {
+    const { day, type } = ax.split(state.spc.detail);
+    if (el.outlookDay) {
+      el.outlookDay.innerHTML = '';
+      for (const d of ax.days()) {
+        const o = document.createElement('option');
+        o.value = d.id;
+        o.textContent = d.label;
+        el.outlookDay.appendChild(o);
+      }
+      el.outlookDay.value = day;
+    }
+    if (el.outlookDayField) el.outlookDayField.hidden = false;
+    sel.innerHTML = '';
+    for (const t of ax.types(day)) {
+      const o = document.createElement('option');
+      o.value = t.id;
+      o.textContent = t.label;
+      sel.appendChild(o);
+    }
+    sel.value = type;
+    if (el.outlookDetailLabel) el.outlookDetailLabel.textContent = ax.secondaryLabel;
+    return;
+  }
+  if (el.outlookDayField) el.outlookDayField.hidden = true;
+  if (el.outlookDetailLabel) el.outlookDetailLabel.textContent = 'Detail';
   sel.innerHTML = '';
   for (const d of state.spc.detailsForProduct(state.spc.product)) {
     const o = document.createElement('option');
@@ -3689,6 +4128,12 @@ function setupSpcOutlook() {
     detailPanel: el.alertDetailPanel,
     closeBtn: el.alertClose,
     alertController: () => state.alerts,
+    extraLegend: () => state.mode === 'outlooks' ? el.legend : null,
+    extraStatus: (text) => {
+      if (state.mode !== 'outlooks') return;
+      const product = OUTLOOKS[state.spc.product];
+      setStatus(text || `${product ? product.label : 'Outlook'} loaded`);
+    },
     // Keep MD and alert views mutually exclusive (they share the same chrome).
     closeAlerts: () => { if (state.alerts) { state.alerts.closePreview(); state.alerts.closeDetail(); } },
     suppressClick: () => !!(state.mapTools && state.mapTools.tool),
@@ -3715,6 +4160,12 @@ function setupSpcOutlook() {
   if (el.spcToggle) {
     el.spcToggle.addEventListener('click', () => {
       const on = !el.spcToggle.classList.contains('active');
+      if (state.mode === 'outlooks' && !on) {
+        setToggleBtn(el.spcToggle, true);
+        if (!state.spc.enabled) state.spc.setEnabled(true);
+        setStatus('Outlook source keeps outlooks visible');
+        return;
+      }
       setToggleBtn(el.spcToggle, on);
       state.spc.setEnabled(on);
       setStatus(on ? `${OUTLOOKS[state.spc.product].label} outlook on` : 'Outlook off');
@@ -3725,12 +4176,27 @@ function setupSpcOutlook() {
     el.outlookSelect.addEventListener('change', () => {
       state.spc.setProduct(el.outlookSelect.value);
       populateOutlookDetails(); // product change swaps the detail set
+      if (state.mode === 'outlooks') {
+        buildOutlookProductButtons();
+        buildOutlookDetailList();
+      }
+      saveSettings();
+    });
+  }
+  if (el.outlookDay) {
+    el.outlookDay.addEventListener('change', () => {
+      state.spc.setDay(el.outlookDay.value);
+      populateOutlookDetails(); // the day change may swap the available types
+      if (state.mode === 'outlooks') buildOutlookDetailList();
       saveSettings();
     });
   }
   if (el.outlookDetail) {
     el.outlookDetail.addEventListener('change', () => {
-      state.spc.setDetail(el.outlookDetail.value);
+      const ax = state.spc.axesForProduct(state.spc.product);
+      if (ax) state.spc.setType(el.outlookDetail.value);
+      else state.spc.setDetail(el.outlookDetail.value);
+      if (state.mode === 'outlooks') buildOutlookDetailList();
       saveSettings();
     });
   }
@@ -3744,6 +4210,11 @@ function setupSpcOutlook() {
       saveSettings();
     });
   }
+  if (state.mode === 'outlooks') {
+    buildOutlookProductButtons();
+    buildOutlookDetailList();
+    enterOutlookSourceMode();
+  }
 }
 
 // Distribute the control panels into the mobile swipe carousel pages. Page 0 is
@@ -3754,7 +4225,7 @@ function layoutMobilePages() {
   // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
   // "MRMS frames" / "Model runs") lives with the product controls so the frame
   // picker sits beside the product/tilt controls instead of on the source page.
-  el.pageControls.append(el.productPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageControls.append(el.productPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
   el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Controls', 'Settings', 'Map');
@@ -3769,7 +4240,7 @@ function layoutDesktopSidebar() {
   // footer note must be included here too (last) or they'd get stranded
   // above whichever of these panels happens to already sit below them.
   el.sidebar.append(
-    el.sourcePanel, el.layoutPanel, el.productPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
+    el.sourcePanel, el.layoutPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
     el.settingsBtn, el.sidebarFoot
   );
 }
@@ -4002,6 +4473,7 @@ function playbackContextKey() {
     return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.conusView}:${state.sat.productId}:${state.sat.enhanceIR}`;
   if (m === 'models')
     return `models:${state.models.modelKey}:${state.models.productId}:${state.models.runKey}`;
+  if (m === 'observations') return `obs:${state.observations.productId}`;
   return m;
 }
 
@@ -4135,13 +4607,27 @@ async function buildPlaybackProvider(opts = {}) {
       },
     };
   }
+  if (state.mode === 'observations') {
+    const frames = allFrames ? state.observations.frames : state.observations.frames.slice(-n);
+    return {
+      frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
+      async load(f) {
+        const grid = await loadObservation(state.observations.productId, f.key);
+        const payload = prepareGridTexture(grid, resolveGridProduct(grid.product));
+        payload.grid = grid;
+        return payload;
+      },
+      render(payload) { drawObservationPayload(payload); },
+      idle() { renderObservations(); },
+    };
+  }
   return { frames: [] };
 }
 
 function scheduleFrameWarm() {
   if (!state.playback || state.playback.active) return;
   if (mqSmallScreen.matches) return;
-  if (state.mode === 'models') return;
+  if (state.mode === 'models' || state.mode === 'outlooks') return;
   if (frameWarmTimer) clearTimeout(frameWarmTimer);
   frameWarmTimer = setTimeout(() => {
     frameWarmTimer = null;
@@ -4652,7 +5138,8 @@ function productTime() {
       const tag = state.mode === 'models'
         ? `F${String(currentModelFhour()).padStart(2, '0')}`
         : state.mode === 'satellite' ? 'sat'
-        : state.mode === 'mrms' ? 'mrms' : 'scan';
+        : state.mode === 'mrms' ? 'mrms'
+        : state.mode === 'observations' ? 'rtma' : 'scan';
       return { time: f.time, tag };
     }
   }
@@ -4671,6 +5158,11 @@ function productTime() {
     return t && Number.isFinite(t.getTime())
       ? { time: t, tag: `F${String(currentModelFhour()).padStart(2, '0')}` }
       : null;
+  }
+  if (state.mode === 'observations') {
+    const f = state.observations.frames.find((x) => x.key === state.observations.frameKey);
+    const t = (f && f.time) || (state.observations.grid && state.observations.grid.time) || null;
+    return t ? { time: t, tag: 'rtma' } : null;
   }
   // Radar — the active Level II volume / Level III frame.
   const f = state.volumes.find((x) => x.key === state.volumeKey);
@@ -5506,6 +5998,18 @@ function buildExportCaption() {
     cap.time = run
       ? (validStr ? `${run.label} run · ${validStr}` : `${run.label} run`)
       : validStr;
+  } else if (state.mode === 'observations') {
+    const p = OBS_PRODUCTS[state.observations.productId];
+    cap.title = 'RTMA Analysis';
+    cap.sub = `${p ? p.name : state.observations.productId} · NOAA RTMA`;
+    const t = state.observations.frames.find((x) => x.key === state.observations.frameKey);
+    cap.time = t ? stampWithDate(t) : '';
+  } else if (state.mode === 'outlooks') {
+    const product = state.spc && OUTLOOKS[state.spc.product];
+    const detail = state.spc && product && product.details.find((d) => d.id === state.spc.detail);
+    cap.title = product ? product.label : 'Forecast Outlooks';
+    cap.sub = detail ? detail.label : 'Official outlook overlay';
+    cap.time = el.spcStatus ? el.spcStatus.textContent : '';
   } else {
     // Radar.
     const l3 = isL3Product(state.productId);
@@ -6233,7 +6737,14 @@ function saveSettings() {
         modelCityValues: state.modelCityValues,
         alertsOn: state.alerts ? state.alerts.enabled : true,
         spc: state.spc
-          ? { on: state.spc.enabled, product: state.spc.product, detail: state.spc.detail, opacity: state.spcOpacity }
+          ? {
+              on: state._outlookSourceForced && typeof state._outlookSourcePrevOn === 'boolean'
+                ? state._outlookSourcePrevOn
+                : state.spc.enabled,
+              product: state.spc.product,
+              detail: state.spc.detail,
+              opacity: state.spcOpacity,
+            }
           : { ...state._spc, opacity: state.spcOpacity },
         playbackFrames: state.playbackFrames,
         draw: state.draw,
@@ -6248,6 +6759,7 @@ function saveSettings() {
         },
         mrms: { productId: state.mrms.productId },
         models: { modelKey: state.models.modelKey, productId: state.models.productId },
+        observations: { productId: state.observations.productId },
         map: c && isFinite(c.lng) ? { lng: c.lng, lat: c.lat, zoom: m.getZoom() } : null,
       };
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
@@ -6279,7 +6791,7 @@ function sanitizeAlertStyle(raw) {
 // the first render already reflects them (basemap, last view, last product…).
 function applyStoredSettings(s) {
   if (!s || typeof s !== 'object') return;
-  if (['radar', 'satellite', 'mrms', 'models'].includes(s.mode)) state.mode = s.mode;
+  if (['radar', 'satellite', 'mrms', 'models', 'observations', 'outlooks'].includes(s.mode)) state.mode = s.mode;
   if (typeof s.site === 'string') state.site = s.site;
   if (typeof s.productId === 'string') state.productId = s.productId;
   if (typeof s.opacity === 'number') state.opacity = s.opacity;
@@ -6335,6 +6847,8 @@ function applyStoredSettings(s) {
     if (!modelSupports(state.models.modelKey, state.models.productId))
       state.models.productId = defaultProductFor(state.models.modelKey);
   }
+  if (s.observations && typeof s.observations.productId === 'string' && OBS_PRODUCTS[s.observations.productId])
+    state.observations.productId = s.observations.productId;
   if (s.map && isFinite(s.map.lng) && isFinite(s.map.lat)) state._restoreView = s.map;
 }
 
@@ -6377,6 +6891,7 @@ function applySmooth(level) {
   if (state.sat.layer) state.sat.layer.setSmooth(state.smooth);
   if (state.mrms.layer) state.mrms.layer.setSmooth(state.smooth);
   if (state.models.layer) state.models.layer.setSmooth(state.smooth);
+  if (state.observations.layer) state.observations.layer.setSmooth(state.smooth);
   if (state.splitView) state.splitView.setSmooth(state.smooth);
 }
 
@@ -6538,6 +7053,7 @@ function init() {
     if (state.sat.layer) state.sat.layer.setOpacity(state.opacity);
     if (state.mrms.layer) state.mrms.layer.setOpacity(state.opacity);
     if (state.models.layer) state.models.layer.setOpacity(state.opacity);
+    if (state.observations.layer) state.observations.layer.setOpacity(state.opacity);
     if (state.splitView) state.splitView.setOpacity(state.opacity);
     saveSettings();
   });
@@ -6616,7 +7132,7 @@ function init() {
       state.modelCityValues = on;
       if (on) renderModelCityValues();
       else clearModelCityValues();
-      setStatus(on ? 'model city values on' : 'model city values off');
+      setStatus(on ? 'city values on' : 'city values off');
       saveSettings();
     });
   }

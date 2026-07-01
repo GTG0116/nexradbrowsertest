@@ -105,6 +105,17 @@ export const OUTLOOKS = {
     label: 'SPC Convective',
     details: spcConvDetails,
     url: spcConvUrl,
+    // Two-dimensional detail: the day (1–8) and the hazard product for that day
+    // (categorical / tornado / wind / hail / probability). The detail id is
+    // `day:type`, so the two axes map onto that split.
+    axes: {
+      primaryLabel: 'Day',
+      secondaryLabel: 'Product',
+      days: () => { const out = []; for (let d = 1; d <= 8; d++) out.push({ id: String(d), label: `Day ${d}` }); return out; },
+      types: (dayId) => spcTypesForDay(+dayId).map((t) => ({ id: t, label: SPC_TYPE_LABELS[t] })),
+      split: (detailId) => { const [d, t] = String(detailId).split(':'); return { day: d, type: t }; },
+      join: (day, type) => `${day}:${type}`,
+    },
     // Already-coloured features: pass the official fill/stroke/label through.
     style: (f) => {
       const p = f.properties || {};
@@ -245,6 +256,31 @@ export class OutlookController {
     return (OUTLOOKS[productId] || OUTLOOKS.spc_conv).details;
   }
 
+  // The two-axis (day + product) descriptor for a product, or null when the
+  // product's details are a single flat list.
+  axesForProduct(productId) {
+    return (OUTLOOKS[productId] || OUTLOOKS.spc_conv).axes || null;
+  }
+
+  // Switch the day of a two-axis product, keeping the current product/type when
+  // that type still exists for the new day (else falling back to the first).
+  setDay(dayId) {
+    const ax = this.axesForProduct(this.product);
+    if (!ax) return;
+    const cur = ax.split(this.detail);
+    const types = ax.types(dayId);
+    const type = types.some((t) => t.id === cur.type) ? cur.type : types[0].id;
+    this.setDetail(ax.join(dayId, type));
+  }
+
+  // Switch the product/type of a two-axis product, keeping the current day.
+  setType(typeId) {
+    const ax = this.axesForProduct(this.product);
+    if (!ax) return;
+    const cur = ax.split(this.detail);
+    this.setDetail(ax.join(cur.day, typeId));
+  }
+
   setEnabled(on) {
     this.enabled = on;
     if (on) this.load();
@@ -308,6 +344,7 @@ export class OutlookController {
 
   _setStatus(text) {
     if (this.els.status) this.els.status.textContent = text || '';
+    if (typeof this.els.extraStatus === 'function') this.els.extraStatus(text || '');
   }
 
   // A "valid …" line from whatever timestamp fields the feed provides.
@@ -325,8 +362,16 @@ export class OutlookController {
 
   // Swatch legend from the distinct areas present, de-duplicated by label.
   _renderLegend(feats, product) {
-    const legend = this.els.legend;
-    if (!legend) return;
+    const targets = [];
+    const seen = new Set();
+    const addTarget = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      targets.push(node);
+    };
+    addTarget(this.els.legend);
+    if (typeof this.els.extraLegend === 'function') addTarget(this.els.extraLegend());
+    if (!targets.length) return;
     const byLabel = new Map();
     for (const f of feats) {
       const p = f.properties || {};
@@ -337,8 +382,12 @@ export class OutlookController {
         byLabel.set(key, { label: key, code: p._code || '', fill: p.fill || '#888', stroke: p.stroke || '#444', sort: p._sort || 0 });
     }
     const items = [...byLabel.values()].sort((a, b) => a.sort - b.sort);
-    if (!items.length) { legend.innerHTML = '<div class="empty">No areas.</div>'; return; }
-    legend.innerHTML = items.map((it) => {
+    if (!items.length) {
+      this._legendHTML = '<div class="empty">No areas.</div>';
+      targets.forEach((legend) => { legend.innerHTML = this._legendHTML; });
+      return;
+    }
+    this._legendHTML = items.map((it) => {
       // Convective Conditional Intensity areas draw as hatching on the map; match
       // that in the swatch instead of their flat grey fill.
       const m = product && product.cig && /^CIG(\d)/.exec(it.code);
@@ -347,6 +396,7 @@ export class OutlookController {
         : `<span class="spc-legend-sw" style="background:${esc(it.fill)};border-color:${esc(it.stroke)}"></span>`;
       return `<div class="spc-legend-row">${sw}<span class="spc-legend-label">${esc(it.label)}</span></div>`;
     }).join('');
+    targets.forEach((legend) => { legend.innerHTML = this._legendHTML; });
   }
 
   // ---- SPC Mesoscale Discussion click-through (popup + full briefing) --------

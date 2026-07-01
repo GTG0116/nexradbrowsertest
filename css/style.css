@@ -137,9 +137,9 @@ body.theme-dark .brand-mark {
   background: #000;
 }
 .brand-mark img {
-  width: 122%;
-  height: 122%;
-  object-fit: cover;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
 }
 .brand-word {
@@ -404,6 +404,16 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.vol-group-label {
+  font: 600 10px/1 'JetBrains Mono', monospace;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 8px 2px 2px;
+}
+.vol-group-label:first-child {
+  padding-top: 2px;
 }
 .vol-btn {
   display: flex;

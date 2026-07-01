@@ -48,27 +48,27 @@
         <div class="mbx-gate-kicker">RadarNexus · setup</div>
         <h2>Add a map key</h2>
         <p>
-          The basemap is drawn with your own public map key. Pick Mapbox or
-          MapTiler; the key stays in this browser only (localStorage) and is sent
+          The basemap is drawn with your own public map key. Pick MapTiler or
+          Mapbox; the key stays in this browser only (localStorage) and is sent
           only to the provider you choose.
         </p>
         <ol class="mbx-gate-steps">
+          <li>MapTiler keys come from <a href="https://cloud.maptiler.com/account/keys/" target="_blank" rel="noopener">Cloud keys</a> — the quickest to set up.</li>
           <li>Mapbox keys come from <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener">account tokens</a> and start with <code>pk.</code>.</li>
-          <li>MapTiler keys come from <a href="https://cloud.maptiler.com/account/keys/" target="_blank" rel="noopener">Cloud keys</a>.</li>
           <li>Paste the public key below.</li>
         </ol>
         <label class="field mbx-provider-field">
           <span>Provider</span>
           <select id="mbxGateProvider">
-            <option value="mapbox">Mapbox</option>
             <option value="maptiler">MapTiler</option>
+            <option value="mapbox">Mapbox</option>
           </select>
         </label>
         <input
           type="text"
           id="mbxGateInput"
           class="mbx-gate-input"
-          placeholder="pk.eyJ1Ijoi..."
+          placeholder="MapTiler public key"
           autocomplete="off"
           spellcheck="false"
         />
@@ -101,6 +101,8 @@
               <button class="mode-btn" data-mode="satellite"><i data-lucide="satellite" class="lucide sm"></i>SAT</button>
               <button class="mode-btn" data-mode="mrms"><i data-lucide="layers-3" class="lucide sm"></i>MRMS</button>
               <button class="mode-btn" data-mode="models"><i data-lucide="line-chart" class="lucide sm"></i>MODELS</button>
+              <button class="mode-btn" data-mode="outlooks"><i data-lucide="cloud-sun" class="lucide sm"></i>OUTLOOK</button>
+              <button class="mode-btn" data-mode="observations"><i data-lucide="eye" class="lucide sm"></i>OBS</button>
             </div>
             <label class="field" id="siteField">
               <span>Radar site</span>
@@ -130,6 +132,12 @@
               <span>Model</span>
               <select id="modelSelect"></select>
             </label>
+            <label class="field" id="obsFields" hidden>
+              <span>Analysis</span>
+              <select id="obsDomainSelect">
+                <option value="RTMA">RTMA 2.5 km</option>
+              </select>
+            </label>
           </section>
 
           <section class="panel" id="layoutPanel">
@@ -143,7 +151,7 @@
           <section class="panel" id="productPanel">
             <h2 class="panel-title">Product</h2>
             <div id="productButtons" class="product-grid"></div>
-            <label class="field opacity-field">
+            <label class="field opacity-field" id="overlayOpacityField">
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
             </label>
@@ -157,6 +165,11 @@
           <section class="panel" id="fhourPanel" hidden>
             <h2 class="panel-title">Forecast hour</h2>
             <div id="fhourList" class="tilt-list scroll"></div>
+          </section>
+
+          <section class="panel" id="outlookDetailPanel" hidden>
+            <h2 class="panel-title">Outlook detail</h2>
+            <div id="outlookDetailList" class="vol-list scroll"></div>
           </section>
 
           <section class="panel grow" id="alertsPanel">
@@ -284,7 +297,7 @@
           </div>
           <div class="toggle-field" id="modelCityValuesField" hidden>
             <span>City values</span>
-            <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled model values above city labels">ON</button>
+            <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled grid values above city labels">ON</button>
           </div>
           <div class="toggle-field" id="loopField">
             <span>Playback loop</span>
@@ -372,8 +385,12 @@
               <span>Outlook</span>
               <select id="outlookSelect"></select>
             </label>
+            <label class="field" id="outlookDayField" hidden>
+              <span>Day</span>
+              <select id="outlookDay"></select>
+            </label>
             <label class="field">
-              <span>Detail</span>
+              <span id="outlookDetailLabel">Detail</span>
               <select id="outlookDetail"></select>
             </label>
           </div>
