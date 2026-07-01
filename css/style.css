@@ -1769,6 +1769,12 @@ input[type='range']::-moz-range-thumb {
     height: 100%;
     border: none;
     border-radius: 0;
+    /* Desktop frames the rounded map with an inset vignette; on a full-bleed
+       phone/PWA that same shadow just darkens the screen's top & bottom edges
+       (the "blurred edges", most visible at the top of an iOS standalone web
+       app where no browser chrome hides it). Drop it so the map runs clean to
+       every edge. */
+    box-shadow: none;
   }
   /* The desktop breadcrumb chip is redundant with the bottom dock's
      site/product chip on mobile; re-stack the clock + legend into one
@@ -2209,10 +2215,14 @@ input[type='range']::-moz-range-thumb {
   bottom: 0;
   display: flex;
   gap: 8px;
-  /* Extra bottom space lifts the controls clear of the map credits that sit at
-     the very bottom edge. */
-  padding: 8px 10px calc(26px + env(safe-area-inset-bottom, 0px));
-  background: linear-gradient(180deg, rgba(5, 9, 18, 0) 0%, rgba(5, 9, 18, 0.92) 45%);
+  /* No upward fade behind the dock: it darkened the bottom edge of the map on
+     every mobile browser. Each dock control carries its own panel background,
+     so legibility over the map is unaffected without it. With the fade gone the
+     controls no longer need to sit up inside it, so drop the extra bottom
+     padding and let the dock settle down toward the edge (the map attribution
+     is lifted to bottom:70px, so nothing collides). */
+  padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: none;
   z-index: 700;
 }
 .dock-status {
