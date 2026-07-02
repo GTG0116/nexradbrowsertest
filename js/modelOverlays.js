@@ -243,30 +243,41 @@ function pressureCenterGeoJSON(grid) {
   if (d.w < 5 || d.h < 5) return { type: 'FeatureCollection', features };
 
   const radius = Math.max(3, Math.round(0.75 / Math.max(d.di, d.dj)));
+  // A center must stand this many Pa (0.75 hPa) above/below the strongest opposite
+  // value in its neighbourhood. Detection is purely relative — a local extremum
+  // with enough prominence — so H/L placement stays consistent across models
+  // regardless of the field's absolute level (a genuine 1013 hPa low is a low
+  // whether the ambient pressure runs high or low).
+  const MIN_PROMINENCE_PA = 75;
   const candidates = [];
   const idx = (i, j) => j * d.w + i;
+  // Test every cell (no row/column stride): a sharp, compact low — an intense
+  // hurricane's central pressure — can land on any single cell, and skipping
+  // alternate cells dropped those centers entirely.
   for (let j = radius; j < d.h - radius; j++) {
-    if (j % 2) continue;
-    for (let i = radius; i < d.w - radius; i += 2) {
+    for (let i = radius; i < d.w - radius; i++) {
       const val = d.v[idx(i, j)];
       if (!Number.isFinite(val)) continue;
+      // Use strict >/< so a *flat* extremum (a broad low or high where adjacent
+      // cells share the minimum/maximum value) still qualifies. The equal-valued
+      // plateau cells all pass; the far-enough dedup below keeps just one marker.
       let isHigh = true, isLow = true, ringMax = -Infinity, ringMin = Infinity;
       for (let y = j - radius; y <= j + radius; y++) {
         for (let x = i - radius; x <= i + radius; x++) {
           if (x === i && y === j) continue;
           const other = d.v[idx(x, y)];
           if (!Number.isFinite(other)) continue;
-          if (other >= val) isHigh = false;
-          if (other <= val) isLow = false;
+          if (other > val) isHigh = false;
+          if (other < val) isLow = false;
           if (other > ringMax) ringMax = other;
           if (other < ringMin) ringMin = other;
         }
       }
       const lon = d.lon1 + i * d.di;
       const lat = d.lat1 - j * d.dj;
-      if (isHigh && val >= 101400 && val - ringMin >= 75)
+      if (isHigh && val - ringMin >= MIN_PROMINENCE_PA)
         candidates.push({ kind: 'H', val, lon, lat, score: val - ringMin });
-      if (isLow && val <= 101200 && ringMax - val >= 75)
+      if (isLow && ringMax - val >= MIN_PROMINENCE_PA)
         candidates.push({ kind: 'L', val, lon, lat, score: ringMax - val });
     }
   }
