@@ -181,6 +181,31 @@
             <div id="alertList" class="alert-list scroll"></div>
           </section>
 
+          <!-- Active tropical cyclones (NHC Atlantic/Pacific + JTWC typhoons).
+               The master toggle turns the whole overlay on; the three
+               sub-toggles pick which pieces draw (forecast path & points,
+               current-position marker, NHC forecast cone). -->
+          <section class="panel" id="cyclonesPanel">
+            <h2 class="panel-title alerts-title">
+              Tropical cyclones
+              <button id="cyclonesToggle" class="alerts-toggle" title="Toggle the tropical cyclone overlay">OFF</button>
+            </h2>
+            <div class="toggle-field">
+              <span>Forecast path</span>
+              <button id="cyclonesPathToggle" class="alerts-toggle active" title="Show the forecast track and points (past track dashed)">ON</button>
+            </div>
+            <div class="toggle-field">
+              <span>Current location</span>
+              <button id="cyclonesCurrentToggle" class="alerts-toggle active" title="Show each storm's current position marker">ON</button>
+            </div>
+            <div class="toggle-field">
+              <span>Forecast cone</span>
+              <button id="cyclonesConeToggle" class="alerts-toggle active" title="Show the NHC cone of uncertainty (JTWC storms have no cone)">ON</button>
+            </div>
+            <div id="cycloneStatus" class="spc-status"></div>
+            <div id="cycloneList" class="alert-list scroll"></div>
+          </section>
+
           <button id="settingsBtn" class="settings-btn" type="button">
             <i data-lucide="settings-2" class="lucide sm"></i>
             Settings &amp; data
@@ -522,6 +547,13 @@
            "view full briefing" button opens the full-screen briefing below. -->
       <div id="alertPreview" class="alert-preview" hidden>
         <div id="alertPreviewCard" class="alert-preview-card"></div>
+      </div>
+
+      <!-- Compact tropical-cyclone card (same chrome as the alert preview),
+           shown when a storm's marker or cone is clicked. Its footer button
+           jumps to a satellite crop centred on the storm. -->
+      <div id="cyclonePreview" class="alert-preview" hidden>
+        <div id="cyclonePreviewCard" class="alert-preview-card"></div>
       </div>
 
       <!-- Full-screen alert briefing (NWS-style), shown when an alert is clicked -->
