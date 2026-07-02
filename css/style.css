@@ -4756,3 +4756,28 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
   margin-top: 6px;
   min-height: 0;
 }
+
+/* Phone tool popovers are controlled from the bottom dock, not the hidden
+   floating toolbar. Keep draw/measure compact and above playback, and move the
+   METAR controls away from the lower-left product card. Placed late so it wins
+   over the shared desktop/iPad map-tool rules above. */
+@media (max-width: 759.98px) {
+  .tool-popover,
+  .map-wrap.wx-active .tool-popover {
+    top: auto;
+    right: 12px;
+    left: 12px;
+    bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-width: 360px;
+    margin: 0 auto;
+    z-index: 720;
+  }
+
+  .metar-panel {
+    left: 14px;
+    right: auto;
+    bottom: calc(124px + env(safe-area-inset-bottom, 0px));
+    max-width: min(210px, calc(100vw - 28px));
+  }
+}
