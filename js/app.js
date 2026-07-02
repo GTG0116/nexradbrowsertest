@@ -9,6 +9,7 @@ import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep, stormRelativeSweep } from './dealias.js';
 import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
+import { CyclonesController } from './cyclones.js';
 import { applyMapStyle, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
@@ -338,6 +339,8 @@ function setupOverlays(map) {
     map.addSource('rings', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   if (!map.getSource('sites'))
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
+  if (!map.getSource('cyclones'))
+    map.addSource('cyclones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
 
   // Register the CIG hatch tiles. Style loads wipe added images, so (re)add them
   // each time before the layer that references them by name.
@@ -434,6 +437,95 @@ function setupOverlays(map) {
     },
     anchor
   );
+  // Tropical cyclones. Every feature carries `kind` (cone / past / track /
+  // point / current), so one GeoJSON source feeds five filtered layers. The
+  // translucent cone fill sits at the data anchor (under the radar, like the
+  // alert fill); the tracks/points/markers go at the label anchor so they read
+  // over the radar and roads. Visibility comes from the master + per-part
+  // toggles (persisted in state._cyclones until the controller is built).
+  const cycOn = state.cyclones ? state.cyclones.enabled : state._cyclones.on;
+  const cycShow = state.cyclones ? state.cyclones.show : state._cyclones;
+  const cycVis = (part) => ({ visibility: cycOn && cycShow[part] ? 'visible' : 'none' });
+  map.addLayer(
+    {
+      id: 'cyclones-cone',
+      type: 'fill',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'cone'],
+      layout: cycVis('cone'),
+      paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.14 },
+    },
+    dataAnchor
+  );
+  map.addLayer(
+    {
+      id: 'cyclones-cone-line',
+      type: 'line',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'cone'],
+      layout: cycVis('cone'),
+      paint: { 'line-color': 'rgba(255,255,255,0.75)', 'line-width': 1.6 },
+    },
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'cyclones-past',
+      type: 'line',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'past'],
+      layout: cycVis('path'),
+      paint: {
+        'line-color': 'rgba(170,180,195,0.9)',
+        'line-width': 1.6,
+        'line-dasharray': [2, 2.5],
+      },
+    },
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'cyclones-track',
+      type: 'line',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'track'],
+      layout: { 'line-join': 'round', ...cycVis('path') },
+      paint: { 'line-color': ['get', 'color'], 'line-width': 2.4, 'line-opacity': 0.95 },
+    },
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'cyclones-points',
+      type: 'circle',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'point'],
+      layout: cycVis('path'),
+      paint: {
+        'circle-radius': 4.5,
+        'circle-color': ['get', 'color'],
+        'circle-stroke-color': 'rgba(10,20,35,0.9)',
+        'circle-stroke-width': 1.2,
+      },
+    },
+    anchor
+  );
+  map.addLayer(
+    {
+      id: 'cyclones-current',
+      type: 'circle',
+      source: 'cyclones',
+      filter: ['==', ['get', 'kind'], 'current'],
+      layout: cycVis('current'),
+      paint: {
+        'circle-radius': 8,
+        'circle-color': ['get', 'color'],
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2,
+      },
+    },
+    anchor
+  );
   map.addLayer(
     {
       id: 'rings',
@@ -520,6 +612,7 @@ function setupOverlays(map) {
   if (state.mode !== 'radar' && state.mode !== 'outlooks' && state.radarOverlay) applyRadarOverlay();
   if (state.alerts) state.alerts.refreshVisible();
   if (state.spc) state.spc.reapply();
+  if (state.cyclones) state.cyclones.reapply();
 }
 
 // Hand the current sweep to the custom WebGL radar layer, inserting the layer at
@@ -530,6 +623,14 @@ function setupOverlays(map) {
 function setRadarSource(map, sweep, product, site) {
   if (!state.radarLayer) state.radarLayer = createRadarLayer();
   if (!map.getLayer('radar')) map.addLayer(state.radarLayer, dataLayerAnchor(map));
+  // As the *overlay* in a non-radar mode the radar must draw on top of the
+  // active source (satellite / MRMS / model / obs), which shares the data
+  // anchor — so lift it to the label anchor (above the data layers and the
+  // basemap roads, still below the town labels). Back in true radar mode it
+  // returns to the data anchor, beneath the roads, the classic look.
+  try {
+    map.moveLayer('radar', state.mode !== 'radar' ? firstLabelLayerId(map) : dataLayerAnchor(map));
+  } catch (_) { /* anchor layer missing on an exotic style — keep current slot */ }
   state.radarLayer.setSweep(sweep, product, site);
   state.radarLayer.setOpacity(state.opacity);
   state.radarLayer.setSmooth(state.smooth);
@@ -629,6 +730,11 @@ const state = {
   styleReady: false,
   geo: null,
   alerts: null,
+  // Tropical cyclones overlay (NHC + JTWC). `_cyclones` holds the restored
+  // prefs (master + per-part toggles) applied when the controller is built at
+  // init — the same pattern as `spc`/`_spc` below.
+  cyclones: null,
+  _cyclones: { on: false, path: true, current: true, cone: true },
   // ICAO codes of radars judged "down" (no scan in the past hour, or none found)
   // by the background scan kicked off on load; their map dots are drawn red.
   downSites: new Set(),
@@ -679,6 +785,10 @@ const state = {
     displayMeta: null,
     _bbox: null,
     layer: null,
+    // Active cyclone crop: { id, name, lat, lon, bbox }. When set (via the
+    // sector picker's "Active cyclones" group or a storm's "View on satellite"
+    // button) the full-disk scene is cropped to the storm's bbox.
+    cyclone: null,
   },
   // MRMS state.
   mrms: {
@@ -770,6 +880,15 @@ function cacheEls() {
   el.alertClose = $('#alertClose');
   el.alertPreview = $('#alertPreview');
   el.alertPreviewCard = $('#alertPreviewCard');
+  el.cyclonesPanel = $('#cyclonesPanel');
+  el.cyclonesToggle = $('#cyclonesToggle');
+  el.cyclonesPathToggle = $('#cyclonesPathToggle');
+  el.cyclonesCurrentToggle = $('#cyclonesCurrentToggle');
+  el.cyclonesConeToggle = $('#cyclonesConeToggle');
+  el.cycloneStatus = $('#cycloneStatus');
+  el.cycloneList = $('#cycloneList');
+  el.cyclonePreview = $('#cyclonePreview');
+  el.cyclonePreviewCard = $('#cyclonePreviewCard');
   el.mapStyleControls = $('#mapStyleControls');
   el.alertStyleControls = $('#alertStyleControls');
   el.drawStyleControls = $('#drawStyleControls');
@@ -2104,6 +2223,9 @@ function displaySweep(sweep, site) {
 // here. If no radar has ever been loaded, prompt the user to visit RADAR once.
 function applyRadarOverlay() {
   if (state.mode === 'radar') return;
+  // The site dots follow the overlay: shown while it's on (so the drawn site
+  // is identifiable — and switchable), hidden as soon as it's switched off.
+  refreshSiteDots();
   if (state.radarOverlay && !state.volume) {
     setStatus('radar overlay: open RADAR once to load a site');
     return;
@@ -2222,11 +2344,28 @@ function selectedConusView() {
   return CONUS_VIEWS[idx] || CONUS_VIEWS[0];
 }
 
+// True while a storm crop should drive the satellite view: a cyclone is
+// selected and the full-disk sector (GOES 'full' / Himawari 'hfd') is active.
+function cycloneCropActive() {
+  return !!(state.sat.cyclone && (state.sat.sectorKey === 'full' || state.sat.sectorKey === 'hfd'));
+}
+
+// The lon/lat window a scene is cropped to before display: the selected
+// cyclone's bbox on a full-disk scene, or the chosen CONUS regional view.
+function satCropBBox() {
+  if (cycloneCropActive()) return state.sat.cyclone.bbox;
+  if (state.sat.sectorKey === 'conus' && state.sat.conusView) {
+    const view = selectedConusView();
+    return (view && view[1]) || null;
+  }
+  return null;
+}
+
 function satelliteCrop(scene) {
-  if (!scene || state.sat.sectorKey !== 'conus' || !state.sat.conusView) return null;
-  const view = selectedConusView();
-  if (!view || !view[1]) return null;
-  const [w, s, e, n] = view[1];
+  if (!scene) return null;
+  const box = satCropBBox();
+  if (!box) return null;
+  const [w, s, e, n] = box;
   let minC = Infinity, minR = Infinity, maxC = -Infinity, maxR = -Infinity;
   const take = (lat, lon) => {
     const p = lonLatToColRow(scene, lat, lon);
@@ -2274,14 +2413,86 @@ function buildSatPayload(scene) {
 }
 
 function rebuildSectorSelect() {
+  if (!el.sectorSelect) return;
   const sectors = sectorsForSatellite(state.sat.satKey);
   el.sectorSelect.innerHTML = '';
   for (const [key, sec] of Object.entries(sectors)) {
     const o = document.createElement('option');
     o.value = key; o.textContent = sec.label;
-    if (key === state.sat.sectorKey) o.selected = true;
+    if (!cycloneCropActive() && key === state.sat.sectorKey) o.selected = true;
     el.sectorSelect.appendChild(o);
   }
+  // Active tropical cyclones ride along as extra "sectors": picking one crops
+  // the full-disk scan around the storm (and auto-switches to the satellite
+  // that sees it best). The list refreshes whenever the cyclones feed does.
+  const storms = state.cyclones ? state.cyclones.storms : [];
+  if (storms.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'Active cyclones';
+    for (const storm of storms) {
+      const o = document.createElement('option');
+      o.value = `cyclone:${storm.id}`;
+      o.textContent = `${storm.name} (${storm.basin})`;
+      if (cycloneCropActive() && state.sat.cyclone.id === storm.id) o.selected = true;
+      og.appendChild(o);
+    }
+    el.sectorSelect.appendChild(og);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cyclone → satellite handoff. A storm is viewed as a crop of the full-disk
+// scan (storm position ± a few degrees) from whichever satellite has the best
+// view of its basin.
+// ---------------------------------------------------------------------------
+const CYCLONE_CROP_DLON = 5.5; // degrees either side of the storm centre
+const CYCLONE_CROP_DLAT = 4.5;
+
+function cycloneBBox(storm) {
+  // Normalise into [-180, 180) so the GOES/Himawari inverse navigation (which
+  // works on the offset from the sub-satellite longitude) behaves; the crop
+  // walk and fitBounds both cope with edges past ±180.
+  let lon = storm.lon;
+  while (lon > 180) lon -= 360;
+  while (lon < -180) lon += 360;
+  const lat = Math.max(-65, Math.min(65, storm.lat));
+  return [lon - CYCLONE_CROP_DLON, lat - CYCLONE_CROP_DLAT, lon + CYCLONE_CROP_DLON, lat + CYCLONE_CROP_DLAT];
+}
+
+// Which satellite sees a storm best: Atlantic → GOES-East; East/Central
+// Pacific → GOES-West once the storm is west of ~100°W (near-coast EP storms
+// still read fine from East); WP/IO/SH → Himawari.
+function bestSatelliteFor(storm) {
+  const basin = (storm.basin || '').toUpperCase();
+  if (basin === 'WP' || basin === 'IO' || basin === 'SH') return 'himawari9';
+  if ((basin === 'EP' || basin === 'CP') && storm.lon < -100) return 'goes18';
+  return 'goes19';
+}
+
+// Point the satellite view at a storm: pick the satellite, force its full-disk
+// sector, store the crop, and (re)load scenes. Works both from the storm's
+// "View on satellite" card button (any mode) and the sector picker's cyclone
+// options (already in satellite mode).
+function viewCycloneOnSatellite(storm) {
+  if (!storm) return;
+  cancelFrameWarm();
+  const satKey = bestSatelliteFor(storm);
+  state.sat.satKey = satKey;
+  if (el.satSelect) el.satSelect.value = satKey;
+  state.sat.sectorKey = SATELLITES[satKey].family === 'himawari' ? 'hfd' : 'full';
+  state.sat.cyclone = { id: storm.id, name: storm.name, lat: storm.lat, lon: storm.lon, bbox: cycloneBBox(storm) };
+  rebuildSectorSelect();
+  state.sat._centered = false;
+  state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
+  clearSatellite();
+  setStatus(`satellite view: ${storm.name}`);
+  if (state.mode !== 'satellite') {
+    setMode('satellite'); // loads the scene list itself
+  } else {
+    applyModePanels();
+    loadSatScenes();
+  }
+  saveSettings();
 }
 
 function initSatSelects() {
@@ -2302,6 +2513,7 @@ function initSatSelects() {
   el.satSelect.addEventListener('change', () => {
     cancelFrameWarm();
     state.sat.satKey = el.satSelect.value;
+    state.sat.cyclone = null; // picking a satellite by hand leaves the storm crop
     const sectors = sectorsForSatellite(state.sat.satKey);
     if (!sectors[state.sat.sectorKey]) state.sat.sectorKey = Object.keys(sectors)[0];
     rebuildSectorSelect();
@@ -2312,8 +2524,18 @@ function initSatSelects() {
     saveSettings();
   });
   el.sectorSelect.addEventListener('change', () => {
+    // The "Active cyclones" optgroup routes through the storm handoff (which
+    // may also switch satellites) instead of a plain sector change.
+    if (el.sectorSelect.value.startsWith('cyclone:')) {
+      const storm = state.cyclones
+        && state.cyclones.stormById(el.sectorSelect.value.slice('cyclone:'.length));
+      if (storm) viewCycloneOnSatellite(storm);
+      else rebuildSectorSelect(); // storm gone since the list was built
+      return;
+    }
     cancelFrameWarm();
     state.sat.sectorKey = el.sectorSelect.value;
+    state.sat.cyclone = null; // picking a real sector leaves the storm crop
     state.sat._centered = false;
     state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
     clearSatellite();
@@ -2429,8 +2651,7 @@ async function loadSatScene(key) {
     state.sat.displayMeta = null;
     state.sat._bbox = null;
     if (!state.sat._centered) {
-      const bb = state.sat.sectorKey === 'conus' && state.sat.conusView
-        ? selectedConusView()[1] : sceneBBox(scene);
+      const bb = satCropBBox() || sceneBBox(scene);
       state.map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 16, animate: false });
       state.sat._centered = true;
     }
@@ -3489,9 +3710,10 @@ function setupSoundingGestures() {
 function refreshSiteDots() {
   const map = state.map;
   if (!map || !map.getSource('sites')) return;
-  // The all-radar dots only belong to radar mode — in satellite / MRMS / model
-  // modes there's no site to pick, so hide them rather than littering the map.
-  const showSites = state.mode === 'radar';
+  // The all-radar dots belong to radar mode — and to any mode where the
+  // single-site radar overlay is switched on, so the user can see (and pick)
+  // which site the overlay is drawing. Outlook mode has no radar at all.
+  const showSites = state.mode === 'radar' || (state.radarOverlay && state.mode !== 'outlooks');
   if (map.getLayer('sites'))
     map.setLayoutProperty('sites', 'visibility', showSites && state.siteMarkerStyle === 'dot' ? 'visible' : 'none');
   if (map.getLayer('site-pills'))
@@ -4258,7 +4480,7 @@ function layoutMobilePages() {
   // "MRMS frames" / "Model runs") lives with the product controls so the frame
   // picker sits beside the product/tilt controls instead of on the source page.
   el.pageControls.append(el.productPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
-  el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel);
+  el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel, el.cyclonesPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Controls', 'Settings', 'Map');
 }
@@ -4273,7 +4495,7 @@ function layoutDesktopSidebar() {
   // above whichever of these panels happens to already sit below them.
   el.sidebar.append(
     el.sourcePanel, el.layoutPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
-    el.settingsBtn, el.sidebarFoot
+    el.cyclonesPanel, el.settingsBtn, el.sidebarFoot
   );
   placeDesktopVolumePanel();
 }
@@ -6857,6 +7079,9 @@ function saveSettings() {
         radarOverlay: state.radarOverlay,
         modelCityValues: state.modelCityValues,
         alertsOn: state.alerts ? state.alerts.enabled : true,
+        cyclones: state.cyclones
+          ? { on: state.cyclones.enabled, ...state.cyclones.show }
+          : { ...state._cyclones },
         spc: state.spc
           ? {
               on: state._outlookSourceForced && typeof state._outlookSourcePrevOn === 'boolean'
@@ -6939,6 +7164,11 @@ function applyStoredSettings(s) {
   if (s.keybinds && typeof s.keybinds === 'object') state._storedKeybinds = s.keybinds;
   if (typeof s.dockTool === 'string') state.dockTool = s.dockTool;
   if (typeof s.alertsOn === 'boolean') state._alertsOn = s.alertsOn;
+  if (s.cyclones && typeof s.cyclones === 'object') {
+    for (const key of ['on', 'path', 'current', 'cone']) {
+      if (typeof s.cyclones[key] === 'boolean') state._cyclones[key] = s.cyclones[key];
+    }
+  }
   if (s.spc && typeof s.spc === 'object') {
     if (typeof s.spc.on === 'boolean') state._spc.on = s.spc.on;
     if (typeof s.spc.opacity === 'number' && isFinite(s.spc.opacity))
@@ -7312,6 +7542,52 @@ function init() {
     state.alerts.setEnabled(on);
     saveSettings();
   });
+
+  // ---- Active tropical cyclones overlay (NHC + JTWC) ----
+  state.cyclones = new CyclonesController(state.map, {
+    list: el.cycloneList,
+    status: el.cycloneStatus,
+    preview: el.cyclonePreview,
+    previewCard: el.cyclonePreviewCard,
+    // Same guard as alerts: while a click-consuming map tool is active, taps
+    // belong to the tool, not to opening a storm card.
+    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
+    onViewSatellite: (storm) => viewCycloneOnSatellite(storm),
+    // A new storm set changes the satellite sector picker's cyclone options.
+    onStormsChanged: () => rebuildSectorSelect(),
+  });
+  // Apply the restored master + per-part toggle prefs before the first load.
+  state.cyclones.show = {
+    path: state._cyclones.path,
+    current: state._cyclones.current,
+    cone: state._cyclones.cone,
+  };
+  setToggleBtn(el.cyclonesToggle, state._cyclones.on);
+  setToggleBtn(el.cyclonesPathToggle, state._cyclones.path);
+  setToggleBtn(el.cyclonesCurrentToggle, state._cyclones.current);
+  setToggleBtn(el.cyclonesConeToggle, state._cyclones.cone);
+  state.cyclones.setEnabled(state._cyclones.on);
+  if (el.cyclonesToggle) {
+    el.cyclonesToggle.addEventListener('click', () => {
+      const on = !el.cyclonesToggle.classList.contains('active');
+      setToggleBtn(el.cyclonesToggle, on);
+      state.cyclones.setEnabled(on);
+      setStatus(on ? 'tropical cyclones on' : 'tropical cyclones off');
+      saveSettings();
+    });
+  }
+  const wireCyclonePart = (btn, part) => {
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const on = !btn.classList.contains('active');
+      setToggleBtn(btn, on);
+      state.cyclones.setShow(part, on);
+      saveSettings();
+    });
+  };
+  wireCyclonePart(el.cyclonesPathToggle, 'path');
+  wireCyclonePart(el.cyclonesCurrentToggle, 'current');
+  wireCyclonePart(el.cyclonesConeToggle, 'cone');
 
   // ---- Basemap layer customisation (town labels, roads, rivers, borders) ----
   setupMapStyleControls();
