@@ -143,9 +143,9 @@ function mercY(lat) {
 
 export const SATELLITE_LAYER_ID = 'radarnexus-satellite';
 
-export function createSatelliteLayer() {
+export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
   return {
-    id: SATELLITE_LAYER_ID,
+    id,
     type: 'custom',
     renderingMode: '2d',
 

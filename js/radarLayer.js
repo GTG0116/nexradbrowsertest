@@ -193,9 +193,9 @@ function mercY(lat) {
   return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
 }
 
-export function createRadarLayer() {
+export function createRadarLayer(id = 'radar') {
   return {
-    id: 'radar',
+    id,
     type: 'custom',
     renderingMode: '2d',
 

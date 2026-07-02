@@ -11,7 +11,7 @@ import { dealiasSweep, stormRelativeSweep } from './dealias.js';
 import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
 import { CyclonesController } from './cyclones.js';
 import { applyMapStyle, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
-import { OutlookController, OUTLOOKS, OUTLOOK_ORDER } from './outlooks.js';
+import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
@@ -22,7 +22,7 @@ import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, load
 import { OBS_PRODUCTS, OBS_CATEGORIES, listObservations, loadObservation } from './observations.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
-  prepareModelOverlayData, showPreparedModelOverlays } from './modelOverlays.js';
+  prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
@@ -45,7 +45,17 @@ function isSmallScreenNow() {
 
 const MODEL_CITY_VALUE_SOURCE = 'model-city-values';
 const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
-const GRID_CITY_VALUE_MODES = new Set(['models', 'observations']);
+const GRID_CITY_VALUE_MODES = new Set(['radar', 'mrms', 'models', 'observations']);
+const LAYER_STACK_SOURCES = ['radar', 'satellite', 'mrms', 'models', 'observations', 'outlooks'];
+const LAYER_STACK_SOURCE_LABELS = {
+  radar: 'Radar',
+  satellite: 'Satellite',
+  mrms: 'MRMS',
+  models: 'Models',
+  observations: 'Observations',
+  outlooks: 'Outlooks',
+};
+const OUTLOOK_LAYER_SEP = '|';
 
 // ---------------------------------------------------------------------------
 // Basemap — Mapbox GL JS vector styles. Rendering with GL (rather than raster
@@ -613,6 +623,7 @@ function setupOverlays(map) {
   if (state.alerts) state.alerts.refreshVisible();
   if (state.spc) state.spc.reapply();
   if (state.cyclones) state.cyclones.reapply();
+  renderLayerStack();
 }
 
 // Hand the current sweep to the custom WebGL radar layer, inserting the layer at
@@ -727,6 +738,8 @@ const state = {
   // this overlay toggle is switched on.
   radarOverlay: false,
   modelCityValues: true,
+  cityValuesProducts: {},
+  layers: { enabled: false, activeId: null, items: [], seq: 1, renderSeq: 0, renderedIds: [], custom: {}, cache: new Map() },
   styleReady: false,
   geo: null,
   alerts: null,
@@ -759,6 +772,7 @@ const state = {
   playbackFrames: 5,
   // Map-tool controllers (METAR station plots, draw/measure/storm, split view).
   metars: null,
+  _metarsOn: false,
   mapTools: null,
   splitView: null,
   exportTool: null,
@@ -805,6 +819,7 @@ const state = {
     productId: 'REFC',
     runs: [],
     runKey: null,
+    stormId: null, // selected tropical cyclone id for storm-based models (HAFS)
     fhour: 0,
     grid: null,
     displayGrid: null,
@@ -858,6 +873,19 @@ function cacheEls() {
   el.radarOverlayToggle = $('#radarOverlayToggle');
   el.modelCityValuesField = $('#modelCityValuesField');
   el.modelCityValuesToggle = $('#modelCityValuesToggle');
+  el.cityValuesProducts = $('#cityValuesProducts');
+  el.layeringField = $('#layeringField');
+  el.layeringToggle = $('#layeringToggle');
+  el.layerControls = $('#layerControls');
+  el.layerList = $('#layerList');
+  el.layerAdd = $('#layerAdd');
+  el.layerUp = $('#layerUp');
+  el.layerDown = $('#layerDown');
+  el.layerRemove = $('#layerRemove');
+  el.layerSourceSelect = $('#layerSourceSelect');
+  el.layerProductSelect = $('#layerProductSelect');
+  el.layerStyleSelect = $('#layerStyleSelect');
+  el.metarsToggle = $('#metarsToggle');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
   el.playFrames = $('#playFrames');
@@ -919,6 +947,8 @@ function cacheEls() {
   el.obsFields = $('#obsFields');
   el.modelFields = $('#modelFields');
   el.modelSelect = $('#modelSelect');
+  el.stormFields = $('#stormFields');
+  el.stormSelect = $('#stormSelect');
   el.fhourPanel = $('#fhourPanel');
   el.fhourList = $('#fhourList');
   el.outlookDetailPanel = $('#outlookDetailPanel');
@@ -983,7 +1013,6 @@ function cacheEls() {
   el.toolDraw = $('#toolDraw');
   el.toolMeasure = $('#toolMeasure');
   el.toolStorm = $('#toolStorm');
-  el.toolMetars = $('#toolMetars');
   el.toolInspect = $('#toolInspect');
   el.toolWeather = $('#toolWeather');
   el.toolLocate = $('#toolLocate');
@@ -1379,14 +1408,14 @@ function buildSiteSelect() {
 // the right one.
 function activeProductId() {
   const sv = state.splitView;
-  if (sv && sv.active && sv.activePane > 1 &&
-      state.mode !== 'observations' && state.mode !== 'outlooks') {
+  if (sv && sv.active && sv.activePane > 1) {
     return sv.activeProductId ? sv.activeProductId() : sv.productId;
   }
   if (state.mode === 'satellite') return state.sat.productId;
   if (state.mode === 'mrms') return state.mrms.productId;
   if (state.mode === 'models') return state.models.productId;
   if (state.mode === 'observations') return state.observations.productId;
+  if (state.mode === 'outlooks' && state.spc) return `${state.spc.product}${OUTLOOK_LAYER_SEP}${state.spc.detail}`;
   return state.productId;
 }
 
@@ -1395,9 +1424,11 @@ function activeProductId() {
 function routeProductToPane(id) {
   const sv = state.splitView;
   if (!(sv && sv.active && sv.activePane > 1)) return false;
-  if (state.mode === 'observations' || state.mode === 'outlooks') return false;
   document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
   sv.setProduct(id);
+  buildLegend();
+  renderModelCityValues();
+  saveSettings();
   return true;
 }
 
@@ -1502,6 +1533,7 @@ function buildProductButtons() {
     section.appendChild(grid);
     el.productButtons.appendChild(section);
   }
+  buildCityValueProductControls();
 }
 
 function buildTiltList() {
@@ -1604,7 +1636,8 @@ function updateSplitPaneChrome() {
     if (sv.setWeatherPickers) sv.setWeatherPickers(false);
     return;
   }
-  const canCompareLegend = state.mode === 'radar' || state.mode === 'mrms' || state.mode === 'models';
+  const canCompareLegend = state.mode === 'radar' || state.mode === 'mrms' || state.mode === 'models' ||
+    state.mode === 'observations';
   const products = sv.paneProducts
     ? sv.paneProducts()
     : [sv._mainProduct ? sv._mainProduct() : state.productId, sv.productId];
@@ -2195,6 +2228,8 @@ function displaySweep(sweep, site) {
   if (state.mode !== 'radar' && !state.radarOverlay) {
     clearRadarSource(map);
     drawRings(null, 0);
+    renderModelCityValues();
+    renderLayerStack();
     syncSplit();
     updateDock();
     return;
@@ -2204,6 +2239,8 @@ function displaySweep(sweep, site) {
     clearRadarSource(map);
     drawRings(null, 0);
     updateInspect();
+    renderModelCityValues();
+    renderLayerStack();
     syncSplit();
     updateDock();
     return;
@@ -2213,6 +2250,8 @@ function displaySweep(sweep, site) {
   setRadarSource(map, sweep, product, site);
   drawRings(site, maxR);
   updateInspect();
+  renderModelCityValues();
+  renderLayerStack();
   syncSplit();
   updateDock();
 }
@@ -2254,6 +2293,10 @@ function applyModePanels() {
   el.mrmsFields.hidden = state.mode !== 'mrms';
   if (el.obsFields) el.obsFields.hidden = state.mode !== 'observations';
   if (el.modelFields) el.modelFields.hidden = state.mode !== 'models';
+  if (el.stormFields) {
+    const sm = MODELS[state.models.modelKey];
+    el.stormFields.hidden = state.mode !== 'models' || !(sm && sm.stormBased);
+  }
   el.tiltPanel.hidden = state.mode !== 'radar';
   if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
   // Outlook mode carries its day/product picker in a dedicated sidebar panel;
@@ -2267,6 +2310,7 @@ function applyModePanels() {
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar' || state.mode === 'outlooks';
   if (el.modelCityValuesField) el.modelCityValuesField.hidden = !GRID_CITY_VALUE_MODES.has(state.mode);
+  buildCityValueProductControls();
   if (el.overlayOpacityField) el.overlayOpacityField.hidden = state.mode === 'outlooks';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
   el.volumeTitle.textContent =
@@ -2293,6 +2337,7 @@ function setMode(mode) {
   if (mode !== 'observations') clearObservations();
   if (mode === 'outlooks') { clearRadarSource(state.map); drawRings(null, 0); }
   else if (mode !== 'radar') applyRadarOverlay(); // hide radar unless its overlay is on
+  if (!GRID_CITY_VALUE_MODES.has(mode)) clearModelCityValues();
   applyModePanels();
   refreshSiteDots(); // show the radar dots only in radar mode
   buildProductButtons();
@@ -2404,12 +2449,16 @@ function croppedSatMeta(scene, crop) {
   };
 }
 
-function buildSatPayload(scene) {
+function buildSatPayload(scene, productId = state.sat.productId) {
   const crop = satelliteCrop(scene);
-  const rgba = buildRGBA(scene, state.sat.productId, { enhanceIR: state.sat.enhanceIR, crop });
+  const rgba = buildRGBA(scene, productId, { enhanceIR: state.sat.enhanceIR, crop });
   const meta = croppedSatMeta(scene, crop);
   const bbox = crop && crop.bbox ? crop.bbox : sceneBBox(meta);
   return { meta, rgba, bbox, crop };
+}
+
+function buildSatPayloadForProduct(productId) {
+  return state.sat.scene ? buildSatPayload(state.sat.scene, productId) : null;
 }
 
 function rebuildSectorSelect() {
@@ -2419,8 +2468,20 @@ function rebuildSectorSelect() {
   for (const [key, sec] of Object.entries(sectors)) {
     const o = document.createElement('option');
     o.value = key; o.textContent = sec.label;
-    if (!cycloneCropActive() && key === state.sat.sectorKey) o.selected = true;
+    if (!cycloneCropActive() && key === state.sat.sectorKey && !(key === 'conus' && state.sat.conusView)) o.selected = true;
     el.sectorSelect.appendChild(o);
+  }
+  if (sectors.conus) {
+    const og = document.createElement('optgroup');
+    og.label = 'CONUS regions';
+    CONUS_VIEWS.forEach(([name], i) => {
+      const o = document.createElement('option');
+      o.value = `conusview:${i}`;
+      o.textContent = name;
+      if (!cycloneCropActive() && state.sat.sectorKey === 'conus' && state.sat.conusView === i) o.selected = true;
+      og.appendChild(o);
+    });
+    el.sectorSelect.appendChild(og);
   }
   // Active tropical cyclones ride along as extra "sectors": picking one crops
   // the full-disk scan around the storm (and auto-switches to the satellite
@@ -2533,6 +2594,20 @@ function initSatSelects() {
       else rebuildSectorSelect(); // storm gone since the list was built
       return;
     }
+    if (el.sectorSelect.value.startsWith('conusview:')) {
+      cancelFrameWarm();
+      state.sat.sectorKey = 'conus';
+      state.sat.conusView = Math.max(0, Math.min(CONUS_VIEWS.length - 1, Number(el.sectorSelect.value.slice('conusview:'.length)) || 0));
+      if (el.conusViewSelect) el.conusViewSelect.value = String(state.sat.conusView);
+      state.sat.cyclone = null;
+      state.sat._centered = false;
+      state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
+      clearSatellite();
+      applyModePanels();
+      loadSatScenes();
+      saveSettings();
+      return;
+    }
     cancelFrameWarm();
     state.sat.sectorKey = el.sectorSelect.value;
     state.sat.cyclone = null; // picking a real sector leaves the storm crop
@@ -2546,6 +2621,7 @@ function initSatSelects() {
   el.conusViewSelect.addEventListener('change', () => {
     cancelFrameWarm();
     state.sat.conusView = +el.conusViewSelect.value || 0;
+    rebuildSectorSelect();
     state.sat._bbox = null;
     const v = CONUS_VIEWS[+el.conusViewSelect.value];
     if (v && state.map) state.map.fitBounds([[v[1][0], v[1][1]], [v[1][2], v[1][3]]], { padding: 12, animate: true });
@@ -2688,6 +2764,7 @@ function renderSatellite() {
   state.sat.displayMeta = payload.meta;
   state.sat._bbox = payload.bbox;
   drawSatScene(payload.meta, payload.rgba, payload.bbox);
+  renderLayerStack();
   syncSplit();
   updateDock();
 }
@@ -2818,6 +2895,7 @@ function buildMrmsProductButtons() {
     section.appendChild(grid);
     el.productButtons.appendChild(section);
   }
+  buildCityValueProductControls();
 }
 
 function buildMrmsList() {
@@ -2907,6 +2985,8 @@ function renderMrms() {
   state.mrms.layer.setGrid(grid, resolveGridProduct(grid.product));
   state.mrms.layer.setOpacity(state.opacity);
   state.mrms.layer.setSmooth(state.smooth);
+  renderModelCityValues();
+  renderLayerStack();
   syncSplit();
   updateDock();
 }
@@ -2920,6 +3000,8 @@ function drawMrmsPayload(payload) {
   state.mrms.layer.showPrepared(payload);
   state.mrms.layer.setOpacity(state.opacity);
   state.mrms.layer.setSmooth(state.smooth);
+  renderModelCityValues();
+  renderLayerStack();
 }
 
 function buildMrmsLegend() {
@@ -2936,7 +3018,7 @@ const obsCatOpen = {};
 function buildObservationProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-stack';
-  const active = state.observations.productId;
+  const active = activeProductId();
   for (const cat of OBS_CATEGORIES) {
     const ids = cat.products.filter((id) => OBS_PRODUCTS[id]);
     if (!ids.length) continue;
@@ -2979,6 +3061,7 @@ function buildObservationProductButtons() {
     section.appendChild(grid);
     el.productButtons.appendChild(section);
   }
+  buildCityValueProductControls();
 }
 
 function buildObservationList() {
@@ -3079,6 +3162,7 @@ function renderObservations() {
   state.observations.layer.setOpacity(state.opacity);
   state.observations.layer.setSmooth(state.smooth);
   renderModelCityValues();
+  renderLayerStack();
   syncSplit();
   updateDock();
 }
@@ -3092,10 +3176,11 @@ function drawObservationPayload(payload) {
   state.observations.layer.setOpacity(state.opacity);
   state.observations.layer.setSmooth(state.smooth);
   renderModelCityValues();
+  renderLayerStack();
 }
 
 function buildObservationLegend() {
-  const p = resolveGridProduct(OBS_PRODUCTS[state.observations.productId]);
+  const p = resolveGridProduct(OBS_PRODUCTS[activeProductId()] || OBS_PRODUCTS[state.observations.productId]);
   el.legend.innerHTML = legendHTML(p, p.scale);
   updateSplitPaneChrome();
 }
@@ -3144,9 +3229,77 @@ function initModelSelects() {
     state._forceLatest = true;
     buildModelProductButtons();
     buildModelLegend();
+    buildStormList(); // show/hide + clear the storm picker for the new model
     saveSettings();
     loadModelList();
   });
+
+  if (el.stormSelect) {
+    el.stormSelect.addEventListener('change', () => {
+      cancelFrameWarm();
+      state.models.stormId = el.stormSelect.value;
+      const run = currentModelRun();
+      if (run) {
+        stampModelStorm(run);
+        // Keep the forecast hour valid for the newly-selected storm's run length.
+        const fhrs = forecastHours(run);
+        if (!fhrs.includes(state.models.fhour)) {
+          const below = fhrs.filter((f) => f <= state.models.fhour);
+          state.models.fhour = below.length ? below[below.length - 1] : fhrs[0];
+        }
+      }
+      state._forceLatest = true; // a different storm is a different field entirely
+      buildFhourList();
+      saveSettings();
+      loadModelFrame();
+    });
+  }
+}
+
+// Basin suffix on an ATCF storm id (04e, 09w, 10l, …) → a short region label.
+const STORM_BASINS = { l: 'Atlantic', e: 'E Pac', c: 'C Pac', w: 'W Pac', a: 'N Ind', b: 'N Ind', s: 'S Ind', p: 'S Pac' };
+function stormLabel(id) {
+  const basin = STORM_BASINS[id.slice(-1)];
+  return basin ? `${id.toUpperCase()} · ${basin}` : id.toUpperCase();
+}
+
+// Pick the selected storm within a storm-based run (falling back to the first
+// active storm), and stamp the run with that storm's id + forecast-hour range so
+// the fhour picker, playback and split-view (which all read the shared run object)
+// follow it. A no-op for fixed-domain models (runs carry no `storms`).
+function stampModelStorm(run) {
+  if (!run || !run.storms || !run.storms.length) return run;
+  const storm = run.storms.find((s) => s.id === state.models.stormId) || run.storms[0];
+  state.models.stormId = storm.id;
+  run.storm = storm.id;
+  run.fhours = storm.fhours;
+  run.maxFhour = storm.fhours[storm.fhours.length - 1] || 0;
+  return run;
+}
+
+// Populate the storm picker from the current run's active storms, and toggle its
+// visibility (storm-based models only, in models mode).
+function buildStormList() {
+  if (!el.stormSelect) return;
+  const model = MODELS[state.models.modelKey];
+  const stormBased = !!(model && model.stormBased);
+  if (el.stormFields) el.stormFields.hidden = state.mode !== 'models' || !stormBased;
+  if (!stormBased) return;
+  const run = currentModelRun();
+  const storms = (run && run.storms) || [];
+  el.stormSelect.innerHTML = '';
+  if (!storms.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = 'No active storms';
+    el.stormSelect.appendChild(o);
+    return;
+  }
+  for (const s of storms) {
+    const o = document.createElement('option');
+    o.value = s.id; o.textContent = stormLabel(s.id);
+    if (s.id === state.models.stormId) o.selected = true;
+    el.stormSelect.appendChild(o);
+  }
 }
 
 // Short model name for status lines (HRRR, NAM, RAP, …).
@@ -3210,6 +3363,7 @@ function buildModelProductButtons() {
     section.appendChild(grid);
     el.productButtons.appendChild(section);
   }
+  buildCityValueProductControls();
 }
 
 function currentModelRun() {
@@ -3280,7 +3434,12 @@ async function loadModelList() {
       state._forceLatest = false;
       selectModelRun(latest);
     } else {
+      // Honoring the user's older run: re-stamp its storm (a live cycle may have
+      // gained forecast hours since the last listing) and refresh the pickers.
+      const run = currentModelRun();
+      if (run) stampModelStorm(run);
       buildModelList();
+      buildStormList();
       buildFhourList();
     }
   } catch (e) {
@@ -3293,8 +3452,11 @@ function selectModelRun(key) {
   state.models.runKey = key;
   const run = currentModelRun();
   // Keep the chosen forecast hour if the new run offers it; otherwise snap down
-  // to the nearest available hour (runs may step non-hourly, e.g. NAM/GFS).
+  // to the nearest available hour (runs may step non-hourly, e.g. NAM/GFS). For
+  // storm-based models the run's hours depend on the selected storm, so stamp it
+  // first (picks the storm and sets run.fhours/maxFhour).
   if (run) {
+    stampModelStorm(run);
     const fhrs = forecastHours(run);
     if (!fhrs.includes(state.models.fhour)) {
       const below = fhrs.filter((f) => f <= state.models.fhour);
@@ -3302,6 +3464,7 @@ function selectModelRun(key) {
     }
   }
   buildModelList();
+  buildStormList();
   buildFhourList();
   loadModelFrame();
 }
@@ -3393,6 +3556,61 @@ function setupModelCityValueLayer(map) {
   }
 }
 
+function cityValueKey(mode, productId) {
+  return `${mode}:${productId || ''}`;
+}
+
+function cityValueDefault(mode) {
+  return mode === 'models' || mode === 'observations';
+}
+
+function cityValueEnabledFor(mode, productId) {
+  if (!state.modelCityValues || !GRID_CITY_VALUE_MODES.has(mode) || !productId) return false;
+  const key = cityValueKey(mode, productId);
+  if (typeof state.cityValuesProducts[key] === 'boolean') return state.cityValuesProducts[key];
+  return cityValueDefault(mode);
+}
+
+function cityValueProductsForMode(mode = state.mode) {
+  if (mode === 'radar') {
+    return availableProductOrder()
+      .map((id) => [id, radarProduct(id)])
+      .filter(([, p]) => p);
+  }
+  if (mode === 'mrms') return MRMS_ORDER.map((id) => [id, MRMS_PRODUCTS[id]]).filter(([, p]) => p);
+  if (mode === 'models') {
+    return MODEL_ORDER
+      .filter((id) => MODEL_PRODUCTS[id] && modelSupports(state.models.modelKey, id))
+      .map((id) => [id, MODEL_PRODUCTS[id]]);
+  }
+  if (mode === 'observations') return OBS_CATEGORIES.flatMap((c) => c.products).map((id) => [id, OBS_PRODUCTS[id]]).filter(([, p]) => p);
+  return [];
+}
+
+function buildCityValueProductControls() {
+  if (!el.cityValuesProducts) return;
+  const products = cityValueProductsForMode();
+  const show = GRID_CITY_VALUE_MODES.has(state.mode) && state.modelCityValues && products.length;
+  el.cityValuesProducts.hidden = !show;
+  el.cityValuesProducts.innerHTML = '';
+  if (!show) return;
+  for (const [id, product] of products) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.title = `${product.name} city readouts`;
+    btn.textContent = id;
+    btn.classList.toggle('active', cityValueEnabledFor(state.mode, id));
+    btn.addEventListener('click', () => {
+      const key = cityValueKey(state.mode, id);
+      state.cityValuesProducts[key] = !cityValueEnabledFor(state.mode, id);
+      buildCityValueProductControls();
+      renderModelCityValues();
+      saveSettings();
+    });
+    el.cityValuesProducts.appendChild(btn);
+  }
+}
+
 function modelGridForReadouts() {
   if (state.mode === 'observations') return observationGridForReadouts();
   return (state.playback && state.playback.active && state.models.displayGrid) || state.models.grid;
@@ -3453,23 +3671,48 @@ function visibleTownPoints(map) {
   return out;
 }
 
-function modelCityValueGeoJSON(grid) {
-  const p = resolveGridProduct(grid.product);
+function cityValueEntries() {
+  const out = [{ pane: 1, map: state.map }];
+  const sv = state.splitView;
+  if (sv && sv.active && sv._mapForPane) {
+    for (let pane = 2; pane <= (sv.paneCount || 1); pane++) {
+      const map = sv._mapForPane(pane);
+      if (map) out.push({ pane, map });
+    }
+  }
+  return out.filter((x) => x.map);
+}
+
+function cityProductForPane(pane) {
+  if (pane > 1 && state.splitView && state.splitView.productForPane)
+    return state.splitView.productForPane(pane);
+  if (state.mode === 'radar') return state.productId;
+  if (state.mode === 'mrms') return state.mrms.productId;
+  if (state.mode === 'models') return state.models.productId;
+  if (state.mode === 'observations') return state.observations.productId;
+  return null;
+}
+
+function cityValueGeoJSON(map, pane) {
   const features = [];
-  for (const { name, lat, lon } of visibleTownPoints(state.map)) {
-    const v = sampleGridRaw(grid, lat, lon);
-    if (v == null || Number.isNaN(v) || !(v >= p.floor)) continue;
+  for (const { name, lat, lon } of visibleTownPoints(map)) {
+    const r = sampleActive(lat, lon, pane);
+    if (!r || r.out || !r.main) continue;
     features.push({
       type: 'Feature',
-      properties: { name, label: String(Math.round(dispValue(p, v))) },
+      properties: { name, label: String(r.main) },
       geometry: { type: 'Point', coordinates: [lon, lat] },
     });
   }
   return { type: 'FeatureCollection', features };
 }
 
-function clearModelCityValues() {
-  const map = state.map;
+function clearModelCityValues(map = null) {
+  const maps = map ? [map] : cityValueEntries().map((x) => x.map);
+  for (const m of maps) clearModelCityValuesOnMap(m);
+}
+
+function clearModelCityValuesOnMap(map) {
   if (!map || !map.getSource || !map.getSource(MODEL_CITY_VALUE_SOURCE)) return;
   map.getSource(MODEL_CITY_VALUE_SOURCE).setData({ type: 'FeatureCollection', features: [] });
   if (map.getLayer(MODEL_CITY_VALUE_LAYER))
@@ -3494,14 +3737,474 @@ function scheduleModelCityValuesRender() {
 }
 
 function renderModelCityValues() {
+  if (!state.styleReady) return;
+  for (const { pane, map } of cityValueEntries()) {
+    if (!map || !map.getStyle) continue;
+    setupModelCityValueLayer(map);
+    const productId = cityProductForPane(pane);
+    if (!cityValueEnabledFor(state.mode, productId)) {
+      clearModelCityValuesOnMap(map);
+      continue;
+    }
+    map.getSource(MODEL_CITY_VALUE_SOURCE).setData(cityValueGeoJSON(map, pane));
+    map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'visibility', 'visible');
+  }
+}
+
+function layerId() {
+  state.layers.seq = (state.layers.seq || 1) + 1;
+  return `user-${Date.now().toString(36)}-${state.layers.seq.toString(36)}`;
+}
+
+function layerProductOptions(source) {
+  if (source === 'radar') {
+    return availableProductOrder().map((id) => ({ value: id, label: `${id} - ${radarProduct(id).name}` }));
+  }
+  if (source === 'satellite') {
+    const channels = SAT_CHANNELS.map((c) => ({ value: 'C' + p2(c.band), label: `C${p2(c.band)} - ${c.name}` }));
+    const rgbs = SAT_RGB_ORDER.map((id) => ({ value: 'RGB_' + id, label: `${SAT_RGB[id].short} - ${SAT_RGB[id].name}` }));
+    return [...channels, ...rgbs];
+  }
+  if (source === 'mrms') {
+    return MRMS_ORDER.filter((id) => MRMS_PRODUCTS[id]).map((id) => ({ value: id, label: `${id} - ${MRMS_PRODUCTS[id].name}` }));
+  }
+  if (source === 'models') {
+    return MODEL_ORDER
+      .filter((id) => MODEL_PRODUCTS[id] && modelSupports(state.models.modelKey, id))
+      .map((id) => ({ value: id, label: `${id} - ${MODEL_PRODUCTS[id].name}` }));
+  }
+  if (source === 'observations') {
+    return OBS_CATEGORIES.flatMap((c) => c.products)
+      .filter((id) => OBS_PRODUCTS[id])
+      .map((id) => ({ value: id, label: `${id} - ${OBS_PRODUCTS[id].name}` }));
+  }
+  if (source === 'outlooks') {
+    return OUTLOOK_ORDER.flatMap((productId) => {
+      const product = OUTLOOKS[productId];
+      return product.details.map((d) => ({
+        value: outlookValue(productId, d.id),
+        label: `${product.label} - ${d.label}`,
+        productId,
+        detailId: d.id,
+      }));
+    });
+  }
+  return [];
+}
+
+function defaultLayerSource() {
+  return LAYER_STACK_SOURCES.includes(state.mode) ? state.mode : 'radar';
+}
+
+function defaultLayerProduct(source) {
+  if (source === 'radar') return state.productId;
+  if (source === 'satellite') return state.sat.productId;
+  if (source === 'mrms') return state.mrms.productId;
+  if (source === 'models') return state.models.productId;
+  if (source === 'observations') return state.observations.productId;
+  if (source === 'outlooks') return state.spc ? outlookValue(state.spc.product, state.spc.detail) : outlookValue('spc_conv', OUTLOOKS.spc_conv.details[0].id);
+  return (layerProductOptions(source)[0] || {}).value || '';
+}
+
+function normalizeLayerProduct(layer, value = null) {
+  const options = layerProductOptions(layer.source);
+  const chosen = value || layer.productId || (options[0] && options[0].value) || '';
+  const opt = options.find((o) => o.value === chosen) || options[0];
+  if (!opt) return;
+  if (layer.source === 'outlooks') {
+    const sel = parseOutlookValue(opt.value);
+    layer.productId = sel.product;
+    layer.detailId = sel.detail;
+  } else {
+    layer.productId = opt.value;
+    layer.detailId = '';
+  }
+}
+
+function activeUserLayer() {
+  return state.layers.items.find((ly) => ly.id === state.layers.activeId) || state.layers.items[0] || null;
+}
+
+function layerDisplayValue(layer) {
+  return layer.source === 'outlooks' ? outlookValue(layer.productId, layer.detailId) : layer.productId;
+}
+
+function layerProductName(layer) {
+  if (layer.source === 'radar') return radarProduct(layer.productId)?.name || layer.productId;
+  if (layer.source === 'satellite') {
+    const id = layer.productId;
+    if (id.startsWith('C')) return (SAT_CHANNELS[parseInt(id.slice(1), 10) - 1] || {}).name || id;
+    return (SAT_RGB[id.replace(/^RGB_/, '')] || {}).name || id;
+  }
+  if (layer.source === 'mrms') return MRMS_PRODUCTS[layer.productId]?.name || layer.productId;
+  if (layer.source === 'models') return MODEL_PRODUCTS[layer.productId]?.name || layer.productId;
+  if (layer.source === 'observations') return OBS_PRODUCTS[layer.productId]?.name || layer.productId;
+  if (layer.source === 'outlooks') {
+    const product = OUTLOOKS[layer.productId] || OUTLOOKS.spc_conv;
+    const detail = product.details.find((d) => d.id === layer.detailId) || product.details[0];
+    return `${product.label} ${detail.label}`;
+  }
+  return layer.productId;
+}
+
+function contourCapable(layer) {
+  return layer.source === 'mrms' || layer.source === 'models' || layer.source === 'observations' || layer.source === 'outlooks';
+}
+
+function syncLayerProductSelect(layer) {
+  if (!el.layerProductSelect || !layer) return;
+  el.layerProductSelect.innerHTML = '';
+  for (const opt of layerProductOptions(layer.source)) {
+    const o = document.createElement('option');
+    o.value = opt.value;
+    o.textContent = opt.label;
+    el.layerProductSelect.appendChild(o);
+  }
+  el.layerProductSelect.value = layerDisplayValue(layer);
+}
+
+function buildLayerControls() {
+  if (!el.layerControls) return;
+  if (el.layeringToggle) setToggleBtn(el.layeringToggle, state.layers.enabled);
+  el.layerControls.hidden = !state.layers.enabled;
+  if (!el.layerSourceSelect || !el.layerProductSelect || !el.layerStyleSelect || !el.layerList) return;
+
+  if (!el.layerSourceSelect.options.length) {
+    for (const source of LAYER_STACK_SOURCES) {
+      const o = document.createElement('option');
+      o.value = source;
+      o.textContent = LAYER_STACK_SOURCE_LABELS[source] || source;
+      el.layerSourceSelect.appendChild(o);
+    }
+  }
+
+  const layer = activeUserLayer();
+  el.layerList.innerHTML = '';
+  for (let i = state.layers.items.length - 1; i >= 0; i--) {
+    const ly = state.layers.items[i];
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'layer-item';
+    btn.classList.toggle('active', ly.id === state.layers.activeId);
+    btn.innerHTML = `<b>${escapeHTML(layerProductName(ly))}</b><span>${escapeHTML((LAYER_STACK_SOURCE_LABELS[ly.source] || ly.source) + ' · ' + ly.style)}</span>`;
+    btn.addEventListener('click', () => {
+      state.layers.activeId = ly.id;
+      buildLayerControls();
+      saveSettings();
+    });
+    el.layerList.appendChild(btn);
+  }
+
+  const disabled = !layer;
+  for (const node of [el.layerSourceSelect, el.layerProductSelect, el.layerStyleSelect, el.layerRemove, el.layerUp, el.layerDown])
+    if (node) node.disabled = disabled;
+  if (!layer) {
+    el.layerProductSelect.innerHTML = '';
+    return;
+  }
+  el.layerSourceSelect.value = layer.source;
+  syncLayerProductSelect(layer);
+  el.layerStyleSelect.value = contourCapable(layer) ? layer.style : 'fill';
+}
+
+function addUserLayer() {
+  const source = defaultLayerSource();
+  const layer = { id: layerId(), source, productId: defaultLayerProduct(source), detailId: '', style: 'fill' };
+  normalizeLayerProduct(layer, layer.productId);
+  state.layers.items.push(layer);
+  state.layers.activeId = layer.id;
+  state.layers.enabled = true;
+  buildLayerControls();
+  renderLayerStack();
+  saveSettings();
+}
+
+function removeUserLayer() {
+  const layer = activeUserLayer();
+  if (!layer) return;
+  const i = state.layers.items.findIndex((ly) => ly.id === layer.id);
+  if (i >= 0) state.layers.items.splice(i, 1);
+  state.layers.activeId = state.layers.items[Math.min(i, state.layers.items.length - 1)]?.id || null;
+  buildLayerControls();
+  renderLayerStack();
+  saveSettings();
+}
+
+function moveUserLayer(delta) {
+  const layer = activeUserLayer();
+  if (!layer) return;
+  const i = state.layers.items.findIndex((ly) => ly.id === layer.id);
+  const j = Math.max(0, Math.min(state.layers.items.length - 1, i + delta));
+  if (i === j) return;
+  state.layers.items.splice(i, 1);
+  state.layers.items.splice(j, 0, layer);
+  buildLayerControls();
+  renderLayerStack();
+  saveSettings();
+}
+
+function clearLayerStack() {
   const map = state.map;
-  const grid = modelGridForReadouts();
-  if (!map || !state.styleReady || !grid) return;
-  setupModelCityValueLayer(map);
-  const on = GRID_CITY_VALUE_MODES.has(state.mode) && state.modelCityValues;
-  if (!on) { clearModelCityValues(); return; }
-  map.getSource(MODEL_CITY_VALUE_SOURCE).setData(modelCityValueGeoJSON(grid));
-  map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'visibility', 'visible');
+  if (!map || !map.getStyle) return;
+  for (const rec of [...(state.layers.renderedIds || [])].reverse()) {
+    for (const id of rec.layers || []) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
+    for (const id of rec.sources || []) {
+      if (map.getSource(id)) map.removeSource(id);
+    }
+  }
+  state.layers.renderedIds = [];
+  state.layers.custom = {};
+}
+
+function rememberLayerArtifacts(layers, sources = []) {
+  state.layers.renderedIds.push({ layers, sources });
+}
+
+function layerCacheKey(layer, extra = '') {
+  return `${layer.source}:${layer.productId}:${layer.detailId || ''}:${extra}`;
+}
+
+async function loadLayerGrid(layer) {
+  if (layer.source === 'mrms') {
+    if (state.mode === 'mrms' && layer.productId === state.mrms.productId && state.mrms.grid) return state.mrms.grid;
+    const frames = await listMrms(layer.productId, state.live ? new Date() : state.date);
+    const frame = frames[frames.length - 1];
+    if (!frame) return null;
+    const ck = layerCacheKey(layer, frame.key);
+    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadMrms(layer.productId, frame.key));
+    return state.layers.cache.get(ck);
+  }
+  if (layer.source === 'observations') {
+    if (state.mode === 'observations' && layer.productId === state.observations.productId && state.observations.grid) return state.observations.grid;
+    let key = state.observations.frameKey ||
+      (state.observations.frames.length ? state.observations.frames[state.observations.frames.length - 1].key : null);
+    if (!key) {
+      const frames = await listObservations(state.live ? new Date() : state.date);
+      const frame = frames[frames.length - 1];
+      key = frame && frame.key;
+    }
+    if (!key) return null;
+    const ck = layerCacheKey(layer, key);
+    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadObservation(layer.productId, key));
+    return state.layers.cache.get(ck);
+  }
+  if (layer.source === 'models') {
+    if (state.mode === 'models' && layer.productId === state.models.productId && state.models.grid) return state.models.grid;
+    const run = currentModelRun();
+    if (!run || !modelSupports(state.models.modelKey, layer.productId)) return null;
+    const ck = layerCacheKey(layer, `${state.models.modelKey}:${state.models.stormId || ''}:${run.key}:${state.models.fhour}`);
+    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadModel(state.models.modelKey, layer.productId, run, state.models.fhour));
+    return state.layers.cache.get(ck);
+  }
+  return null;
+}
+
+function niceStep(raw) {
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / pow;
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return m * pow;
+}
+
+function gridContourData(grid) {
+  const p = resolveGridProduct(grid.product);
+  const lo = dispValue(p, p.lo);
+  const hi = dispValue(p, p.hi);
+  const displayStep = niceStep(Math.abs(hi - lo) / 8);
+  const factor = Math.abs(dispValue(p, p.lo + 1) - dispValue(p, p.lo)) || 1;
+  const nativeStep = displayStep / factor;
+  return contourGeoJSON(grid, grid.values, nativeStep, (level) => fmtValue(p, level), p.floor);
+}
+
+function addContourLayer(layer, grid) {
+  const map = state.map;
+  const sourceId = `rn-user-${layer.id}-contours`;
+  const lineId = `rn-user-${layer.id}-line`;
+  const labelId = `rn-user-${layer.id}-labels`;
+  map.addSource(sourceId, { type: 'geojson', data: gridContourData(grid) });
+  map.addLayer({
+    id: lineId,
+    type: 'line',
+    source: sourceId,
+    layout: { 'line-join': 'round' },
+    paint: { 'line-color': 'rgba(255,255,255,0.86)', 'line-width': 1.35, 'line-opacity': 0.95 },
+  }, firstLabelLayerId(map));
+  map.addLayer({
+    id: labelId,
+    type: 'symbol',
+    source: sourceId,
+    layout: {
+      'symbol-placement': 'line',
+      'text-field': ['get', 'label'],
+      'text-size': 11,
+      'symbol-spacing': 240,
+      'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#ffffff', 'text-halo-color': 'rgba(4,10,18,0.9)', 'text-halo-width': 1.4 },
+  }, firstLabelLayerId(map));
+  rememberLayerArtifacts([lineId, labelId], [sourceId]);
+}
+
+async function renderGridUserLayer(layer, seq) {
+  const map = state.map;
+  const grid = await loadLayerGrid(layer);
+  if (seq !== state.layers.renderSeq) return;
+  if (!grid) return;
+  if (layer.style === 'contour' && contourCapable(layer)) {
+    addContourLayer(layer, grid);
+    return;
+  }
+  const id = `rn-user-${layer.id}`;
+  const glLayer = createGridLayer(id);
+  map.addLayer(glLayer, dataLayerAnchor(map));
+  glLayer.setGrid(grid, resolveGridProduct(grid.product));
+  glLayer.setOpacity(Math.min(0.95, state.opacity));
+  glLayer.setSmooth(state.smooth);
+  state.layers.custom[id] = glLayer;
+  rememberLayerArtifacts([id]);
+}
+
+function renderRadarUserLayer(layer) {
+  const map = state.map;
+  const product = radarProduct(layer.productId);
+  const sweep = radarSweepFor(layer.productId);
+  const site = state.shownSite || (state.volume && state.volume.site);
+  if (!product || !sweep || !site) return;
+  const id = `rn-user-${layer.id}`;
+  const glLayer = createRadarLayer(id);
+  map.addLayer(glLayer, dataLayerAnchor(map));
+  glLayer.setSweep(sweep, product, site);
+  glLayer.setOpacity(Math.min(0.92, state.opacity));
+  glLayer.setSmooth(state.smooth);
+  state.layers.custom[id] = glLayer;
+  rememberLayerArtifacts([id]);
+}
+
+async function renderSatelliteUserLayer(layer, seq) {
+  const map = state.map;
+  const scene = state.sat.scene;
+  if (!scene) return;
+  await ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(layer.productId));
+  if (seq !== state.layers.renderSeq) return;
+  const payload = buildSatPayload(scene, layer.productId);
+  const id = `rn-user-${layer.id}`;
+  const glLayer = createSatelliteLayer(id);
+  map.addLayer(glLayer, dataLayerAnchor(map));
+  glLayer.setScene(payload.meta, payload.rgba, payload.bbox);
+  glLayer.setOpacity(Math.min(0.92, state.opacity));
+  glLayer.setSmooth(state.smooth);
+  state.layers.custom[id] = glLayer;
+  rememberLayerArtifacts([id]);
+}
+
+async function renderOutlookUserLayer(layer, seq) {
+  const map = state.map;
+  const sourceId = `rn-user-${layer.id}-outlook`;
+  const fillId = `rn-user-${layer.id}-fill`;
+  const lineId = `rn-user-${layer.id}-line`;
+  const ck = layerCacheKey(layer);
+  if (!state.layers.cache.has(ck)) {
+    const data = await loadOutlookData(layer.productId, layer.detailId);
+    state.layers.cache.set(ck, data.fc);
+  }
+  if (seq !== state.layers.renderSeq) return;
+  map.addSource(sourceId, { type: 'geojson', data: state.layers.cache.get(ck) || { type: 'FeatureCollection', features: [] } });
+  const layers = [];
+  if (layer.style !== 'contour') {
+    map.addLayer({
+      id: fillId,
+      type: 'fill',
+      source: sourceId,
+      paint: { 'fill-color': ['get', 'fill'], 'fill-opacity': Math.max(0.08, state.spcOpacity * 0.75) },
+    }, dataLayerAnchor(map));
+    layers.push(fillId);
+  }
+  map.addLayer({
+    id: lineId,
+    type: 'line',
+    source: sourceId,
+    paint: { 'line-color': ['get', 'stroke'], 'line-width': layer.style === 'contour' ? 2.2 : 1.5, 'line-opacity': 0.95 },
+  }, firstLabelLayerId(map));
+  layers.push(lineId);
+  rememberLayerArtifacts(layers, [sourceId]);
+}
+
+async function renderOneUserLayer(layer, seq) {
+  if (!state.map || seq !== state.layers.renderSeq) return;
+  normalizeLayerProduct(layer, layerDisplayValue(layer));
+  if (layer.source !== 'outlooks' && !contourCapable(layer) && layer.style === 'contour') layer.style = 'fill';
+  if (layer.source === 'radar') renderRadarUserLayer(layer);
+  else if (layer.source === 'satellite') await renderSatelliteUserLayer(layer, seq);
+  else if (layer.source === 'outlooks') await renderOutlookUserLayer(layer, seq);
+  else await renderGridUserLayer(layer, seq);
+}
+
+async function renderLayerStack() {
+  if (!state.map || !state.styleReady) return;
+  const seq = ++state.layers.renderSeq;
+  clearLayerStack();
+  if (!state.layers.enabled || !state.layers.items.length) return;
+  for (const layer of state.layers.items) {
+    await renderOneUserLayer(layer, seq);
+    if (seq !== state.layers.renderSeq) return;
+  }
+}
+
+function setupLayerControls() {
+  buildLayerControls();
+  if (el.layeringToggle) {
+    el.layeringToggle.addEventListener('click', () => {
+      state.layers.enabled = !state.layers.enabled;
+      if (state.layers.enabled && !state.layers.items.length) addUserLayer();
+      else {
+        buildLayerControls();
+        renderLayerStack();
+        saveSettings();
+      }
+      setStatus(state.layers.enabled ? 'layer stack on' : 'layer stack off');
+    });
+  }
+  if (el.layerAdd) el.layerAdd.addEventListener('click', addUserLayer);
+  if (el.layerRemove) el.layerRemove.addEventListener('click', removeUserLayer);
+  if (el.layerUp) el.layerUp.addEventListener('click', () => moveUserLayer(1));
+  if (el.layerDown) el.layerDown.addEventListener('click', () => moveUserLayer(-1));
+  if (el.layerSourceSelect) {
+    el.layerSourceSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer) return;
+      layer.source = el.layerSourceSelect.value;
+      layer.productId = defaultLayerProduct(layer.source);
+      layer.detailId = '';
+      normalizeLayerProduct(layer, layer.productId);
+      if (!contourCapable(layer)) layer.style = 'fill';
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  if (el.layerProductSelect) {
+    el.layerProductSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer) return;
+      normalizeLayerProduct(layer, el.layerProductSelect.value);
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  if (el.layerStyleSelect) {
+    el.layerStyleSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer) return;
+      layer.style = el.layerStyleSelect.value === 'contour' && contourCapable(layer) ? 'contour' : 'fill';
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
 }
 
 function renderModels() {
@@ -3518,6 +4221,7 @@ function renderModels() {
   state.models.overlayData = grid._overlayData || prepareModelOverlayData(grid);
   showPreparedModelOverlays(map, state.models.overlayData);
   renderModelCityValues();
+  renderLayerStack();
   syncSplit();
   updateDock();
 }
@@ -3534,6 +4238,7 @@ function drawModelPayload(payload) {
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
   renderModelCityValues();
+  renderLayerStack();
 }
 
 function buildModelLegend() {
@@ -3550,6 +4255,49 @@ function sampleModelAt(lat, lon) {
   if (v == null) return { out: true };
   if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no echo', sub: p.id };
   return { main: fmtValue(p, v), sub: p.id };
+}
+
+function visibleModelExtrema() {
+  if (state.mode !== 'models' || !state.map) return null;
+  const grid = modelGridForReadouts();
+  if (!grid || !grid.values) return null;
+  const p = resolveGridProduct(grid.product);
+  const b = state.map.getBounds && state.map.getBounds();
+  if (!b) return null;
+  const south = Math.max(-90, b.getSouth());
+  const north = Math.min(90, b.getNorth());
+  let west = b.getWest();
+  let east = b.getEast();
+  while (east < west) east += 360;
+
+  const rowStart = Math.max(0, Math.floor((grid.lat1 - north) / grid.dj));
+  const rowEnd = Math.min(grid.nj - 1, Math.ceil((grid.lat1 - south) / grid.dj));
+  if (rowEnd < rowStart) return null;
+
+  let lo = Infinity, hi = -Infinity;
+  const lonInView = (lon) => {
+    let x = lon;
+    while (x < west) x += 360;
+    while (x > east && x - 360 >= west) x -= 360;
+    return x >= west && x <= east;
+  };
+  for (let j = rowStart; j <= rowEnd; j++) {
+    const base = j * grid.ni;
+    for (let i = 0; i < grid.ni; i++) {
+      const lon = grid.lon1 + i * grid.di;
+      if (!lonInView(lon)) continue;
+      const v = grid.values[base + i];
+      if (!Number.isFinite(v) || !(v >= p.floor)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  return {
+    title: p.name || p.id,
+    low: fmtValue(p, lo),
+    high: fmtValue(p, hi),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3856,7 +4604,6 @@ function toggleInspect(on) {
 // ---------------------------------------------------------------------------
 function activeModalTool() {
   if (state.mapTools && state.mapTools.tool) return state.mapTools.tool;
-  if (state.metars && state.metars.enabled) return 'metars';
   if (state.weather && state.weather.active) return 'weather';
   if (state.inspect) return 'inspect';
   return null;
@@ -3869,12 +4616,6 @@ function deactivateModalTool(id) {
     case 'storm':
       if (state.mapTools) state.mapTools.setTool(null);
       if (state._syncToolButtons) state._syncToolButtons();
-      break;
-    case 'metars':
-      if (state.metars && state.metars.enabled) {
-        state.metars.setEnabled(false);
-        if (el.toolMetars) el.toolMetars.classList.remove('active');
-      }
       break;
     case 'weather':
       if (state.weather && state.weather.active) stopWeatherTool();
@@ -3894,7 +4635,9 @@ function clearOtherTools(except) {
 
 // Sample whichever data layer is active at a geographic point. Returns null
 // (no layer), { out: true } (off coverage), or { main, sub } formatted strings.
-function sampleActive(lat, lon) {
+function sampleActive(lat, lon, pane = 1) {
+  if (pane > 1 && state.splitView && state.splitView.sampleAt)
+    return state.splitView.sampleAt(pane, lat, lon);
   if (state.mode === 'satellite') return sampleSatAt(lat, lon);
   if (state.mode === 'mrms') return sampleMrmsAt(lat, lon);
   if (state.mode === 'models') return sampleModelAt(lat, lon);
@@ -3904,10 +4647,16 @@ function sampleActive(lat, lon) {
 }
 
 function sampleRadarAt(lat, lon) {
-  const product = radarProduct(state.productId);
-  const sweep = state.shownSweep;
+  return sampleRadarAtProduct(state.productId, lat, lon);
+}
+
+function sampleRadarAtProduct(productId, lat, lon) {
+  const product = radarProduct(productId);
+  const sweep = state.mode === 'radar' && productId !== state.productId
+    ? radarSweepFor(productId)
+    : (productId === state.productId ? state.shownSweep : radarSweepFor(productId));
   const site = state.shownSite;
-  if (!sweep || !site) return null;
+  if (!sweep || !site || !product) return null;
   const s = sampleAt(sweep, product, lat, lon, site);
   if (!s || s.range > sweepMaxRange(sweep, product.moment)) return { out: true };
   const main = s.value == null ? 'no echo' : fmtValue(product, s.value);
@@ -3950,8 +4699,10 @@ function updateInspect() {
   // On desktop the readout follows the mouse (handled by the mousemove handler),
   // so the centre-crosshair sampler only runs on touch layouts.
   if (!state.inspect || isDesktopPointer()) return;
-  const c = state.map.getCenter();
-  const r = sampleActive(c.lat, c.lng);
+  const pane = state.splitView && state.splitView.active ? state.splitView.activePane : 1;
+  const activeMap = pane > 1 && state.splitView._mapForPane ? state.splitView._mapForPane(pane) : state.map;
+  const c = (activeMap || state.map).getCenter();
+  const r = sampleActive(c.lat, c.lng, pane);
   if (!r) { el.crosshairRead.textContent = 'no data'; return; }
   if (r.out) { el.crosshairRead.textContent = 'out of range'; return; }
   el.crosshairRead.innerHTML = `<b>${r.main}</b> · ${r.sub}`;
@@ -4160,6 +4911,36 @@ const OUTLOOK_PRODUCT_SHORT = {
   cpc_precip: 'PCPN',
 };
 
+function outlookValue(product, detail) {
+  return `${product}${OUTLOOK_LAYER_SEP}${detail}`;
+}
+
+function parseOutlookValue(value) {
+  const raw = String(value || '');
+  const i = raw.indexOf(OUTLOOK_LAYER_SEP);
+  if (i >= 0) return { product: raw.slice(0, i), detail: raw.slice(i + 1) };
+  if (state.spc) return { product: state.spc.product, detail: state.spc.detail };
+  return { product: 'spc_conv', detail: OUTLOOKS.spc_conv.details[0].id };
+}
+
+function activeOutlookSelection() {
+  const sv = state.splitView;
+  if (sv && sv.active && sv.activePane > 1 && state.mode === 'outlooks' && sv.outlookForPane)
+    return sv.outlookForPane(sv.activePane);
+  return parseOutlookValue(activeProductId());
+}
+
+function routeOutlookToPane(product, detail) {
+  const sv = state.splitView;
+  if (!(sv && sv.active && sv.activePane > 1 && state.mode === 'outlooks')) return false;
+  sv.setProduct(outlookValue(product, detail));
+  buildOutlookProductButtons();
+  buildOutlookDetailList();
+  buildOutlookLegend();
+  saveSettings();
+  return true;
+}
+
 function buildOutlookProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-grid';
@@ -4173,7 +4954,7 @@ function buildOutlookProductButtons() {
     btn.className = 'product-btn';
     btn.dataset.id = id;
     btn.innerHTML = `<span class="pb-id">${OUTLOOK_PRODUCT_SHORT[id] || id}</span><span class="pb-name">${product.label}</span>`;
-    if (id === state.spc.product) btn.classList.add('active');
+    if (id === activeOutlookSelection().product) btn.classList.add('active');
     btn.addEventListener('click', () => selectOutlookProduct(id));
     el.productButtons.appendChild(btn);
   }
@@ -4188,11 +4969,12 @@ function buildOutlookDetailList() {
     list.innerHTML = '<div class="empty">Loading outlooks...</div>';
     return;
   }
-  const ax = state.spc.axesForProduct(state.spc.product);
+  const sel = activeOutlookSelection();
+  const ax = state.spc.axesForProduct(sel.product);
   // Two-axis products (SPC convective): a Day group and a Product group, so the
   // day and hazard product can be switched independently.
   if (ax) {
-    const { day, type } = ax.split(state.spc.detail);
+    const { day, type } = ax.split(sel.detail);
     const group = (label, items, activeId, onPick) => {
       const head = document.createElement('div');
       head.className = 'vol-group-label';
@@ -4211,10 +4993,10 @@ function buildOutlookDetailList() {
     group(ax.secondaryLabel, ax.types(day), type, selectOutlookType);
     return;
   }
-  for (const d of state.spc.detailsForProduct(state.spc.product)) {
+  for (const d of state.spc.detailsForProduct(sel.product)) {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
-    if (d.id === state.spc.detail) btn.classList.add('active');
+    if (d.id === sel.detail) btn.classList.add('active');
     btn.innerHTML = `<span class="dot"></span>${d.label}`;
     btn.addEventListener('click', () => selectOutlookDetail(d.id));
     list.appendChild(btn);
@@ -4230,6 +5012,10 @@ function buildOutlookLegend() {
 
 function selectOutlookProduct(id) {
   if (!state.spc || !OUTLOOKS[id]) return;
+  const cur = activeOutlookSelection();
+  const details = state.spc.detailsForProduct(id);
+  const detail = details.some((d) => d.id === cur.detail) ? cur.detail : details[0].id;
+  if (routeOutlookToPane(id, detail)) return;
   state.spc.setProduct(id);
   if (el.outlookSelect) el.outlookSelect.value = state.spc.product;
   populateOutlookDetails();
@@ -4241,6 +5027,8 @@ function selectOutlookProduct(id) {
 
 function selectOutlookDetail(id) {
   if (!state.spc) return;
+  const cur = activeOutlookSelection();
+  if (routeOutlookToPane(cur.product, id)) return;
   state.spc.setDetail(id);
   if (el.outlookDetail) el.outlookDetail.value = state.spc.detail;
   buildOutlookDetailList();
@@ -4250,6 +5038,16 @@ function selectOutlookDetail(id) {
 
 function selectOutlookDay(dayId) {
   if (!state.spc) return;
+  const cur = activeOutlookSelection();
+  if (state.mode === 'outlooks') {
+    const ax = state.spc.axesForProduct(cur.product);
+    if (ax) {
+      const split = ax.split(cur.detail);
+      const types = ax.types(dayId);
+      const type = types.some((t) => t.id === split.type) ? split.type : types[0].id;
+      if (routeOutlookToPane(cur.product, ax.join(dayId, type))) return;
+    }
+  }
   state.spc.setDay(dayId);
   populateOutlookDetails();
   buildOutlookDetailList();
@@ -4259,6 +5057,14 @@ function selectOutlookDay(dayId) {
 
 function selectOutlookType(typeId) {
   if (!state.spc) return;
+  const cur = activeOutlookSelection();
+  if (state.mode === 'outlooks') {
+    const ax = state.spc.axesForProduct(cur.product);
+    if (ax) {
+      const split = ax.split(cur.detail);
+      if (routeOutlookToPane(cur.product, ax.join(split.day, typeId))) return;
+    }
+  }
   state.spc.setType(typeId);
   populateOutlookDetails();
   buildOutlookDetailList();
@@ -4388,6 +5194,11 @@ function setupSpcOutlook() {
       const product = OUTLOOKS[state.spc.product];
       setStatus(text || `${product ? product.label : 'Outlook'} loaded`);
     },
+    onData: () => {
+      if (state.splitView && state.splitView.active && state.splitView.setOutlookData)
+        state.splitView.setOutlookData((state.spc && state.spc._last) || null);
+      renderLayerStack();
+    },
     // Keep MD and alert views mutually exclusive (they share the same chrome).
     closeAlerts: () => { if (state.alerts) { state.alerts.closePreview(); state.alerts.closeDetail(); } },
     suppressClick: () => !!(state.mapTools && state.mapTools.tool),
@@ -4428,30 +5239,19 @@ function setupSpcOutlook() {
   }
   if (el.outlookSelect) {
     el.outlookSelect.addEventListener('change', () => {
-      state.spc.setProduct(el.outlookSelect.value);
-      populateOutlookDetails(); // product change swaps the detail set
-      if (state.mode === 'outlooks') {
-        buildOutlookProductButtons();
-        buildOutlookDetailList();
-      }
-      saveSettings();
+      selectOutlookProduct(el.outlookSelect.value);
     });
   }
   if (el.outlookDay) {
     el.outlookDay.addEventListener('change', () => {
-      state.spc.setDay(el.outlookDay.value);
-      populateOutlookDetails(); // the day change may swap the available types
-      if (state.mode === 'outlooks') buildOutlookDetailList();
-      saveSettings();
+      selectOutlookDay(el.outlookDay.value);
     });
   }
   if (el.outlookDetail) {
     el.outlookDetail.addEventListener('change', () => {
-      const ax = state.spc.axesForProduct(state.spc.product);
-      if (ax) state.spc.setType(el.outlookDetail.value);
-      else state.spc.setDetail(el.outlookDetail.value);
-      if (state.mode === 'outlooks') buildOutlookDetailList();
-      saveSettings();
+      const ax = state.spc.axesForProduct(activeOutlookSelection().product);
+      if (ax) selectOutlookType(el.outlookDetail.value);
+      else selectOutlookDetail(el.outlookDetail.value);
     });
   }
   syncOutlookOpacityUI();
@@ -4742,7 +5542,7 @@ function playbackContextKey() {
   if (m === 'satellite')
     return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.conusView}:${state.sat.productId}:${state.sat.enhanceIR}`;
   if (m === 'models')
-    return `models:${state.models.modelKey}:${state.models.productId}:${state.models.runKey}`;
+    return `models:${state.models.modelKey}:${state.models.productId}:${state.models.stormId}:${state.models.runKey}`;
   if (m === 'observations') return `obs:${state.observations.productId}`;
   return m;
 }
@@ -4847,12 +5647,14 @@ async function buildPlaybackProvider(opts = {}) {
       frames: hours.map((fh) => ({
         label: 'F' + p2(fh),
         time: new Date(run.time.getTime() + fh * 3600 * 1000),
-        ck: `${run.key}#${fh}`,
+        ck: `${state.models.modelKey}:${state.models.productId}:${state.models.stormId || ''}:${run.key}#${fh}`,
         fhour: fh,
+        modelKey: state.models.modelKey,
+        productId: state.models.productId,
         run,
       })),
       async load(f) {
-        const grid = await loadModel(state.models.modelKey, state.models.productId, f.run, f.fhour);
+        const grid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
         // Down-pool for playback so the resident window of frames fits in memory;
         // the pooled grid is what both the GPU fill and the scrubbed-hour readout use.
         // The full-res `grid` here is transient and GC'd after this returns.
@@ -5305,8 +6107,8 @@ function updateMeta() {
 // ---------------------------------------------------------------------------
 // Cursor readout
 // ---------------------------------------------------------------------------
-function updateReadout(latlng, point) {
-  const r = sampleActive(latlng.lat, latlng.lng);
+function updateReadout(latlng, point, pane = 1) {
+  const r = sampleActive(latlng.lat, latlng.lng, pane);
   if (!r || r.out) {
     el.readout.classList.remove('show');
     return;
@@ -5367,6 +6169,11 @@ function stopLive() {
 // it back on (button + 60s auto-refresh) without kicking an extra load, since the
 // product handler runs its own load right after.
 function ensureLiveForSwitch() {
+  if (state.playback && state.playback.active) {
+    state.playback.stop();
+    state.playback.cache.clear();
+    state.playback.cacheCtx = null;
+  }
   state._forceLatest = true;
   if (state.live) return;
   state.live = true;
@@ -5530,13 +6337,20 @@ function setupMapTools() {
   // Surface observations (METAR station plots).
   state.metars = new MetarController(state.map);
   state.metars.onStatus = (msg) => setStatus(msg);
-  el.toolMetars.addEventListener('click', () => {
-    const willEnable = !state.metars.enabled;
-    if (willEnable) clearOtherTools('metars');
-    const on = state.metars.setEnabled(!state.metars.enabled);
-    el.toolMetars.classList.toggle('active', on);
-    if (!on) setStatus('METARs off');
-  });
+  const setMetars = (on, quiet = false) => {
+    on = !!on;
+    state._metarsOn = on;
+    const enabled = state.metars.setEnabled(on);
+    setToggleBtn(el.metarsToggle, enabled);
+    if (!enabled && !quiet) setStatus('METARs off');
+    saveSettings();
+    return enabled;
+  };
+  if (el.metarsToggle) {
+    setToggleBtn(el.metarsToggle, state._metarsOn);
+    el.metarsToggle.addEventListener('click', () => setMetars(!state.metars.enabled));
+  }
+  if (state._metarsOn) setMetars(true, true);
 
   // Draw / measure / storm-track annotations.
   state.mapTools = new MapTools(state.map);
@@ -5594,10 +6408,36 @@ function setupMapTools() {
     MAPBOX_TOKEN,
     basemapStyleUrl,
     radarSweepFor,
+    satPayloadForProduct: buildSatPayloadForProduct,
+    lonLatToColRow,
+    sampleRadarAtProduct,
+    sampleGridRaw,
+    formatGridValue: fmtValue,
+    outlookData: () => (state.spc && state.spc._last) || null,
+    loadObservationProduct: (id) => {
+      const key = state.observations.frameKey ||
+        (state.observations.frames.length ? state.observations.frames[state.observations.frames.length - 1].key : null);
+      return key ? loadObservation(id, key) : null;
+    },
+    onInspectMove: (lngLat, point, pane) => {
+      if (state.inspect) updateReadout(lngLat, point, pane);
+    },
+    onInspectOut: () => {
+      if (el.readout) el.readout.classList.remove('show');
+    },
     // When the user clicks a pane to select it, repaint the product buttons so
     // they highlight — and drive — the newly active pane.
-    onActivePaneChange: () => buildProductButtons(),
-    onSplitProductsChange: () => updateSplitPaneChrome(),
+    onActivePaneChange: () => {
+      buildProductButtons();
+      buildOutlookDetailList();
+      buildLegend();
+      buildCityValueProductControls();
+    },
+    onSplitProductsChange: () => {
+      updateSplitPaneChrome();
+      renderModelCityValues();
+    },
+    onPaneRendered: () => renderModelCityValues(),
   });
   el.toolSplit.addEventListener('click', () => {
     const on = state.splitView.toggle(2);
@@ -6140,7 +6980,6 @@ const DOCK_TOOLS = [
   { id: 'storm', icon: '➤', label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'metars', icon: '📡', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: '📍', label: 'My live location', btn: () => el.toolLocate },
   // The model sounding isn't a slot tool anymore — in models mode you long-press
@@ -6166,7 +7005,6 @@ const MOBILE_TOOL_DEFS = [
   { id: 'storm', icon: CONE_ICON, label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'metars', icon: 'radio-tower', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: 'sun', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: 'navigation', label: 'My live location', btn: () => el.toolLocate },
   { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
@@ -6299,7 +7137,16 @@ function buildExportScene() {
   const paneLabels = state.splitView && state.splitView.active && state.splitView.paneProducts
     ? state.splitView.paneProducts()
     : null;
-  return { canvases, paneLabels, caption: buildExportCaption(), legendEl: el.legend, alert, briefing, theme: exportTheme() };
+  return {
+    canvases,
+    paneLabels,
+    caption: buildExportCaption(),
+    legendEl: el.legend,
+    alert,
+    briefing,
+    theme: exportTheme(),
+    modelStats: visibleModelExtrema(),
+  };
 }
 
 // Describe what's on screen for the export banner: a title, a product/source
@@ -6438,7 +7285,7 @@ const DEFAULT_KEYBINDS = {
 const TOOL_ACTION_BTN = {
   inspect: 'inspectBtn',
   storm: 'toolStorm', measure: 'toolMeasure', draw: 'toolDraw',
-  metars: 'toolMetars', weather: 'toolWeather', locate: 'toolLocate',
+  metars: 'metarsToggle', weather: 'toolWeather', locate: 'toolLocate',
   split: 'toolSplit', export: 'toolExport', clear: 'toolClear',
 };
 const TOOL_ACTIONS = [
@@ -7077,7 +7924,14 @@ function saveSettings() {
         mapProvider: state.mapProvider,
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
+        metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
         modelCityValues: state.modelCityValues,
+        cityValuesProducts: state.cityValuesProducts,
+        layers: {
+          enabled: !!state.layers.enabled,
+          activeId: state.layers.activeId,
+          items: state.layers.items.map(({ id, source, productId, detailId, style }) => ({ id, source, productId, detailId, style })),
+        },
         alertsOn: state.alerts ? state.alerts.enabled : true,
         cyclones: state.cyclones
           ? { on: state.cyclones.enabled, ...state.cyclones.show }
@@ -7104,7 +7958,7 @@ function saveSettings() {
           enhanceIR: state.sat.enhanceIR,
         },
         mrms: { productId: state.mrms.productId },
-        models: { modelKey: state.models.modelKey, productId: state.models.productId },
+        models: { modelKey: state.models.modelKey, productId: state.models.productId, stormId: state.models.stormId },
         observations: { productId: state.observations.productId },
         map: c && isFinite(c.lng) ? { lng: c.lng, lat: c.lat, zoom: m.getZoom() } : null,
       };
@@ -7155,7 +8009,31 @@ function applyStoredSettings(s) {
   if (s.mapProvider === 'mapbox' || s.mapProvider === 'maptiler') state.mapProvider = s.mapProvider;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
+  if (typeof s.metarsOn === 'boolean') state._metarsOn = s.metarsOn;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
+  if (s.cityValuesProducts && typeof s.cityValuesProducts === 'object') {
+    state.cityValuesProducts = {};
+    for (const [key, val] of Object.entries(s.cityValuesProducts)) {
+      if (typeof val === 'boolean') state.cityValuesProducts[key] = val;
+    }
+  }
+  if (s.layers && typeof s.layers === 'object') {
+    state.layers.enabled = !!s.layers.enabled;
+    state.layers.activeId = typeof s.layers.activeId === 'string' ? s.layers.activeId : null;
+    state.layers.items = Array.isArray(s.layers.items)
+      ? s.layers.items
+        .filter((ly) => ly && LAYER_STACK_SOURCES.includes(ly.source) && typeof ly.productId === 'string')
+        .map((ly) => ({
+          id: typeof ly.id === 'string' ? ly.id : `layer-${Math.random().toString(36).slice(2, 8)}`,
+          source: ly.source,
+          productId: ly.productId,
+          detailId: typeof ly.detailId === 'string' ? ly.detailId : '',
+          style: ly.style === 'contour' ? 'contour' : 'fill',
+        }))
+      : [];
+    if (!state.layers.items.some((ly) => ly.id === state.layers.activeId))
+      state.layers.activeId = state.layers.items[0] ? state.layers.items[0].id : null;
+  }
   if (typeof s.playbackFrames === 'number') state.playbackFrames = s.playbackFrames;
   if (s.draw && typeof s.draw === 'object') {
     if (typeof s.draw.color === 'string') state.draw.color = s.draw.color;
@@ -7194,6 +8072,7 @@ function applyStoredSettings(s) {
   if (s.models && typeof s.models === 'object') {
     if (typeof s.models.modelKey === 'string' && MODELS[s.models.modelKey]) state.models.modelKey = s.models.modelKey;
     if (typeof s.models.productId === 'string') state.models.productId = s.models.productId;
+    if (typeof s.models.stormId === 'string') state.models.stormId = s.models.stormId;
     // A restored product might not exist on the restored model.
     if (!modelSupports(state.models.modelKey, state.models.productId))
       state.models.productId = defaultProductFor(state.models.modelKey);
@@ -7249,6 +8128,7 @@ function applySmooth(level) {
   if (state.models.layer) state.models.layer.setSmooth(state.smooth);
   if (state.observations.layer) state.observations.layer.setSmooth(state.smooth);
   if (state.splitView) state.splitView.setSmooth(state.smooth);
+  renderLayerStack();
 }
 
 function reflectStoredControls() {
@@ -7260,7 +8140,10 @@ function reflectStoredControls() {
   setToggleBtn(el.dealiasToggle, state.dealias);
   if (el.smooth) { el.smooth.value = String(state.smooth); el.smoothVal.textContent = SMOOTH_LABELS[state.smooth]; }
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
+  setToggleBtn(el.metarsToggle, state._metarsOn);
   setToggleBtn(el.modelCityValuesToggle, state.modelCityValues);
+  setToggleBtn(el.layeringToggle, state.layers.enabled);
+  if (el.layerControls) el.layerControls.hidden = !state.layers.enabled;
   if (typeof state._alertsOn === 'boolean') setToggleBtn(el.alertsToggle, state._alertsOn);
   if (el.mapProviderSelect) el.mapProviderSelect.value = state.mapProvider;
   if (el.basemapSelect) el.basemapSelect.value = state.basemap;
@@ -7353,6 +8236,8 @@ function init() {
 
   // Reflect any restored toggle/slider settings onto their controls.
   reflectStoredControls();
+  setupLayerControls();
+  buildCityValueProductControls();
 
   // Source-mode switch + satellite controls.
   initSatSelects();
@@ -7411,6 +8296,7 @@ function init() {
     if (state.models.layer) state.models.layer.setOpacity(state.opacity);
     if (state.observations.layer) state.observations.layer.setOpacity(state.opacity);
     if (state.splitView) state.splitView.setOpacity(state.opacity);
+    renderLayerStack();
     saveSettings();
   });
   el.palInput.addEventListener('change', (e) => loadPalFile(e.target.files[0]));
@@ -7486,6 +8372,7 @@ function init() {
       const on = !el.modelCityValuesToggle.classList.contains('active');
       setToggleBtn(el.modelCityValuesToggle, on);
       state.modelCityValues = on;
+      buildCityValueProductControls();
       if (on) renderModelCityValues();
       else clearModelCityValues();
       setStatus(on ? 'city values on' : 'city values off');

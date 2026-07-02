@@ -181,9 +181,9 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **GPU plate-carrée layer** (`js/gridLayer.js`) draws the 7000×3500 CONUS grid
   (max-pooled to a GPU-friendly texture) with per-product colour tables.
 
-### Weather models — HRRR, NAM, NAM Nest, RAP, GFS, AI GFS, HRRRCast
+### Weather models — HRRR, NAM, NAM Nest, RAP, GFS, AI GFS, HRRRCast, HAFS-A/B
 
-- **Seven models** read straight from their NODD GRIB2 buckets on S3 and picked
+- **Eleven models** read straight from their NODD GRIB2 buckets on S3 and picked
   from the **Model** dropdown:
   - **HRRR** (3 km CONUS, `noaa-hrrr-bdp-pds`) — hourly cycles.
   - **NAM** (12 km CONUS, `noaa-nam-pds`) — 00/06/12/18z, hourly to F36 then
@@ -202,6 +202,17 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     experimental ML model on the HRRR grid; hourly cycles to F48. Carries the
     surface staples, upper-air winds/temps and a surface-based severe subset
     (no point sounding).
+  - **HAFS-A / HAFS-B** (hurricane models, `noaa-nws-hafs-pds`) — NOAA's
+    operational tropical-cyclone models, 00/06/12/18z, 3-hourly. Each is offered
+    as two entries: the high-res moving **storm nest** (~2 km) and the basin-scale
+    **Parent** domain (~6 km) — four Model entries in all (`hfsa`, `hfsaparent`,
+    `hfsb`, `hfsbparent`). A cycle runs several active cyclones at once, so an extra
+    **Storm** dropdown lists the storms present (e.g. 04E, 09W) — discovered by
+    listing the cycle directory — with each storm's forecast length taken from its
+    own run. HWRF and HMON are intentionally left out: they publish only to NOMADS,
+    which has no CORS mirror and the aggressive rate limits this app avoids. HAFS
+    GRIB2 scans south→north, so its grids are row-flipped to the usual north→south
+    order on decode (`normalizeScan` in `js/models.js`).
 - **Per-model product menus**: each model advertises only the fields its GRIB2
   output actually carries (`MODEL_PRODUCT_SUPPORT` in `js/models.js`), so the
   picker hides products a model can't supply — e.g. NAM drops the 90/255 mb-layer

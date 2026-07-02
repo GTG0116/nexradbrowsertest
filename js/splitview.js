@@ -11,13 +11,39 @@ import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { PRODUCTS, PRODUCT_ORDER, reflectivityProduct } from './products.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel, modelSupports } from './models.js';
+import { OBS_PRODUCTS, OBS_CATEGORIES } from './observations.js';
+import { OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
-import { ensureBands, sceneBBox } from './goes.js';
+import { sceneBBox } from './goes.js';
+import { ensureBandsAsync } from './satClient.js';
 import { applyMapStyle } from './mapStyle.js';
+import { prepareModelOverlayData, showPreparedModelOverlays, clearModelOverlays } from './modelOverlays.js';
 
 const p2 = (n) => String(n).padStart(2, '0');
 const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
-const DATA_LAYER_IDS = ['radar', 'mrms', 'models', SATELLITE_LAYER_ID];
+const DATA_LAYER_IDS = ['radar', 'mrms', 'models', 'observations', SATELLITE_LAYER_ID];
+const OUTLOOK_SEP = '|';
+const EMPTY_FC = { type: 'FeatureCollection', features: [] };
+
+function outlookValue(productId, detailId) {
+  return `${productId}${OUTLOOK_SEP}${detailId}`;
+}
+
+function parseOutlookValue(value, fallback = null) {
+  if (value && typeof value === 'object') return value;
+  const raw = String(value || '');
+  const i = raw.indexOf(OUTLOOK_SEP);
+  if (i >= 0) return { product: raw.slice(0, i), detail: raw.slice(i + 1) };
+  if (fallback) return { ...fallback };
+  return { product: 'spc_conv', detail: OUTLOOKS.spc_conv.details[0].id };
+}
+
+function outlookLabel(value) {
+  const sel = parseOutlookValue(value);
+  const product = OUTLOOKS[sel.product] || OUTLOOKS.spc_conv;
+  const detail = product.details.find((d) => d.id === sel.detail) || product.details[0];
+  return `${product.label}: ${detail.label}`;
+}
 
 function firstLabelLayerId(map) {
   const layers = map.getStyle().layers || [];
@@ -62,6 +88,7 @@ export class SplitView {
     };
     this.productIds = { 2: null, 3: null, 4: null };
     this.productId = null; // Back-compat alias for pane 2.
+    this.outlooksByPane = { 2: null, 3: null, 4: null };
     this.syncing = false;
     this.drawings = { type: 'FeatureCollection', features: [] };
     this._gridCache = new Map();
@@ -74,7 +101,7 @@ export class SplitView {
   }
 
   _emptyLayers() {
-    return { radar: null, mrms: null, models: null, sat: null };
+    return { radar: null, mrms: null, models: null, observations: null, sat: null };
   }
 
   _paneNums() {
@@ -113,6 +140,7 @@ export class SplitView {
       if (cont) cont.hidden = n > count;
       this.layersByPane[n] = this._emptyLayers();
       this.productIds[n] = n <= count ? this._defaultProduct(n) : null;
+      this.outlooksByPane[n] = this.productIds[n] ? parseOutlookValue(this.productIds[n]) : null;
     }
     this.productId = this.productIds[2];
 
@@ -137,6 +165,10 @@ export class SplitView {
         this._setupOverlays(n);
         this.renderPane(n);
         this._setDrawSource(n);
+      });
+      map.on('mousemove', (e) => this._inspectMove(n, e));
+      map.on('mouseout', () => {
+        if (this.ctx.onInspectOut) this.ctx.onInspectOut(n);
       });
     }
 
@@ -169,6 +201,7 @@ export class SplitView {
       this.maps[n] = null;
       this.layersByPane[n] = this._emptyLayers();
       this.productIds[n] = null;
+      this.outlooksByPane[n] = null;
       const cont = paneContainer(n);
       if (cont) cont.hidden = true;
     }
@@ -238,6 +271,37 @@ export class SplitView {
 
     if (!map.getSource('alerts')) {
       map.addSource('alerts', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    }
+    if (!map.getSource('spc-outlook')) {
+      map.addSource('spc-outlook', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    }
+    if (this.ctx.outlookData && map.getSource('spc-outlook')) {
+      map.getSource('spc-outlook').setData(this.ctx.outlookData() || { type: 'FeatureCollection', features: [] });
+    }
+    if (!map.getLayer('spc-outlook-fill')) {
+      map.addLayer(
+        {
+          id: 'spc-outlook-fill',
+          type: 'fill',
+          source: 'spc-outlook',
+          paint: {
+            'fill-color': ['get', 'fill'],
+            'fill-opacity': (this.ctx.state && this.ctx.state.spcOpacity) || 0.3,
+          },
+        },
+        dataLayerAnchor(map)
+      );
+    }
+    if (!map.getLayer('spc-outlook-line')) {
+      map.addLayer(
+        {
+          id: 'spc-outlook-line',
+          type: 'line',
+          source: 'spc-outlook',
+          paint: { 'line-color': ['get', 'stroke'], 'line-width': 1.6, 'line-opacity': 0.9 },
+        },
+        firstLabelLayerId(map)
+      );
     }
     if (!map.getLayer('alerts-fill')) {
       map.addLayer(
@@ -336,6 +400,16 @@ export class SplitView {
     for (const n of this._extraPaneNums()) this._setDrawSource(n);
   }
 
+  setOutlookData(fc) {
+    const data = fc || EMPTY_FC;
+    for (const n of this._extraPaneNums()) {
+      if (this.ctx.state.mode === 'outlooks' && this.productForPane(n) !== this._mainProduct()) continue;
+      const map = this._mapForPane(n);
+      const src = map && map.getSource && map.getSource('spc-outlook');
+      if (src) src.setData(data);
+    }
+  }
+
   _setDrawSource(pane) {
     const map = this._mapForPane(pane);
     const src = map && map.getSource && map.getSource('mt-shapes');
@@ -371,6 +445,17 @@ export class SplitView {
   _productList() {
     const m = this.ctx.state.mode;
     if (m === 'radar') return PRODUCT_ORDER.map((id) => [id, id]);
+    if (m === 'observations') {
+      return OBS_CATEGORIES.flatMap((c) => c.products)
+        .filter((id) => OBS_PRODUCTS[id])
+        .map((id) => [id, id]);
+    }
+    if (m === 'outlooks') {
+      return OUTLOOK_ORDER.flatMap((productId) => {
+        const product = OUTLOOKS[productId];
+        return product.details.map((d) => [outlookValue(productId, d.id), `${product.label}: ${d.label}`]);
+      });
+    }
     if (m === 'mrms') return MRMS_ORDER.map((id) => [id, id]);
     if (m === 'models') {
       const modelKey = this.ctx.state.models.modelKey;
@@ -388,7 +473,10 @@ export class SplitView {
 
   onModeChange() {
     if (!this.active) return;
-    for (const n of this._extraPaneNums()) this.productIds[n] = this._defaultProduct(n);
+    for (const n of this._extraPaneNums()) {
+      this.productIds[n] = this._defaultProduct(n);
+      this.outlooksByPane[n] = this.ctx.state.mode === 'outlooks' ? parseOutlookValue(this.productIds[n]) : null;
+    }
     this.productId = this.productIds[2] || null;
     this._updateBadges();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
@@ -400,6 +488,8 @@ export class SplitView {
     if (s.mode === 'mrms') return s.mrms.productId;
     if (s.mode === 'models') return s.models.productId;
     if (s.mode === 'satellite') return s.sat.productId;
+    if (s.mode === 'observations') return s.observations.productId;
+    if (s.mode === 'outlooks') return s.spc ? outlookValue(s.spc.product, s.spc.detail) : outlookValue('spc_conv', OUTLOOKS.spc_conv.details[0].id);
     return s.productId;
   }
 
@@ -409,6 +499,13 @@ export class SplitView {
 
   setProduct(id, pane = this.activePane) {
     if (pane <= 1 || pane > this.paneCount) return;
+    if (this.ctx.state.mode === 'outlooks') {
+      const sel = parseOutlookValue(id, this.outlookForPane(pane));
+      const product = OUTLOOKS[sel.product] || OUTLOOKS.spc_conv;
+      const detail = product.details.some((d) => d.id === sel.detail) ? sel.detail : product.details[0].id;
+      id = outlookValue(sel.product, detail);
+      this.outlooksByPane[pane] = { product: sel.product, detail };
+    }
     this.productIds[pane] = id;
     if (pane === 2) this.productId = id;
     this._updateBadges();
@@ -418,6 +515,17 @@ export class SplitView {
 
   productForPane(pane) {
     return pane === 1 ? this._mainProduct() : this.productIds[pane];
+  }
+
+  outlookForPane(pane) {
+    if (pane <= 1) {
+      const spc = this.ctx.state.spc;
+      return spc ? { product: spc.product, detail: spc.detail } : parseOutlookValue(this._mainProduct());
+    }
+    const parsed = parseOutlookValue(this.productIds[pane], this.outlooksByPane[pane]);
+    const product = OUTLOOKS[parsed.product] || OUTLOOKS.spc_conv;
+    const detail = product.details.some((d) => d.id === parsed.detail) ? parsed.detail : product.details[0].id;
+    return { product: parsed.product, detail };
   }
 
   paneProducts() {
@@ -536,8 +644,9 @@ export class SplitView {
   _updateBadges() {
     const fmt = (n, prod) => {
       const on = this.activePane === n;
+      const label = this.ctx.state.mode === 'outlooks' ? outlookLabel(prod) : prod;
       return `<span class="sb-name">PANE ${n}</span>` +
-        `<span class="sb-prod">${prod || '-'}</span>` +
+        `<span class="sb-prod">${label || '-'}</span>` +
         (on ? '<span class="sb-dot">editing</span>' : '<span class="sb-dot tap">tap to edit</span>');
     };
     this._badges.forEach((badge, i) => {
@@ -562,6 +671,8 @@ export class SplitView {
       else if (m === 'satellite') this._renderSat(pane);
       else if (m === 'mrms') this._renderGrid('mrms', pane);
       else if (m === 'models') this._renderGrid('models', pane);
+      else if (m === 'observations') this._renderGrid('observations', pane);
+      else if (m === 'outlooks') this._renderOutlook(pane);
       else this._clearData(pane);
     } catch (e) {
       console.error('split render', e);
@@ -572,7 +683,7 @@ export class SplitView {
     const map = this._mapForPane(pane);
     const layers = this.layersByPane[pane] || (this.layersByPane[pane] = this._emptyLayers());
     if (!layers[kind]) layers[kind] = factory();
-    const layerId = { radar: 'radar', mrms: 'mrms', models: 'models', sat: SATELLITE_LAYER_ID }[kind];
+    const layerId = { radar: 'radar', mrms: 'mrms', models: 'models', observations: 'observations', sat: SATELLITE_LAYER_ID }[kind];
     if (!map.getLayer(layerId)) {
       for (const other of DATA_LAYER_IDS) {
         if (other !== layerId && map.getLayer(other)) map.removeLayer(other);
@@ -588,10 +699,13 @@ export class SplitView {
     for (const id of DATA_LAYER_IDS) {
       if (map.getLayer(id)) map.removeLayer(id);
     }
+    clearModelOverlays(map);
   }
 
   _renderRadar(pane) {
     const state = this.ctx.state;
+    const map = this._mapForPane(pane);
+    clearModelOverlays(map);
     const id = this.productIds[pane];
     const product = PRODUCTS[id] || PRODUCTS.REF;
     const site = state.shownSite || (state.volume && state.volume.site);
@@ -604,31 +718,43 @@ export class SplitView {
     layer.setSweep(sweep, product, site);
     layer.setOpacity(state.opacity);
     layer.setSmooth(state.smooth);
+    if (this.ctx.onPaneRendered) this.ctx.onPaneRendered(pane);
   }
 
   _renderSat(pane) {
     const state = this.ctx.state;
+    const map = this._mapForPane(pane);
+    clearModelOverlays(map);
     const scene = state.sat.scene;
     if (!scene) {
       this._clearData(pane);
       return;
     }
-    const id = this.productIds[pane];
+    const id = this.productIds[pane] || state.sat.productId;
     const draw = () => {
-      const rgba = buildRGBA(scene, id, { enhanceIR: state.sat.enhanceIR });
+      const payload = this.ctx.satPayloadForProduct
+        ? this.ctx.satPayloadForProduct(id)
+        : { meta: scene, rgba: buildRGBA(scene, id, { enhanceIR: state.sat.enhanceIR }), bbox: sceneBBox(scene) };
+      if (!payload) {
+        this._clearData(pane);
+        return;
+      }
       const layer = this._ensureLayer(pane, 'sat', createSatelliteLayer);
-      layer.setScene(scene, rgba, sceneBBox(scene));
+      layer.setScene(payload.meta, payload.rgba, payload.bbox);
       layer.setOpacity(state.opacity);
       layer.setSmooth(state.smooth);
+      if (this.ctx.onPaneRendered) this.ctx.onPaneRendered(pane);
     };
-    ensureBands(scene, bandsFor(id)).then(draw).catch((e) => console.error(e));
+    ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(id)).then(draw).catch((e) => console.error(e));
   }
 
   async _renderGrid(mode, pane) {
     const state = this.ctx.state;
-    const id = this.productIds[pane];
+    const id = this.productIds[pane] || (mode === 'observations' ? state.observations.productId : null);
     const sameAsMain = (mode === 'mrms' && id === state.mrms.productId) ||
-      (mode === 'models' && id === state.models.productId);
+      (mode === 'models' && id === state.models.productId) ||
+      (mode === 'observations' && id === state.observations.productId);
+    const map = this._mapForPane(pane);
     const draw = (grid) => {
       if (!grid) {
         this._clearData(pane);
@@ -638,16 +764,21 @@ export class SplitView {
       layer.setGrid(grid, resolveGrid(grid.product));
       layer.setOpacity(state.opacity);
       layer.setSmooth(state.smooth);
+      if (mode === 'models') showPreparedModelOverlays(map, grid._overlayData || prepareModelOverlayData(grid));
+      else clearModelOverlays(map);
+      if (this.ctx.onPaneRendered) this.ctx.onPaneRendered(pane);
     };
 
     if (sameAsMain) {
-      draw(mode === 'mrms' ? state.mrms.grid : state.models.grid);
+      draw(mode === 'mrms' ? state.mrms.grid : mode === 'models' ? state.models.grid : state.observations.grid);
       return;
     }
 
     const ck = mode === 'mrms'
       ? `mrms:${id}`
-      : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.fhour}`;
+      : mode === 'observations'
+      ? `observations:${id}:${state.observations.frameKey}`
+      : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.stormId}:${state.models.fhour}`;
     if (this._gridCache.has(ck)) {
       draw(this._gridCache.get(ck));
       return;
@@ -662,6 +793,13 @@ export class SplitView {
           return;
         }
         grid = await loadMrms(id, frames[frames.length - 1].key);
+      } else if (mode === 'observations') {
+        if (this.ctx.loadObservationProduct) {
+          grid = await this.ctx.loadObservationProduct(id);
+        } else {
+          this._clearData(pane);
+          return;
+        }
       } else {
         const run = state.models.runs.find((r) => r.key === state.models.runKey);
         if (!run) {
@@ -692,5 +830,107 @@ export class SplitView {
 
   getMaps() {
     return this._extraPaneNums().map((n) => this._mapForPane(n)).filter(Boolean);
+  }
+
+  _renderOutlook(pane) {
+    const map = this._mapForPane(pane);
+    if (!map) return;
+    const src = map.getSource && map.getSource('spc-outlook');
+    const sel = this.outlookForPane(pane);
+    const draw = (data) => {
+      if (src) src.setData(data || EMPTY_FC);
+      if (map.getLayer('spc-outlook-fill'))
+        map.setPaintProperty('spc-outlook-fill', 'fill-opacity', (this.ctx.state && this.ctx.state.spcOpacity) || 0.3);
+      this._clearData(pane);
+      clearModelOverlays(map);
+      if (this.ctx.onPaneRendered) this.ctx.onPaneRendered(pane);
+    };
+    const main = parseOutlookValue(this._mainProduct());
+    if (sel.product === main.product && sel.detail === main.detail && this.ctx.outlookData) {
+      draw(this.ctx.outlookData() || EMPTY_FC);
+      return;
+    }
+    const ck = `outlook:${sel.product}:${sel.detail}`;
+    if (this._gridCache.has(ck)) {
+      draw(this._gridCache.get(ck));
+      return;
+    }
+    loadOutlookData(sel.product, sel.detail)
+      .then(({ fc }) => {
+        this._gridCache.set(ck, fc);
+        const cur = this.outlookForPane(pane);
+        if (cur.product === sel.product && cur.detail === sel.detail) draw(fc);
+      })
+      .catch((e) => {
+        console.error('split outlook load', e);
+        draw(EMPTY_FC);
+      });
+    if (map.getLayer('spc-outlook-fill'))
+      map.setPaintProperty('spc-outlook-fill', 'fill-opacity', (this.ctx.state && this.ctx.state.spcOpacity) || 0.3);
+    this._clearData(pane);
+  }
+
+  _inspectMove(pane, e) {
+    if (!this.ctx.onInspectMove) return;
+    const host = paneContainer(pane);
+    const wrap = document.getElementById('mapWrap');
+    const hr = host && host.getBoundingClientRect();
+    const wr = wrap && wrap.getBoundingClientRect();
+    const point = hr && wr
+      ? { x: e.point.x + hr.left - wr.left, y: e.point.y + hr.top - wr.top }
+      : e.point;
+    this.ctx.onInspectMove(e.lngLat, point, pane);
+  }
+
+  sampleAt(pane, lat, lon) {
+    const state = this.ctx.state;
+    const id = this.productForPane(pane);
+    if (!id) return null;
+    if (state.mode === 'satellite') return this._sampleSat(id, lat, lon);
+    if (state.mode === 'mrms' || state.mode === 'models' || state.mode === 'observations')
+      return this._sampleGridPane(pane, state.mode, id, lat, lon);
+    return this.ctx.sampleRadarAtProduct ? this.ctx.sampleRadarAtProduct(id, lat, lon) : null;
+  }
+
+  _sampleSat(id, lat, lon) {
+    const scene = this.ctx.state.sat.scene;
+    if (!scene) return null;
+    const cr = this.ctx.lonLatToColRow ? this.ctx.lonLatToColRow(scene, lat, lon) : null;
+    if (!cr) return { out: true };
+    if (!id.startsWith('C')) {
+      const rgb = SAT_RGB[id.replace(/^RGB_/, '')];
+      return { main: rgb ? rgb.short : id, sub: 'RGB composite' };
+    }
+    const band = parseInt(id.slice(1), 10);
+    const meta = SAT_CHANNELS[band - 1];
+    const arr = scene.channels[band];
+    if (!arr) return { out: true };
+    const v = arr[Math.round(cr.row) * scene.width + Math.round(cr.col)];
+    if (Number.isNaN(v)) return { main: 'no data', sub: id };
+    if (meta && meta.type === 'vis') return { main: `${(v * 100).toFixed(0)} %`, sub: `${id} reflectance` };
+    const f = ((v - 273.15) * 9 / 5 + 32).toFixed(0);
+    return { main: `${f} °F`, sub: `${id} cloud-top` };
+  }
+
+  _sampleGridPane(pane, mode, id, lat, lon) {
+    const state = this.ctx.state;
+    let grid = null;
+    if (mode === 'mrms' && id === state.mrms.productId) grid = state.mrms.grid;
+    else if (mode === 'models' && id === state.models.productId) grid = state.models.grid;
+    else if (mode === 'observations' && id === state.observations.productId) grid = state.observations.grid;
+    if (!grid) {
+      const ck = mode === 'mrms'
+        ? `mrms:${id}`
+        : mode === 'observations'
+        ? `observations:${id}:${state.observations.frameKey}`
+        : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.stormId}:${state.models.fhour}`;
+      grid = this._gridCache.get(ck);
+    }
+    if (!grid || !this.ctx.sampleGridRaw || !this.ctx.formatGridValue) return null;
+    const p = resolveGrid(grid.product);
+    const v = this.ctx.sampleGridRaw(grid, lat, lon);
+    if (v == null) return { out: true };
+    if (Number.isNaN(v) || !(v >= p.floor)) return { main: mode === 'models' ? 'no echo' : 'no data', sub: p.id };
+    return { main: this.ctx.formatGridValue(p, v), sub: mode === 'observations' ? `RTMA ${p.id}` : p.id };
   }
 }

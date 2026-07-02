@@ -27,6 +27,10 @@ const SOUNDING_SOURCE = {
   rap:      { label: 'RAP',      native: true },
   aigfs:    { label: 'AI GFS',   unavailable: true },
   hrrrcast: { label: 'HRRRCast', unavailable: true },
+  hfsa:       { label: 'HAFS-A (nest)',  native: true },
+  hfsaparent: { label: 'HAFS-A Parent',  native: true },
+  hfsb:       { label: 'HAFS-B (nest)',  native: true },
+  hfsbparent: { label: 'HAFS-B Parent',  native: true },
 };
 
 // The sounding source descriptor for an in-app model key (defaults to HRRR).

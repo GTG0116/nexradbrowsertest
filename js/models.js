@@ -35,6 +35,10 @@ function modelUrl(model, key) {
 // HRRR posts surface ('sfc'/wrfsfc) and pressure ('prs'/wrfprs) files
 // separately; the other models pack everything into one file per forecast hour,
 // so their keysFor ignores the `file` argument.
+//
+// Storm-based hurricane models (HAFS, `stormBased:true`) don't publish one file
+// per cycle — they run per active tropical cyclone, so their keysFor takes an
+// extra `storm` id and listModels enumerates the storms present (see below).
 export const MODELS = {
   hrrr: {
     id: 'hrrr',
@@ -152,7 +156,37 @@ export const MODELS = {
       return 48;
     },
   },
+
+  // ---- Hurricane models (HAFS-A / HAFS-B) ----
+  // On the CORS-enabled NODD bucket, keyed as
+  //   <dir>/YYYYMMDD/HH/<storm>.<YYYYMMDDHH>.<dir>.<domain>.atm.f<NNN>.grb2 (+ .idx)
+  // Each cycle runs several active storms at once, on two domains: the basin-scale
+  // `parent` and the high-res moving `storm` nest. listModels lists the cycle to
+  // discover which storms are present and their (per-storm-variable) forecast
+  // hours; the app picks a storm and keysFor takes its id.
+  hfsa: hafsModel('hfsa', 'HAFS-A (nest)', 'hfsa', 'storm'),
+  hfsaparent: hafsModel('hfsaparent', 'HAFS-A Parent', 'hfsa', 'parent'),
+  hfsb: hafsModel('hfsb', 'HAFS-B (nest)', 'hfsb', 'storm'),
+  hfsbparent: hafsModel('hfsbparent', 'HAFS-B Parent', 'hfsb', 'parent'),
 };
+
+// Build one HAFS model entry. `dir` is the bucket top-level (hfsa/hfsb); `domain`
+// is 'parent' or 'storm'. keysFor gains a 5th `storm` argument (existing models
+// ignore it). Forecast hours are 3-hourly and end where a storm's run ends, so
+// they come from the directory listing rather than a fixed range.
+function hafsModel(id, label, dir, domain) {
+  return {
+    id, label, dir, domain,
+    bucket: 'https://noaa-nws-hafs-pds.s3.amazonaws.com',
+    stormBased: true,
+    cycleStep: 6,
+    latencyMin: 200,
+    keysFor(dayStr, cycle, fhour, file, storm) {
+      const grib = `${dir}/${dayStr}/${pad(cycle)}/${storm}.${dayStr}${pad(cycle)}.${dir}.${domain}.atm.f${pad(fhour, 3)}.grb2`;
+      return { grib, idx: grib + '.idx' };
+    },
+  };
+}
 
 // Build a forecast-hour list: hourly out to `hourlyMax`, then every `step` hours
 // out to `total` (e.g. NAM = steppedList(36, 84, 3)).
@@ -194,6 +228,7 @@ const DPT_SCALE = rampScale([
   [272.04, [205, 200, 150]], [277.59, [150, 200, 150]], [283.15, [90, 185, 110]],
   [285.93, [60, 165, 95]], [288.71, [40, 145, 95]], [291.48, [30, 130, 115]],
   [294.26, [30, 120, 135]], [297.04, [40, 110, 155]], [299.82, [60, 100, 175]],
+  [302.59, [95, 70, 180]], [305.37, [145, 45, 165]],
 ]);
 
 // 10 m wind speed (m/s). Stops placed at round mph values converted to m/s.
@@ -475,6 +510,18 @@ function withWindContours(base, intervalMph = 10) {
   };
 }
 
+function dewpointFromTempRh(arrays, i) {
+  const tK = arrays[0][i];
+  const rh = arrays[1][i];
+  if (!Number.isFinite(tK) || !Number.isFinite(rh) || rh <= 0) return NaN;
+  const tc = tK - 273.15;
+  const clampedRh = Math.max(1, Math.min(100, rh));
+  const a = 17.625;
+  const b = 243.04;
+  const gamma = Math.log(clampedRh / 100) + (a * tc) / (b + tc);
+  return (b * gamma) / (a - gamma) + 273.15;
+}
+
 // Combine helpers operate element-wise: (arrays, i) → value, where `arrays` is
 // the list of source value arrays in declared order.
 const negate = (a, i) => -a[0][i];
@@ -562,7 +609,11 @@ export const MODEL_PRODUCTS = {
   })),
   GUST: withWindContours(withMslpOverlay({ ...GUST_PROD, varName: 'GUST', level: 'surface' })),
   RH: { ...RH_PROD, varName: 'RH', level: '2 m above ground' },
-  DPT: withMslpOverlay({ ...DPT_PROD, varName: 'DPT', level: '2 m above ground' }),
+  DPT: withMslpOverlay({
+    ...DPT_PROD,
+    combine: dewpointFromTempRh,
+    sources: () => [sfc('TMP', '2 m above ground'), sfc('RH', '2 m above ground')],
+  }),
   FEELS: withMslpOverlay({
     ...gridProduct('FEELS', 'Feels Like (Heat Index/Wind Chill)', TMP_SCALE, TMP_SCALE.lo, 'K', { unit: '°F', ...K_TO_F }),
     combine: feelsLike,
@@ -786,6 +837,17 @@ const MODEL_PRODUCT_SUPPORT = {
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH1', 'SRH3', 'STORM',
   ],
+  // HAFS packs surface + full pressure levels in one atm file. It carries the
+  // surface staples, upper-air winds/temps/vorticity, and surface-parcel CAPE/CIN
+  // + 0-3 km SRH — but no layer-parcel CAPE (no ML/MU parcels or composites), no
+  // run-total precip (APCP is a 3-h bucket), no lightning or winter fields. Same
+  // field set on the parent and the storm nest, so all four keys share the list.
+  ...Object.fromEntries(['hfsa', 'hfsaparent', 'hfsb', 'hfsbparent'].map((k) => [k, [
+    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'SBCIN', 'SRH3',
+  ]])),
 };
 for (const [key, model] of Object.entries(MODELS)) {
   model.products = new Set(MODEL_PRODUCT_SUPPORT[key] || MODEL_ORDER);
@@ -883,9 +945,102 @@ async function runExists(model, run, productId) {
 // bucket) can run a full day behind real time, so early in the UTC day — or
 // whenever the feed lags — a today-only listing comes up empty and the model
 // looks broken even though recent runs are sitting in the bucket one day back.
+// List every object key under an S3 prefix (list-objects-v2), following the
+// continuation token up to `maxPages`. Used to discover storm-based model runs;
+// the buckets are CORS-enabled so this runs straight from the browser.
+async function listKeys(bucket, prefix, maxPages = 6) {
+  const keys = [];
+  let token = null, pages = 0;
+  do {
+    let url = `${bucket}/?list-type=2&max-keys=1000&prefix=${encodeURIComponent(prefix)}`;
+    if (token) url += `&continuation-token=${encodeURIComponent(token)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`list failed: ${res.status}`);
+    const xml = await res.text();
+    for (const m of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) keys.push(m[1]);
+    const next = /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(xml);
+    token = /<IsTruncated>true<\/IsTruncated>/.test(xml) && next ? next[1] : null;
+  } while (token && ++pages < maxPages);
+  return keys;
+}
+
+// The storms present in one HAFS cycle for this model's domain, each with the
+// forecast hours actually posted (short-lived storms end early). Returns
+// [{ id, fhours }] sorted by storm id; [] when the cycle has no such files.
+async function listStormsForCycle(model, dayStr, cycle) {
+  const prefix = `${model.dir}/${dayStr}/${pad(cycle)}/`;
+  let keys;
+  try {
+    keys = await listKeys(model.bucket, prefix);
+  } catch (_) {
+    return [];
+  }
+  // e.g. "04e.2026070212.hfsa.parent.atm.f012.grb2" — id + forecast hour, and only
+  // this model's domain's atmospheric files (skip .idx sidecars and .sat files).
+  const re = new RegExp(`^([0-9]{2}[a-z])\\.\\d{10}\\.${model.dir}\\.${model.domain}\\.atm\\.f(\\d+)\\.grb2$`);
+  const byStorm = new Map();
+  for (const key of keys) {
+    const m = re.exec(key.slice(prefix.length));
+    if (!m) continue;
+    let set = byStorm.get(m[1]);
+    if (!set) { set = new Set(); byStorm.set(m[1], set); }
+    set.add(parseInt(m[2], 10));
+  }
+  return [...byStorm.entries()]
+    .map(([id, set]) => ({ id, fhours: [...set].sort((a, b) => a - b) }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// List runs for a storm-based model. Same cycle candidates and empty-day walk-back
+// as listModels, but each cycle is discovered by an S3 listing (not a fixed-key
+// probe): a cycle exists when it has ≥1 storm, and each run carries the storm list.
+// The run's default fhours are the first storm's; the app re-stamps them for the
+// selected storm.
+async function listStormModels(model, date) {
+  const now = new Date();
+  const step = model.cycleStep || 6;
+  const latencyMs = (model.latencyMin || 200) * 60000;
+
+  const cyclesForDay = (d) => {
+    const dayStr = dayStrOf(d);
+    const isToday = dayStrOf(now) === dayStr;
+    const list = [];
+    for (let h = 0; h <= 23; h += step) {
+      const time = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h));
+      if (isToday && now.getTime() < time.getTime() + latencyMs) continue; // not posted yet
+      list.push({ dayStr, cycle: h, label: `${pad(h)}z`, time });
+    }
+    return list;
+  };
+
+  const probeDay = async (cands) => {
+    const runs = [];
+    for (const c of cands) {
+      const storms = await listStormsForCycle(model, c.dayStr, c.cycle);
+      if (!storms.length) continue;
+      const first = storms[0];
+      runs.push({
+        key: `${c.dayStr}t${pad(c.cycle)}`,
+        dayStr: c.dayStr, cycle: c.cycle, label: c.label, time: c.time,
+        storms,
+        fhours: first.fhours,
+        maxFhour: first.fhours[first.fhours.length - 1] || 0,
+      });
+    }
+    return runs;
+  };
+
+  let runs = await probeDay(cyclesForDay(date));
+  for (let back = 1; back <= 2 && runs.length === 0; back++) {
+    runs = await probeDay(cyclesForDay(new Date(date.getTime() - back * 86400000)));
+  }
+  return runs;
+}
+
 export async function listModels(modelKey, productId, date) {
   const model = MODELS[modelKey];
   if (!model) throw new Error('unknown model');
+  if (model.stormBased) return listStormModels(model, date);
   const now = new Date();
   const step = model.cycleStep || 1;
   const latencyMs = (model.latencyMin || 55) * 60000;
@@ -1129,7 +1284,7 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
   // Apply any per-model level-string override (e.g. NAM lightning at 'surface').
   const fix = model.levelFix && model.levelFix[src.varName];
   if (fix) src = { ...src, level: fix };
-  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file);
+  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file, run.storm);
   if (!idxCache.has(grib)) {
     // Cache the in-flight promise so concurrent fields share one fetch, but
     // validate the response and drop the entry on failure so a transient error
@@ -1149,7 +1304,9 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
   }
   const range = rangeFromIdx(idxText, src);
   const bytes = await fetchRange(modelUrl(model, grib), range, onProgress);
-  return decodeGrib2(bytes, range.sub);
+  // decodeGrib2 is async (some packings await a PNG/JPEG2000 pass), so await it
+  // before normalizing — normalizeScan takes the decoded grid, not the Promise.
+  return normalizeScan(await decodeGrib2(bytes, range.sub));
 }
 
 // Fetch + decode + resample a single index source into a regular lat/lon grid.
@@ -1311,11 +1468,37 @@ function recenterGlobal(grid) {
   return { ...grid, lon1, values };
 }
 
+// Normalize the row order of a decoded lat/lon grid. GRIB2 scan-mode flag 0x40
+// means the rows run south→north (j increases with latitude), the opposite of the
+// north→south order (lat1 = northern edge) that every sampler here and the GPU grid
+// layer assume. HAFS output scans this way; flip the rows so lat1 becomes the
+// northern edge and storage is top-to-bottom. Grids already in north→south order
+// (GFS/MRMS, scanMode 0) and Lambert grids pass through untouched.
+function normalizeScan(grid) {
+  if (grid.proj !== 'latlon' || !(grid.scanMode & 0x40)) return grid;
+  const { ni, nj, values } = grid;
+  const out = new Float32Array(ni * nj);
+  for (let j = 0; j < nj; j++) {
+    const src = (nj - 1 - j) * ni;
+    out.set(values.subarray(src, src + ni), j * ni);
+  }
+  return {
+    ...grid,
+    lat1: grid.lat1 + (nj - 1) * grid.dj, // southern edge → northern edge
+    scanMode: grid.scanMode & ~0x40,
+    values: out,
+  };
+}
+
 const MSLP_SOURCES = [
   sfc('PRMSL', 'mean sea level'),
   sfc('MSLMA', 'mean sea level'),
   sfc('MSLET', 'mean sea level'),
   sfc('PRES', 'mean sea level'),
+  sfc('PRMSL', 'surface'),
+  sfc('MSLMA', 'surface'),
+  sfc('MSLET', 'surface'),
+  sfc('PRES', 'surface'),
 ];
 
 async function loadFirstAvailableSource(model, run, fhour, sources, idxCache) {
@@ -1399,6 +1582,6 @@ export async function loadModel(modelKey, productId, run, fhour, onProgress) {
   grid.runTime = run.time;
   // Valid time = cycle time + forecast hour.
   grid.time = new Date(run.time.getTime() + fhour * 3600 * 1000);
-  grid.key = model.keysFor(run.dayStr, run.cycle, fhour).grib;
+  grid.key = model.keysFor(run.dayStr, run.cycle, fhour, undefined, run.storm).grib;
   return grid;
 }

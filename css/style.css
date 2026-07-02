@@ -222,6 +222,17 @@ body.theme-dark .brand-mark {
   flex: 1 1 0;
   min-height: 80px;
 }
+#volumePanel {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+#volumePanel .btn-row {
+  flex: 0 0 auto;
+}
+#volumePanel .vol-list {
+  min-height: 0;
+  overflow: auto;
+}
 /* Models mode hosts the scan panel ("Model runs") directly in the sidebar.
    There its drawer-oriented `grow` sizing would crush it to min-height and let
    the date/refresh/LIVE controls paint over the forecast-hour panel below —
@@ -231,7 +242,10 @@ body.theme-dark .brand-mark {
   min-height: 0;
 }
 .sidebar #volumePanel .vol-list {
-  max-height: 220px;
+  max-height: min(220px, 32vh);
+}
+.mobile-sheet #volumePanel .vol-list {
+  max-height: min(240px, 34vh);
 }
 
 .panel-title {
@@ -733,6 +747,91 @@ input[type='range']::-moz-range-thumb {
   font-size: 11px;
   color: var(--accent);
   word-break: break-all;
+}
+
+.city-product-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+.city-product-list button {
+  min-width: 0;
+  border: 1px solid var(--panel-edge);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--ink-dim);
+  padding: 6px 8px;
+  font: 11px 'JetBrains Mono', monospace;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.city-product-list button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(82, 210, 255, 0.12);
+}
+
+.layer-controls {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--panel-edge);
+}
+.layer-toolbar {
+  display: grid;
+  grid-template-columns: 1fr 36px 36px 36px;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.layer-toolbar .pal-btn {
+  min-width: 0;
+  padding: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.layer-item {
+  width: 100%;
+  border: 1px solid var(--panel-edge);
+  border-radius: 7px;
+  background: rgba(10, 20, 36, 0.48);
+  color: var(--ink);
+  padding: 7px 9px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+}
+.layer-item.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(82, 210, 255, 0.25);
+}
+.layer-item b,
+.layer-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layer-item b {
+  font: 12px 'JetBrains Mono', monospace;
+}
+.layer-item span {
+  color: var(--ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
 }
 
 .pal-creator {

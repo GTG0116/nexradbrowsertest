@@ -196,7 +196,7 @@ function chain(segs) {
 }
 
 // Build LineString features for a contour field.
-function contourGeoJSON(grid, values, interval, labelFor, minLevel = null) {
+export function contourGeoJSON(grid, values, interval, labelFor, minLevel = null) {
   const d = downsample(grid, values);
   let lo = Infinity, hi = -Infinity;
   for (const val of d.v) if (!Number.isNaN(val)) { if (val < lo) lo = val; if (val > hi) hi = val; }
@@ -242,7 +242,7 @@ function pressureCenterGeoJSON(grid) {
   const features = [];
   if (d.w < 5 || d.h < 5) return { type: 'FeatureCollection', features };
 
-  const radius = Math.max(4, Math.round(1.4 / Math.max(d.di, d.dj)));
+  const radius = Math.max(3, Math.round(0.75 / Math.max(d.di, d.dj)));
   const candidates = [];
   const idx = (i, j) => j * d.w + i;
   for (let j = radius; j < d.h - radius; j++) {
@@ -264,20 +264,20 @@ function pressureCenterGeoJSON(grid) {
       }
       const lon = d.lon1 + i * d.di;
       const lat = d.lat1 - j * d.dj;
-      if (isHigh && val >= 101600 && val - ringMin >= 150)
+      if (isHigh && val >= 101400 && val - ringMin >= 75)
         candidates.push({ kind: 'H', val, lon, lat, score: val - ringMin });
-      if (isLow && val <= 101000 && ringMax - val >= 150)
+      if (isLow && val <= 101200 && ringMax - val >= 75)
         candidates.push({ kind: 'L', val, lon, lat, score: ringMax - val });
     }
   }
 
   candidates.sort((a, b) => b.score - a.score);
   const picked = [];
-  const farEnough = (a) => picked.every((b) => Math.hypot((a.lon - b.lon) * Math.cos(a.lat * Math.PI / 180), a.lat - b.lat) >= 7);
+  const farEnough = (a) => picked.every((b) => Math.hypot((a.lon - b.lon) * Math.cos(a.lat * Math.PI / 180), a.lat - b.lat) >= 4);
   for (const c of candidates) {
     if (!farEnough(c)) continue;
     picked.push(c);
-    if (picked.length >= 12) break;
+    if (picked.length >= 18) break;
   }
 
   for (const c of picked) {

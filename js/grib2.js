@@ -230,6 +230,7 @@ export async function decodeGrib2(input, sub = 0) {
   // packing parameters of every field so the requested submessage can be picked.
   const fields = [];
   let R = 0, E = 0, D = 0, bits = 0, drt = -1, npts = 0, p5 = 0;
+  let bitmapIndicator = 255, bitmapSection = null;
 
   let p = 16; // after section 0
   while (p < b.length - 4) {
@@ -279,9 +280,17 @@ export async function decodeGrib2(input, sub = 0) {
       E = readSignMag(dv, p + 15, 2);
       D = readSignMag(dv, p + 17, 2);
       bits = b[p + 19];
+      // Reset bitmap state for this field; its section 6 (always present) sets it.
+      bitmapIndicator = 255; bitmapSection = null;
+    } else if (sec === 6) {
+      // Bitmap section: octet 6 is the indicator (0 = bitmap present in this
+      // section, 255 = none). When present, only the unmasked grid points are
+      // encoded in section 7, so the decoded values must be scattered back out.
+      bitmapIndicator = b[p + 5];
+      if (bitmapIndicator === 0) bitmapSection = b.subarray(p + 6, p + len);
     } else if (sec === 7) {
       // Close this field with the packing parameters seen since the last one.
-      fields.push({ p5, npts, drt, R, E, D, bits, dataSection: b.subarray(p + 5, p + len) });
+      fields.push({ p5, npts, drt, R, E, D, bits, bitmapIndicator, bitmapSection, dataSection: b.subarray(p + 5, p + len) });
     }
     p += len;
   }
@@ -297,26 +306,46 @@ export async function decodeGrib2(input, sub = 0) {
   // Guard against a pathological decimal-scale exponent underflowing to 0, which
   // would make every unpacked value Infinity/NaN.
   const scaleD = Math.pow(10, D) || 1;
-  const values = new Float32Array(grid.ni * grid.nj);
+  const total = grid.ni * grid.nj;
+  // With a bitmap, section 7 holds only the `npts` unmasked points; decode those,
+  // then scatter into the full grid below. Without one, npts === total and the
+  // decoded array *is* the grid.
+  const bitmap = f.bitmapIndicator === 0 ? f.bitmapSection : null;
+  const decoded = new Float32Array(bitmap ? npts : total);
 
   if (drt === 41) {
     const { samples } = await decodePNG(dataSection);
-    for (let i = 0; i < values.length; i++) values[i] = (R + samples[i] * scaleE) / scaleD;
+    for (let i = 0; i < decoded.length; i++) decoded[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 40) {
     // JPEG2000 (RAP). decodeJ2K returns integer samples in raster order.
     const { samples } = decodeJ2K(dataSection);
-    for (let i = 0; i < values.length; i++) values[i] = (R + samples[i] * scaleE) / scaleD;
+    for (let i = 0; i < decoded.length; i++) decoded[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 0) {
     // simple packing: big-endian bit field of `bits` per point.
     const br = new BitReader(dataSection);
-    for (let i = 0; i < values.length; i++) {
+    for (let i = 0; i < decoded.length; i++) {
       const X = bits === 0 ? 0 : br.read(bits);
-      values[i] = (R + X * scaleE) / scaleD;
+      decoded[i] = (R + X * scaleE) / scaleD;
     }
   } else if (drt === 2 || drt === 3) {
-    unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values);
+    unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, decoded);
   } else {
     throw new Error('unsupported GRIB2 data template ' + drt);
+  }
+
+  let values;
+  if (bitmap) {
+    // Scatter the decoded points into the full grid in scan order: a set bit
+    // (MSB-first) consumes the next decoded value, a clear bit is a missing point
+    // (NaN → transparent). Skipping this leaves every point after the first
+    // masked one shifted, which shears the field into horizontal streaks.
+    values = new Float32Array(total);
+    let src = 0;
+    for (let i = 0; i < total; i++) {
+      values[i] = (bitmap[i >> 3] >> (7 - (i & 7))) & 1 ? decoded[src++] : NaN;
+    }
+  } else {
+    values = decoded;
   }
 
   grid.values = values;

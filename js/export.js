@@ -11,7 +11,7 @@
 // In split view both panes are passed in and laid out side by side.
 
 export class ExportTool {
-  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl, alert, briefing }
+  // getScene() -> { canvases:[HTMLCanvasElement], caption, legendEl, alert, briefing, modelStats }
   //   canvases : one map canvas, or two for split view (left → right)
   //   caption  : { brand, title, sub, time, stamp }
   //   legendEl : the live legend element to redraw, or null
@@ -124,6 +124,8 @@ export class ExportTool {
           mapX + col * (cellW + gap), headerH + row * (cellH + gap), u, theme);
       });
     }
+
+    if (scene.modelStats) drawModelStats(ctx, scene.modelStats, mapX, headerH, mapW, u, theme);
 
     // The full alert briefing reproduced as the on-screen side panel takes
     // precedence; otherwise the floating preview card is stamped over the map
@@ -362,6 +364,44 @@ function drawPaneTag(ctx, label, paneX, paneY, u, theme) {
   ctx.textBaseline = 'middle';
   ctx.fillText(label, x + padX, y + h / 2 + 1);
   ctx.textBaseline = 'alphabetic';
+}
+
+function drawModelStats(ctx, stats, mapX, mapY, mapW, u, theme) {
+  const title = String(stats.title || 'Model');
+  const high = `HIGH ${stats.high || '-'}`;
+  const low = `LOW ${stats.low || '-'}`;
+  const fsTitle = Math.round(u * 0.64);
+  const fsVal = Math.round(u * 0.82);
+  const padX = Math.round(u * 0.65);
+  const padY = Math.round(u * 0.45);
+  ctx.save();
+  ctx.font = `700 ${fsTitle}px ${MONO}`;
+  const titleW = ctx.measureText(title.toUpperCase()).width;
+  ctx.font = `700 ${fsVal}px ${MONO}`;
+  const highW = ctx.measureText(high).width;
+  const lowW = ctx.measureText(low).width;
+  const w = Math.ceil(Math.max(titleW, highW, lowW) + padX * 2);
+  const lineH = Math.round(u * 1.0);
+  const h = padY * 2 + lineH * 3;
+  const x = Math.round(mapX + mapW - w - u * 0.7);
+  const y = Math.round(mapY + u * 0.7);
+  roundRectPath(ctx, x, y, w, h, Math.round(u * 0.35));
+  ctx.fillStyle = 'rgba(8,11,17,0.84)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.24)';
+  ctx.lineWidth = Math.max(1, Math.round(u / 20));
+  ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(255,255,255,0.74)';
+  ctx.font = `700 ${fsTitle}px ${MONO}`;
+  ctx.fillText(title.toUpperCase(), x + padX, y + padY + lineH * 0.45);
+  ctx.fillStyle = theme.accent;
+  ctx.font = `700 ${fsVal}px ${MONO}`;
+  ctx.fillText(high, x + padX, y + padY + lineH * 1.55);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(low, x + padX, y + padY + lineH * 2.55);
+  ctx.restore();
 }
 
 // Legend: caption above a gradient bar with low/mid/high ticks beneath. Returns

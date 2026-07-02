@@ -54,6 +54,17 @@ function fmtDist(m) {
 
 const bgColor = { draw: '#36e0c8', measure: '#ffd54a', storm: '#ff5a7a' };
 
+function firstLabelLayerId(map) {
+  const layers = (map.getStyle && map.getStyle().layers) || [];
+  for (const ly of layers) {
+    if (ly.type === 'symbol') return ly.id;
+  }
+  for (const ly of layers) {
+    if (ly.type === 'line') return ly.id;
+  }
+  return undefined;
+}
+
 export class MapTools {
   constructor(map) {
     this.map = map;
@@ -87,7 +98,7 @@ export class MapTools {
     const map = this.map;
     if (!map.getSource('mt-shapes'))
       map.addSource('mt-shapes', { type: 'geojson', data: this._fc() });
-    const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer); };
+    const add = (layer) => { if (!map.getLayer(layer.id)) map.addLayer(layer, firstLabelLayerId(map)); };
     add({
       id: 'mt-fill', type: 'fill', source: 'mt-shapes',
       filter: ['==', ['geometry-type'], 'Polygon'],

@@ -132,6 +132,10 @@
               <span>Model</span>
               <select id="modelSelect"></select>
             </label>
+            <label class="field" id="stormFields" hidden>
+              <span>Storm</span>
+              <select id="stormSelect"></select>
+            </label>
             <label class="field" id="obsFields" hidden>
               <span>Analysis</span>
               <select id="obsDomainSelect">
@@ -190,18 +194,6 @@
               Tropical cyclones
               <button id="cyclonesToggle" class="alerts-toggle" title="Toggle the tropical cyclone overlay">OFF</button>
             </h2>
-            <div class="toggle-field">
-              <span>Forecast path</span>
-              <button id="cyclonesPathToggle" class="alerts-toggle active" title="Show the forecast track and points (past track dashed)">ON</button>
-            </div>
-            <div class="toggle-field">
-              <span>Current location</span>
-              <button id="cyclonesCurrentToggle" class="alerts-toggle active" title="Show each storm's current position marker">ON</button>
-            </div>
-            <div class="toggle-field">
-              <span>Forecast cone</span>
-              <button id="cyclonesConeToggle" class="alerts-toggle active" title="Show the NHC cone of uncertainty (JTWC storms have no cone)">ON</button>
-            </div>
             <div id="cycloneStatus" class="spc-status"></div>
             <div id="cycloneList" class="alert-list scroll"></div>
           </section>
@@ -263,7 +255,6 @@
                    forecast cone fanning out from it, echoing the wedge the
                    storm-track tool draws on the map. -->
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><circle cx="5" cy="19" r="1"/><path d="M6.6 15.1L11.3 4.3A16 16 0 0 1 19.7 12.8L8.9 17.4A4.2 4.2 0 0 0 6.6 15.1Z"/></svg></button>
-              <button id="toolMetars" class="map-tool" title="Surface observations (METARs)"><i data-lucide="radio-tower" class="lucide sm"></i></button>
               <button id="toolInspect" class="map-tool" title="Inspect a pixel"><i data-lucide="crosshair" class="lucide sm"></i></button>
               <button id="toolWeather" class="map-tool" title="Local current conditions"><i data-lucide="sun" class="lucide sm"></i></button>
               <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="navigation" class="lucide sm"></i></button>
@@ -330,6 +321,51 @@
           <div class="toggle-field" id="modelCityValuesField" hidden>
             <span>City values</span>
             <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled grid values above city labels">ON</button>
+          </div>
+          <div id="cityValuesProducts" class="city-product-list" hidden></div>
+          <div class="toggle-field" id="layeringField">
+            <span>Layer stack</span>
+            <button id="layeringToggle" class="alerts-toggle" title="Add editable product layers on top of the map">OFF</button>
+          </div>
+          <div id="layerControls" class="layer-controls" hidden>
+            <div class="layer-toolbar">
+              <button id="layerAdd" class="pal-btn" type="button" title="Add layer"><i data-lucide="plus" class="lucide sm"></i></button>
+              <button id="layerUp" class="pal-btn ghost" type="button" title="Move layer up"><i data-lucide="arrow-up" class="lucide sm"></i></button>
+              <button id="layerDown" class="pal-btn ghost" type="button" title="Move layer down"><i data-lucide="arrow-down" class="lucide sm"></i></button>
+              <button id="layerRemove" class="pal-btn ghost" type="button" title="Remove layer"><i data-lucide="trash-2" class="lucide sm"></i></button>
+            </div>
+            <div id="layerList" class="layer-list"></div>
+            <label class="field">
+              <span>Layer source</span>
+              <select id="layerSourceSelect"></select>
+            </label>
+            <label class="field">
+              <span>Layer product</span>
+              <select id="layerProductSelect"></select>
+            </label>
+            <label class="field">
+              <span>Layer style</span>
+              <select id="layerStyleSelect">
+                <option value="fill">Fill</option>
+                <option value="contour">Contour</option>
+              </select>
+            </label>
+          </div>
+          <div class="toggle-field" id="metarsField">
+            <span>METAR overlay</span>
+            <button id="metarsToggle" class="alerts-toggle" title="Show surface observation station plots">OFF</button>
+          </div>
+          <div class="toggle-field">
+            <span>Cyclone path</span>
+            <button id="cyclonesPathToggle" class="alerts-toggle active" title="Show the forecast track and points (past track dashed)">ON</button>
+          </div>
+          <div class="toggle-field">
+            <span>Cyclone location</span>
+            <button id="cyclonesCurrentToggle" class="alerts-toggle active" title="Show each storm's current position marker">ON</button>
+          </div>
+          <div class="toggle-field">
+            <span>Cyclone cone</span>
+            <button id="cyclonesConeToggle" class="alerts-toggle active" title="Show the NHC cone of uncertainty (JTWC storms have no cone)">ON</button>
           </div>
           <div class="toggle-field" id="loopField">
             <span>Playback loop</span>

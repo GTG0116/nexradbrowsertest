@@ -179,6 +179,42 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
+function validTextFor(feats, product) {
+  if (!feats.length) return 'No areas for this outlook.';
+  const p = feats[0].properties || {};
+  if (typeof p.valid_time === 'string' && p.valid_time) return `Valid ${p.valid_time}`;
+  const v = fmtZ(p.VALID_ISO != null ? p.VALID_ISO : p.valid != null ? p.valid : p.start_date);
+  const x = fmtZ(p.EXPIRE_ISO != null ? p.EXPIRE_ISO : p.expire != null ? p.expire : p.end_date);
+  if (v && x) return `Valid ${v} - ${x}`;
+  if (product && product.label === OUTLOOKS.spc_md.label) return `${feats.length} active discussion${feats.length === 1 ? '' : 's'}`;
+  return '';
+}
+
+export async function loadOutlookData(productId, detailId) {
+  const product = OUTLOOKS[productId] || OUTLOOKS.spc_conv;
+  const detail = product.details.find((d) => d.id === detailId) || product.details[0];
+  const url = product.url ? product.url(detail) : arcUrl(detail.path, detail.layer);
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const fc = await res.json();
+  const feats = (fc.features || []).filter((f) => f.geometry);
+  for (const f of feats) {
+    const s = product.style(f, detail) || {};
+    f.properties = f.properties || {};
+    f.properties.fill = s.fill || '#888';
+    f.properties.stroke = s.stroke || s.fill || '#444';
+    f.properties._label = s.label || '';
+    f.properties._code = s.code || '';
+    f.properties._sort = s.sort || 0;
+  }
+  return {
+    fc: { type: 'FeatureCollection', features: feats },
+    product,
+    detail,
+    status: validTextFor(feats, product),
+  };
+}
+
 // ---- SPC Mesoscale Discussion text (for the click-through briefing) ---------
 // The ArcGIS MD feed carries only the number + a link to the SPC product page;
 // the probabilistic detail (watch probability, peak tornado/wind/hail) lives in
@@ -303,6 +339,7 @@ export class OutlookController {
     this._last = fc;
     const src = this.map && this.map.getSource && this.map.getSource('spc-outlook');
     if (src) src.setData(fc);
+    if (typeof this.els.onData === 'function') this.els.onData(fc);
   }
 
   reapply() {
