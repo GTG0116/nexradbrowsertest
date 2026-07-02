@@ -68,20 +68,18 @@ export function stormCategory(windKt) {
   return { label: 'Tropical Depression', color: '#5ebaff' };
 }
 
-// The category shown must follow the Saffir-Simpson wind scale, not whatever
-// category a feed embeds in its own label. JTWC tags 130+ kt as "Super Typhoon
-// (Category 5)", but 130–136 kt is Category 4 — Category 5 starts at 137 kt /
-// 157 mph. So at hurricane strength we trust stormCategory(windKt); weaker or
-// non-categorised systems (Tropical Storm, Post-Tropical, Subtropical…) keep
-// their descriptive feed label.
+// Intensity is always derived from the reported wind speed via the
+// Saffir-Simpson scale — never the feed's own classification. Sources can be
+// wrong: JTWC tags 130+ kt as "Super Typhoon (Category 5)", but 130–136 kt is
+// Category 4 (Category 5 starts at 137 kt / 157 mph). Computing from wind keeps
+// the intensity label, the category, and the colour consistent and correct.
+// The feed label is used only as a last resort when no wind value is reported.
 function intensityLabel(windKt, feedLabel) {
-  const w = Number(windKt);
-  const label = feedLabel || '';
-  const categorised = /hurricane|typhoon|category/i.test(label);
-  if (Number.isFinite(w) && w >= 64 && (categorised || !label)) {
-    return stormCategory(w).label;
+  if (windKt != null && windKt !== '') {
+    const w = Number(windKt);
+    if (Number.isFinite(w)) return stormCategory(w).label;
   }
-  return label || (Number.isFinite(w) ? stormCategory(w).label : null);
+  return feedLabel || null;
 }
 
 const esc = (s) =>
