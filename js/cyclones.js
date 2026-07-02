@@ -52,17 +52,36 @@ const nhcLayerIds = (slot) => ({
 // JTWC basins we draw; EP/CP/AL storms in the mirror are NHC's to show.
 const JTWC_BASINS = new Set(['WP', 'IO', 'SH']);
 
-// Saffir-Simpson colours (the palette familiar from track maps): depression,
-// storm, then categories 1–5. Keyed off max sustained wind in knots.
+// Saffir-Simpson category from max sustained wind, keyed off the official NHC
+// thresholds in knots (kt ranges from the SSHWS table on nhc.noaa.gov):
+//   Cat 1  64–82 kt   Cat 2  83–95 kt    Cat 3  96–112 kt
+//   Cat 4  113–136 kt Cat 5  137+ kt (157+ mph)
+// Colours follow the category ramp yellow → orange → red → pink → purple.
 export function stormCategory(windKt) {
   const w = Number(windKt) || 0;
-  if (w >= 137) return { label: 'Category 5', color: '#ff6060' };
-  if (w >= 113) return { label: 'Category 4', color: '#ff8f20' };
-  if (w >= 96) return { label: 'Category 3', color: '#ffc140' };
-  if (w >= 83) return { label: 'Category 2', color: '#ffe775' };
-  if (w >= 64) return { label: 'Category 1', color: '#ffffcc' };
+  if (w >= 137) return { label: 'Category 5', color: '#a24bd6' }; // purple
+  if (w >= 113) return { label: 'Category 4', color: '#ff66b2' }; // pink
+  if (w >= 96) return { label: 'Category 3', color: '#e82c2c' }; // red
+  if (w >= 83) return { label: 'Category 2', color: '#ff9d1e' }; // orange
+  if (w >= 64) return { label: 'Category 1', color: '#ffe23d' }; // yellow
   if (w >= 34) return { label: 'Tropical Storm', color: '#00faf4' };
   return { label: 'Tropical Depression', color: '#5ebaff' };
+}
+
+// The category shown must follow the Saffir-Simpson wind scale, not whatever
+// category a feed embeds in its own label. JTWC tags 130+ kt as "Super Typhoon
+// (Category 5)", but 130–136 kt is Category 4 — Category 5 starts at 137 kt /
+// 157 mph. So at hurricane strength we trust stormCategory(windKt); weaker or
+// non-categorised systems (Tropical Storm, Post-Tropical, Subtropical…) keep
+// their descriptive feed label.
+function intensityLabel(windKt, feedLabel) {
+  const w = Number(windKt);
+  const label = feedLabel || '';
+  const categorised = /hurricane|typhoon|category/i.test(label);
+  if (Number.isFinite(w) && w >= 64 && (categorised || !label)) {
+    return stormCategory(w).label;
+  }
+  return label || (Number.isFinite(w) ? stormCategory(w).label : null);
 }
 
 const esc = (s) =>
@@ -478,7 +497,7 @@ export class CyclonesController {
     if (point) {
       addRow('Forecast time', point.label || (point.tau != null ? `+${point.tau}h` : null));
       if (point.tau != null) addRow('Forecast hour', `+${point.tau}h`);
-      addRow('Intensity', point.classLabel || stormCategory(point.windKt).label);
+      addRow('Intensity', intensityLabel(point.windKt, point.classLabel));
       if (point.windKt != null)
         addRow('Max wind', `${point.windKt} kt (${Math.round(point.windKt * KT_TO_MPH)} mph)`);
       if (point.gustKt != null) addRow('Gusts', `${point.gustKt} kt`);
@@ -486,7 +505,7 @@ export class CyclonesController {
       addRow('Position', `${Number(point.lat).toFixed(2)}°, ${Number(point.lon).toFixed(2)}°`);
       addRow('Source', `${storm.agency} · ${storm.basin} basin`);
     } else {
-      addRow('Intensity', storm.classLabel);
+      addRow('Intensity', intensityLabel(storm.windKt, storm.classLabel));
       if (storm.windKt != null)
         addRow('Max wind', `${storm.windKt} kt (${Math.round(storm.windKt * KT_TO_MPH)} mph)`);
       if (storm.gustKt != null) addRow('Gusts', `${storm.gustKt} kt`);
