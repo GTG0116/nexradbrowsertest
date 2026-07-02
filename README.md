@@ -335,11 +335,12 @@ A compact toolbar on the top-right of the map adds analysis and annotation tools
 that draw straight onto the scope:
 
 - **METAR station plots** (`js/metars.js`) — live surface observations from the
-  public `aviationweather.gov` data API, drawn as classic WMO station models:
-  a sky-cover circle with temperature (°F, upper-left), dewpoint (°F, lower-left),
-  the coded sea-level-pressure group (upper-right) and a wind barb. Plots are
-  fetched for the current view (debounced on pan/zoom) and refreshed on a slow
-  timer; toggled off by default.
+  Iowa Environmental Mesonet current-obs API (CORS-enabled), drawn on a single
+  canvas as readable, theme-aware station plots: a flight-category coloured dot
+  (VFR/MVFR/IFR/LIFR) with a cloud-cover pie inside, temperature/dewpoint (°F),
+  wind barb with gusts, and progressively more detail as you zoom in. Works at
+  any zoom — wide US views collapse to one bulk `country=US` request instead of
+  a per-state fan-out. Refreshed every 5 minutes; toggled off by default.
 - **Draw** — freehand annotation paths (drag to sketch).
 - **Measure** — click vertices to read great-circle distance and, once a shape
   closes, its area (miles and kilometres).
@@ -397,7 +398,7 @@ js/app.js                         controller: UI, state, interaction
  ├─ js/products.js                color scales + LUTs per product
  ├─ js/radarLayer.js              custom WebGL layer: polar gates → GPU, per pixel
  ├─ js/renderer.js                sweep range + point-sample helpers
- ├─ js/metars.js                  METAR station-plot markers (aviationweather.gov)
+ ├─ js/metars.js                  METAR station plots (IEM current obs, canvas)
  ├─ js/maptools.js                draw / measure / storm-track tools
  ├─ js/splitview.js               second synced pane: compare products
  ├─ Mapbox GL JS (CDN)            vector basemap; radar/alerts inserted below labels

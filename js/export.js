@@ -19,8 +19,10 @@ export class ExportTool {
   //              { color, title, area, rows:[[label, value], …] }
   //   briefing : the open full alert detail view to reproduce as an on-screen
   //              side panel, or null — { color, title, expires, hazards, motion,
-  //              guidance, issued, location, instruction, description, tags,
-  //              group }. Takes precedence over `alert` when present.
+  //              guidance, issued, location, instruction, tags, group }. Takes
+  //              precedence over `alert` when present. The official alert text
+  //              is deliberately not part of the export — the shared image
+  //              focuses on the threats, what to do and the safety guidance.
   constructor({ getScene }) {
     this.getScene = getScene;
     this._scrim = null;
@@ -78,10 +80,14 @@ export class ExportTool {
     // Desktop alert briefings make the stage yield room to the side panel.
     // Mirror that in the export: draw the briefing beside the pane grid instead
     // of over the left column, or quad/split exports lose the left panes.
+    // The panel's width and text unit are derived from a single pane's
+    // dimensions (not the whole grid) so the briefing renders at the same size
+    // whether the export carries one pane or four.
     const dockBriefing = !!scene.briefing && !mobile;
-    const briefingW = scene.briefing
-      ? briefingPanelWidth(mapW, u, mobile, maps.length > 1)
-      : 0;
+    const bu = Math.min(
+      mobile ? clamp(cellW / 34, 28, 56) : clamp(cellW / 42, 22, 56),
+      Math.max(18, cellH / 12));
+    const briefingW = dockBriefing ? briefingPanelWidth(cellW, bu, mobile) : 0;
     const mapX = dockBriefing ? briefingW : 0;
     const outW = mapW + (dockBriefing ? briefingW : 0);
 
@@ -125,9 +131,8 @@ export class ExportTool {
     // briefing" footer.
     if (scene.briefing) {
       if (dockBriefing) {
-        drawAlertBriefing(ctx, scene.briefing, 0, headerH, briefingW, mapH, u, mobile, theme, {
+        drawAlertBriefing(ctx, scene.briefing, 0, headerH, briefingW, mapH, bu, mobile, theme, {
           panelW: briefingW,
-          compact: maps.length > 1,
         });
       } else {
         drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
@@ -493,15 +498,14 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile, theme) {
 }
 
 // Full alert briefing: reproduce the on-screen detail panel — a dark side panel
-// over the scope with a colour-coded header, hazard boxes, safety guidance,
-// location and the official alert text — so the export matches what the viewer
-// sees. The panel runs the full height of the map region and its content is
-// clipped to that box (rendered from the top, like the live panel scrolled to
-// its start). On phones the live panel is full-width, so the export panel is too.
+// over the scope with a colour-coded header, the hazard boxes, what to do and
+// the safety guidance. Unlike the live panel it does NOT include the official
+// alert text: a shared image can't scroll, so the space goes to the parts a
+// viewer can act on (threats, instructions, safety tips). The panel runs the
+// full height of the map region and its content is clipped to that box. On
+// phones the live panel is full-width, so the export panel is too.
 function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opts = {}) {
-  const panelW = opts.panelW || briefingPanelWidth(mapW, u, mobile, opts.multiPane);
-  const compact = !!opts.compact;
-  if (compact) u = Math.min(u, clamp(panelW / 22, 16, 25));
+  const panelW = opts.panelW || briefingPanelWidth(mapW, u, mobile);
   const x0 = mapX;
   const y0 = mapY;
   const panelH = mapH;
@@ -537,19 +541,19 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
   }
 
   // Coloured header band: warning icon + (wrapping) event title.
-  const headH = Math.round(u * (compact ? 3.6 : 3.0));
+  const headH = Math.round(u * 3.0);
   ctx.fillStyle = b.color || '#e0152d';
   ctx.fillRect(x0, y, panelW, headH);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.fillStyle = '#fff';
-  ctx.font = `700 ${Math.round(u * (compact ? 1.1 : 1.3))}px ${SANS}`;
+  ctx.font = `700 ${Math.round(u * 1.3)}px ${SANS}`;
   ctx.fillText('⚠', x0 + pad, y + headH / 2);
   const hx = x0 + pad + ctx.measureText('⚠').width + Math.round(u * 0.5);
-  ctx.font = `700 ${Math.round(u * (compact ? 0.95 : 1.12))}px ${SANS}`;
+  ctx.font = `700 ${Math.round(u * 1.12)}px ${SANS}`;
   const titleLines = wrapText(ctx, (b.title || '').toUpperCase(), x0 + panelW - pad - hx)
-    .slice(0, compact ? 3 : 2);
-  const tlh = Math.round(u * (compact ? 1.05 : 1.3));
+    .slice(0, 2);
+  const tlh = Math.round(u * 1.3);
   let ty = y + headH / 2 - ((titleLines.length - 1) * tlh) / 2;
   for (const ln of titleLines) {
     ctx.fillText(ln, hx, ty);
@@ -609,8 +613,9 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
   paragraph(b.expires, { color: theme.text, weight: '700', size: 1.0 });
   gap();
 
-  // Hazard boxes (HAIL / WIND / TORNADO).
+  // Threats: hazard boxes (HAIL / WIND / TORNADO).
   if (b.hazards && b.hazards.length && y < bottom) {
+    sectionLabel('Threats');
     const n = Math.min(b.hazards.length, 3);
     const bgap = Math.round(u * 0.5);
     const bw = Math.round((innerW - (n - 1) * bgap) / n);
@@ -645,6 +650,14 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
     gap(0.5);
   }
 
+  // What to do (NWS instruction) — the actionable part comes before anything
+  // descriptive so it survives even when a long briefing clips at the panel.
+  if (b.instruction) {
+    sectionLabel('What to do');
+    paragraph(b.instruction, { size: 0.9 });
+    gap();
+  }
+
   // Safety guidance: lead paragraph + bullet points.
   if (b.guidance) {
     sectionLabel('Safety guidance');
@@ -654,25 +667,13 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
     gap();
   }
 
-  // Issued line.
-  paragraph(b.issued, { color: theme.dim, size: 0.72 });
-  gap(0.6);
-
   // Location.
   sectionLabel('Location');
   paragraph(b.location, { size: 0.88 });
-  gap();
+  gap(0.6);
 
-  // What to do (NWS instruction).
-  if (b.instruction) {
-    sectionLabel('What to do');
-    paragraph(b.instruction, { size: 0.9 });
-    gap();
-  }
-
-  // Full alert text.
-  sectionLabel('Full alert text');
-  paragraph(b.description, { color: theme.dim, size: 0.84 });
+  // Issued line.
+  paragraph(b.issued, { color: theme.dim, size: 0.72 });
   gap();
 
   // Tags.
@@ -724,13 +725,11 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-function briefingPanelWidth(mapW, u, mobile, multiPane = false) {
+// `mapW`/`u` are a single pane's width and text unit — multi-pane exports pass
+// the cell size, not the grid size, so the panel matches a single-pane export.
+function briefingPanelWidth(mapW, u, mobile) {
   if (mobile) return mapW;
-  return Math.round(
-    multiPane
-      ? clamp(mapW * 0.34, u * 12, u * 16)
-      : clamp(mapW * 0.36, u * 16, u * 30)
-  );
+  return Math.round(clamp(mapW * 0.36, u * 16, u * 30));
 }
 
 function normalizeTheme(theme) {
@@ -745,7 +744,7 @@ function normalizeTheme(theme) {
     dim: base.dim || '#6f655b',
     faint: base.faint || '#9a8b7b',
     accent: base.accent || '#e2643f',
-    alertPanel: base.alertPanel || (dark ? 'rgba(37,31,24,0.98)' : 'rgba(255,250,242,0.98)'),
+    alertPanel: base.alertPanel || (dark ? 'rgba(30,30,30,0.98)' : 'rgba(255,250,242,0.98)'),
     alertSoft: base.alertSoft || (dark ? 'rgba(255,255,255,0.06)' : 'rgba(42,37,32,0.055)'),
   };
 }

@@ -990,9 +990,12 @@ export class AlertsController {
     };
   }
 
-  // Structured snapshot of the open full briefing for the export tool, so the
-  // exported image can reproduce the whole alert detail view as it appears on
-  // screen. Returns null when the full briefing isn't open.
+  // Structured snapshot of the open full briefing for the export tool. The
+  // exported image reproduces the detail view's actionable parts — threats,
+  // what to do, safety guidance — and deliberately omits the official alert
+  // text (an image can't scroll, so the wall of text would only push the
+  // useful sections off the panel). Returns null when the full briefing isn't
+  // open.
   exportDetail() {
     if (!this.els.detail || this.els.detail.hidden) return null;
     const a = this.alerts.find((x) => x.id === this.selectedId);
@@ -1034,7 +1037,6 @@ export class AlertsController {
       issued: `Issued ${fmtTime(p.sent)} · ${p.senderName || 'NWS'}`,
       location: p.areaDesc || '—',
       instruction: p.instruction || '',
-      description: p.description || '',
       tags,
       group,
     };

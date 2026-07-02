@@ -234,11 +234,14 @@
             <div id="mapTools" class="map-tools">
               <button id="toolDraw" class="map-tool" title="Draw (freehand)"><i data-lucide="pencil" class="lucide sm"></i></button>
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area"><i data-lucide="ruler" class="lucide sm"></i></button>
-              <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><i data-lucide="navigation" class="lucide sm"></i></button>
+              <!-- Custom tracking-cone glyph (Lucide has none): a dot with a
+                   forecast cone fanning out from it, echoing the wedge the
+                   storm-track tool draws on the map. -->
+              <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><circle cx="5" cy="19" r="1"/><path d="M6.6 15.1L11.3 4.3A16 16 0 0 1 19.7 12.8L8.9 17.4A4.2 4.2 0 0 0 6.6 15.1Z"/></svg></button>
               <button id="toolMetars" class="map-tool" title="Surface observations (METARs)"><i data-lucide="radio-tower" class="lucide sm"></i></button>
               <button id="toolInspect" class="map-tool" title="Inspect a pixel"><i data-lucide="crosshair" class="lucide sm"></i></button>
               <button id="toolWeather" class="map-tool" title="Local current conditions"><i data-lucide="sun" class="lucide sm"></i></button>
-              <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="locate-fixed" class="lucide sm"></i></button>
+              <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="navigation" class="lucide sm"></i></button>
               <button id="toolExport" class="map-tool" title="Export / share image"><i data-lucide="download" class="lucide sm"></i></button>
             </div>
             <div id="drawToolPopup" class="tool-popover" hidden>

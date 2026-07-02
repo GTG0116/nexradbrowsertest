@@ -1088,7 +1088,7 @@ function applyUiTheme(theme = state.uiTheme) {
   state.uiTheme = theme === 'dark' ? 'dark' : 'light';
   document.body.classList.toggle('theme-dark', state.uiTheme === 'dark');
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', state.uiTheme === 'dark' ? '#17120d' : '#efe7da');
+  if (meta) meta.setAttribute('content', state.uiTheme === 'dark' ? '#181818' : '#efe7da');
   if (el.uiThemeSelect) el.uiThemeSelect.value = state.uiTheme;
   if (state.map) ensureSitePillImages(state.map);
   refreshSiteDots();
@@ -1115,14 +1115,14 @@ function exportTheme() {
   if (state.uiTheme === 'dark') {
     return {
       mode: 'dark',
-      bg: '#17120d',
-      panel: '#251f18',
+      bg: '#181818',
+      panel: '#242424',
       separator: 'rgba(255,255,255,0.12)',
       text: '#f7efe4',
       dim: '#b8a997',
       faint: '#8f8172',
       accent: '#e2643f',
-      alertPanel: 'rgba(37,31,24,0.98)',
+      alertPanel: 'rgba(30,30,30,0.98)',
       alertSoft: 'rgba(255,255,255,0.06)',
     };
   }
@@ -3097,7 +3097,9 @@ async function loadModelFrame() {
   el.progress.classList.add('show');
   try {
     const grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
-      el.progress.style.width = Math.round(p * 100) + '%';
+      // A superseded load keeps downloading in the background — don't let its
+      // progress fight the current one's bar.
+      if (seq === modelLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
     });
     // Bail if a newer selection superseded this one, or the user has since left
     // models mode (e.g. a model loop stopped *because* the mode/source changed —
@@ -3111,7 +3113,14 @@ async function loadModelFrame() {
     renderModels();
     setStatus(`${modelName()} ${run.label} F${p2(fhour)} · ${grid.product.name}`);
   } catch (e) {
-    if (seq === modelLoadSeq) setStatus(`${modelName()} error: ${e.message}`);
+    if (seq === modelLoadSeq) {
+      // A 403/404 on the index usually means the run is listed (its F00 is up)
+      // but this forecast hour hasn't posted yet — say that instead of "error".
+      const stillPosting = /index fetch failed: (403|404)/.test(e.message || '');
+      setStatus(stillPosting
+        ? `${modelName()} ${run.label} F${p2(fhour)} not posted yet — run still uploading`
+        : `${modelName()} error: ${e.message}`);
+    }
     console.error(e);
   } finally {
     if (seq === modelLoadSeq) {
@@ -5917,15 +5926,27 @@ const DOCK_TOOLS = [
   { id: 'export', icon: '⤓', label: 'Export image', btn: () => el.toolExport },
 ];
 
+// Custom tracking-cone glyph for the storm-track tool (Lucide has no cone
+// icon): a dot with a forecast cone fanning out from it, echoing the wedge the
+// tool draws on the map. Same inline markup as the #toolStorm button in
+// index.html, in Lucide's stroke style.
+const CONE_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><circle cx="5" cy="19" r="1"/><path d="M6.6 15.1L11.3 4.3A16 16 0 0 1 19.7 12.8L8.9 17.4A4.2 4.2 0 0 0 6.6 15.1Z"/></svg>';
+
+// A tool icon is either a Lucide name or raw inline SVG (leading '<').
+function toolIconMarkup(icon) {
+  return icon.startsWith('<') ? icon : `<i data-lucide="${icon}" class="lucide sm"></i>`;
+}
+
 // The tools offered in the mobile dock slot. Kept as a function (rather than the
 // constant list) so source-specific filtering can be reintroduced if needed.
 const MOBILE_TOOL_DEFS = [
-  { id: 'storm', icon: 'navigation', label: 'Storm track', btn: () => el.toolStorm },
+  { id: 'storm', icon: CONE_ICON, label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
   { id: 'metars', icon: 'radio-tower', label: 'Surface obs (METARs)', btn: () => el.toolMetars },
   { id: 'weather', icon: 'sun', label: 'Local weather', btn: () => el.toolWeather },
-  { id: 'locate', icon: 'locate-fixed', label: 'My live location', btn: () => el.toolLocate },
+  { id: 'locate', icon: 'navigation', label: 'My live location', btn: () => el.toolLocate },
   { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
 ];
 
@@ -5956,7 +5977,7 @@ function setupDockTools() {
       const item = document.createElement('button');
       item.className = 'dock-tool-item';
       if (t.id === state.dockTool) item.classList.add('active');
-      item.innerHTML = `<span class="ti-icon"><i data-lucide="${t.icon}" class="lucide sm"></i></span><span>${t.label}</span>`;
+      item.innerHTML = `<span class="ti-icon">${toolIconMarkup(t.icon)}</span><span>${t.label}</span>`;
       item.addEventListener('click', () => {
         setDockTool(t.id);
         closeDockMenu();
@@ -5971,7 +5992,7 @@ function setupDockTools() {
     if (prev && prev.id !== id) clearOtherTools(null);
     state.dockTool = id;
     const t = current();
-    el.dockToolBtn.innerHTML = `<i data-lucide="${t.icon}" class="lucide sm"></i>`;
+    el.dockToolBtn.innerHTML = toolIconMarkup(t.icon);
     el.dockToolBtn.title = t.label;
     syncActive();
     saveSettings();

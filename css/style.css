@@ -37,11 +37,13 @@
 }
 
 body.theme-dark {
-  --bg: #17120d;
-  --bg-2: #211a13;
-  --panel: #251f18;
-  --panel-edge: #3a3027;
-  --panel-soft: #1d1711;
+  /* Neutral charcoal field (not the old warm brown) — panels step up from the
+     same neutral ramp so the coral accent reads against grey, not mud. */
+  --bg: #181818;
+  --bg-2: #202020;
+  --panel: #242424;
+  --panel-edge: #3a3a3a;
+  --panel-soft: #1d1d1d;
   --ink: #f7efe4;
   --ink-dim: #b8a997;
   --ink-faint: #8f8172;
@@ -115,7 +117,7 @@ body {
   display: none;
 }
 body.theme-dark .sidebar {
-  background: #18130e;
+  background: #191919;
 }
 body.theme-dark .brand-mark {
   background: #090604;
@@ -1280,6 +1282,17 @@ input[type='range']::-moz-range-thumb {
   transition: opacity var(--dur-base) var(--ease-out),
     transform var(--dur-base) var(--ease-out),
     visibility 0s linear var(--dur-base);
+}
+/* Centre the card over the scope, not the whole viewport: the desktop sidebar
+   pushes the map right, so viewport-centring left the card visibly off-centre
+   relative to the map. Match the sidebar's width tiers. */
+.app:not(.mobile) .alert-preview {
+  left: 340px;
+}
+@media (max-width: 1180px) {
+  .app:not(.mobile) .alert-preview {
+    left: 300px;
+  }
 }
 .alert-preview-card {
   pointer-events: auto;
@@ -2590,11 +2603,15 @@ input[type='range']::-moz-range-thumb {
   bottom: auto;
   width: auto;
   margin: 0;
-  padding: 0;
+  padding: 6px 10px;
   gap: 8px;
-  background: none;
-  border: none;
-  box-shadow: none;
+  /* The dock itself is background:none (each control paints its own panel), so
+     the docked bar keeps its panel chrome — without it the loop UI floats
+     transparently over the map with only the slider and ✕ visible. */
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  box-shadow: var(--glow);
   z-index: auto;
 }
 /* When idle the docked bar must reserve no row space. The shared [hidden] rule
@@ -3247,18 +3264,17 @@ input[type='range']::-moz-range-thumb {
   bottom: 18px;
   z-index: 620;
   display: grid;
-  gap: 4px;
-  min-width: 134px;
+  gap: 5px;
+  min-width: 150px;
   padding: 8px 9px;
-  border: 1px solid rgba(159, 208, 255, 0.38);
-  border-radius: 8px;
-  background: rgba(8, 16, 31, 0.88);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: var(--panel);
   box-shadow: var(--glow);
   color: var(--ink);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   line-height: 1.2;
-  backdrop-filter: blur(10px);
 }
 .metar-panel-row {
   display: grid;
@@ -3271,11 +3287,30 @@ input[type='range']::-moz-range-thumb {
 .metar-panel select {
   width: 74px;
   height: 24px;
-  border: 1px solid rgba(159, 208, 255, 0.42);
+  border: 1px solid var(--panel-edge);
   border-radius: 6px;
-  background: rgba(3, 10, 22, 0.82);
+  background: var(--panel-soft);
   color: var(--ink);
   font: 700 10px 'JetBrains Mono', monospace;
+}
+/* Flight-category key: a coloured dot before each label. */
+.metar-panel-cats {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-dim);
+  font-weight: 700;
+  font-size: 9px;
+}
+.metar-panel-cats i {
+  width: 8px;
+  height: 8px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: var(--c);
+}
+.metar-panel-cats i:first-child {
+  margin-left: 0;
 }
 .metar-panel-count {
   color: var(--ink-dim);
@@ -3286,9 +3321,9 @@ input[type='range']::-moz-range-thumb {
   z-index: 1220;
   max-width: 340px;
   padding: 8px 10px;
-  border: 1px solid rgba(159, 208, 255, 0.45);
-  border-radius: 8px;
-  background: rgba(6, 14, 29, 0.94);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: var(--panel);
   box-shadow: var(--glow-strong);
   color: var(--ink);
   pointer-events: none;
@@ -3297,16 +3332,23 @@ input[type='range']::-moz-range-thumb {
   line-height: 1.35;
 }
 .metar-tooltip strong {
-  color: #9fd0ff;
+  color: var(--accent-ink);
   font-size: 12px;
 }
 .metar-tooltip span {
   color: var(--ink-dim);
 }
+.metar-tooltip .metar-cat {
+  font-style: normal;
+  font-weight: 800;
+}
 .metar-tooltip div {
   margin-top: 3px;
-  color: #dfeaff;
   overflow-wrap: anywhere;
+}
+.metar-tooltip .metar-name,
+.metar-tooltip .metar-raw {
+  color: var(--ink-dim);
 }
 
 /* Map-tool text labels (measure distances, storm-track ETAs). */

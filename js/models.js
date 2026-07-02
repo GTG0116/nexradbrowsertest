@@ -57,7 +57,9 @@ export const MODELS = {
     label: 'NAM (12 km CONUS)',
     bucket: 'https://noaa-nam-pds.s3.amazonaws.com',
     cycleStep: 6,
-    latencyMin: 200,
+    // awphys00 posts ~1h40m after cycle time (the full 84 h set by ~2h45m); the
+    // existence probe decides from there, so keep this at first-availability.
+    latencyMin: 95,
     levelFix: { LTNG: 'surface' },
     keysFor(dayStr, cycle, fhour) {
       const grib = `nam.${dayStr}/nam.t${pad(cycle)}z.awphys${pad(fhour)}.tm00.grib2`;
@@ -73,7 +75,8 @@ export const MODELS = {
     label: 'NAM Nest (3 km CONUS)',
     bucket: 'https://noaa-nam-pds.s3.amazonaws.com',
     cycleStep: 6,
-    latencyMin: 200,
+    // conusnest.hiresf00 posts ~1h45m after cycle time (full 60 h by ~2h40m).
+    latencyMin: 95,
     levelFix: { LTNG: 'surface' },
     keysFor(dayStr, cycle, fhour) {
       const grib = `nam.${dayStr}/nam.t${pad(cycle)}z.conusnest.hiresf${pad(fhour)}.tm00.grib2`;
@@ -852,7 +855,15 @@ async function runExists(model, run, productId) {
     const { idx } = model.keysFor(run.dayStr, run.cycle, sourceHour, file);
     const url = modelUrl(model, idx);
     if (!runProbeCache.has(url)) {
-      runProbeCache.set(url, headOrTinyGet(url).catch((err) => {
+      // Positive results are cached for the session (a posted file never
+      // disappears); a "missing" result is dropped once resolved, so the next
+      // LIVE refresh re-probes and a run appears as soon as its files post —
+      // caching false permanently made a run probed minutes too early stay
+      // invisible until a full page reload.
+      runProbeCache.set(url, headOrTinyGet(url).then((ok) => {
+        if (!ok) runProbeCache.delete(url);
+        return ok;
+      }).catch((err) => {
         runProbeCache.delete(url);
         throw err;
       }));
