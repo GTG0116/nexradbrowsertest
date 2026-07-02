@@ -138,13 +138,17 @@ async function fetchNhcStorms() {
       const p = cur.properties || {};
       const [lon, lat] = cur.geometry.coordinates;
 
-      const points = pts.slice(1).map((f) => ({
+      const points = pts.slice(1).map((f, index) => ({
+        index,
         lon: f.geometry.coordinates[0],
         lat: f.geometry.coordinates[1],
         tau: f.properties.tau,
         label: f.properties.datelbl || '',
         windKt: f.properties.maxwind,
+        gustKt: f.properties.gust,
+        mslp: f.properties.mslp,
         classLabel: f.properties.tcdvlp || '',
+        raw: f.properties || {},
       }));
 
       // Forecast track: join every track feature's coordinates (usually one
@@ -209,13 +213,17 @@ async function fetchJtwcStorms() {
       );
       const points = fcst
         .filter((f) => (f.tau || 0) > 0)
-        .map((f) => ({
+        .map((f, index) => ({
+          index,
           lon: f.lon,
           lat: f.lat,
           tau: f.tau,
           label: f.datetime ? f.datetime.replace('T', ' ').replace(':00Z', 'Z') : `+${f.tau}h`,
           windKt: f.wind_kt,
+          gustKt: f.gust_kt,
+          mslp: f.pressure_mb,
           classLabel: f.classification_label || '',
+          raw: f,
         }));
       // JTWC names depressions by number ("Ten"); prefix the classification so
       // the list reads like NHC's ("Tropical Storm Bavi").
@@ -264,11 +272,18 @@ function stormsToFeatures(storms) {
         geometry: { type: 'LineString', coordinates: storm.trackCoords },
         properties: { ...base, kind: 'track', color: cat.color },
       });
-    for (const pt of storm.points)
+    for (const [pointIndex, pt] of storm.points.entries())
       features.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [pt.lon, pt.lat] },
-        properties: { ...base, kind: 'point', color: stormCategory(pt.windKt).color },
+        properties: {
+          ...base,
+          kind: 'point',
+          pointIndex,
+          tau: pt.tau,
+          time: pt.label || '',
+          color: stormCategory(pt.windKt).color,
+        },
       });
     features.push({
       type: 'Feature',
@@ -303,14 +318,15 @@ export class CyclonesController {
     this._lastFeatures = [];
     this.selectedId = null;
 
-    // Clicking a storm's current-position marker or its cone opens the compact
-    // preview card. Registered up front like alerts does — Mapbox resolves the
+    // Clicking a storm's current-position marker, cone, or forecast point opens
+    // the compact preview card. Registered up front like alerts does — Mapbox resolves the
     // layer id at event time, so it's fine that setupOverlays adds the layers
     // later (and re-adds them after every style reload).
     const open = (e) => this._openFromEvent(e);
     map.on('click', 'cyclones-current', open);
+    map.on('click', 'cyclones-points', open);
     map.on('click', 'cyclones-cone', open);
-    for (const layer of ['cyclones-current', 'cyclones-cone']) {
+    for (const layer of ['cyclones-current', 'cyclones-points', 'cyclones-cone']) {
       map.on('mouseenter', layer, () => (map.getCanvas().style.cursor = 'pointer'));
       map.on('mouseleave', layer, () => (map.getCanvas().style.cursor = ''));
     }
@@ -442,36 +458,50 @@ export class CyclonesController {
     if (this.els.suppressClick && this.els.suppressClick()) return;
     const f = (e.features || [])[0];
     if (!f || !f.properties) return;
-    // Prefer the current-position marker when it and the cone stack under one
-    // click — both layers fire, current first (it's registered on top).
-    this.openPreview(f.properties.id);
+    // Prefer the current-position marker/forecast point when it and the cone
+    // stack under one click — point/current layers are registered above cone.
+    this.openPreview(f.properties.id, f.properties.kind === 'point' ? Number(f.properties.pointIndex) : null);
   }
 
-  openPreview(id) {
+  openPreview(id, pointIndex = null) {
     const storm = this.stormById(id);
     if (!storm || !this.els.preview || !this.els.previewCard) return;
     this.selectedId = id;
-    const cat = stormCategory(storm.windKt);
+    const point = Number.isInteger(pointIndex) ? storm.points[pointIndex] : null;
+    const display = point || storm;
+    const cat = stormCategory(display.windKt);
     const rows = [];
     const addRow = (label, value) => {
       if (value == null || value === '') return;
       rows.push(`<div class="apv-row"><span>${esc(label)}</span><b>${esc(value)}</b></div>`);
     };
-    addRow('Intensity', storm.classLabel);
-    if (storm.windKt != null)
-      addRow('Max wind', `${storm.windKt} kt (${Math.round(storm.windKt * KT_TO_MPH)} mph)`);
-    if (storm.gustKt != null) addRow('Gusts', `${storm.gustKt} kt`);
-    if (storm.mslp != null) addRow('Pressure', `${storm.mslp} mb`);
-    addRow('Movement', storm.motion);
-    addRow('Advisory', storm.advisory);
-    addRow('Source', `${storm.agency} · ${storm.basin} basin`);
+    if (point) {
+      addRow('Forecast time', point.label || (point.tau != null ? `+${point.tau}h` : null));
+      if (point.tau != null) addRow('Forecast hour', `+${point.tau}h`);
+      addRow('Intensity', point.classLabel || stormCategory(point.windKt).label);
+      if (point.windKt != null)
+        addRow('Max wind', `${point.windKt} kt (${Math.round(point.windKt * KT_TO_MPH)} mph)`);
+      if (point.gustKt != null) addRow('Gusts', `${point.gustKt} kt`);
+      if (point.mslp != null) addRow('Pressure', `${point.mslp} mb`);
+      addRow('Position', `${Number(point.lat).toFixed(2)}°, ${Number(point.lon).toFixed(2)}°`);
+      addRow('Source', `${storm.agency} · ${storm.basin} basin`);
+    } else {
+      addRow('Intensity', storm.classLabel);
+      if (storm.windKt != null)
+        addRow('Max wind', `${storm.windKt} kt (${Math.round(storm.windKt * KT_TO_MPH)} mph)`);
+      if (storm.gustKt != null) addRow('Gusts', `${storm.gustKt} kt`);
+      if (storm.mslp != null) addRow('Pressure', `${storm.mslp} mb`);
+      addRow('Movement', storm.motion);
+      addRow('Advisory', storm.advisory);
+      addRow('Source', `${storm.agency} · ${storm.basin} basin`);
+    }
 
     this.els.previewCard.innerHTML = `
       <header class="apv-head" style="--ac:${cat.color}">
         <span class="apv-icon">🌀</span>
         <div class="apv-htext">
           <h3>${esc(storm.name)}</h3>
-          <span class="apv-area">${esc(storm.agency)} advisory</span>
+          <span class="apv-area">${esc(point ? 'Forecast point' : `${storm.agency} advisory`)}</span>
         </div>
         <button class="apv-close" aria-label="Close">✕</button>
       </header>
