@@ -243,11 +243,11 @@ function pressureCenterGeoJSON(grid) {
   if (d.w < 5 || d.h < 5) return { type: 'FeatureCollection', features };
 
   const radius = Math.max(3, Math.round(0.75 / Math.max(d.di, d.dj)));
-  // A center must stand this many Pa (0.75 hPa) above/below the strongest opposite
-  // value in its neighbourhood. Detection is purely relative — a local extremum
-  // with enough prominence — so H/L placement stays consistent across models
-  // regardless of the field's absolute level (a genuine 1013 hPa low is a low
-  // whether the ambient pressure runs high or low).
+  // A center must stand this many Pa (0.75 hPa) above/below its surroundings.
+  // Detection is purely relative — a local extremum with enough prominence — so
+  // H/L placement stays consistent across models regardless of the field's
+  // absolute level (a genuine 1013 hPa low is a low whether the ambient pressure
+  // runs high or low).
   const MIN_PROMINENCE_PA = 75;
   const candidates = [];
   const idx = (i, j) => j * d.w + i;
@@ -258,27 +258,40 @@ function pressureCenterGeoJSON(grid) {
     for (let i = radius; i < d.w - radius; i++) {
       const val = d.v[idx(i, j)];
       if (!Number.isFinite(val)) continue;
-      // Use strict >/< so a *flat* extremum (a broad low or high where adjacent
-      // cells share the minimum/maximum value) still qualifies. The equal-valued
-      // plateau cells all pass; the far-enough dedup below keeps just one marker.
-      let isHigh = true, isLow = true, ringMax = -Infinity, ringMin = Infinity;
-      for (let y = j - radius; y <= j + radius; y++) {
+      // Plateau-inclusive extremum test (strict >/<): a *flat* low or high whose
+      // adjacent cells share the min/max value still qualifies, so a broad or
+      // downsample-smoothed hurricane core isn't lost. Prominence, though, is
+      // measured against the least-extreme cell on the box *perimeter*
+      // (perimMax for a high, perimMin for a low) — i.e. the center must be more
+      // extreme than its surroundings in *every* direction, a closed center.
+      // Measuring against the most-extreme cell anywhere in the box instead
+      // (ringMin/ringMax) turned every flat-ambient cell touching a deep low into
+      // a phantom "H": nothing near it is strictly higher, yet its box reaches the
+      // low, so it scored a huge false prominence — a ring of ~100 spurious highs
+      // that outranked and, via the dedup below, buried the real low. The deeper
+      // the storm, the stronger the ring, which is why the most powerful
+      // hurricanes stopped registering.
+      let isHigh = true, isLow = true, perimMax = -Infinity, perimMin = Infinity, complete = true;
+      for (let y = j - radius; y <= j + radius && complete; y++) {
         for (let x = i - radius; x <= i + radius; x++) {
           if (x === i && y === j) continue;
           const other = d.v[idx(x, y)];
-          if (!Number.isFinite(other)) continue;
+          if (!Number.isFinite(other)) { complete = false; break; }
           if (other > val) isHigh = false;
           if (other < val) isLow = false;
-          if (other > ringMax) ringMax = other;
-          if (other < ringMin) ringMin = other;
+          if (Math.abs(x - i) === radius || Math.abs(y - j) === radius) {
+            if (other > perimMax) perimMax = other;
+            if (other < perimMin) perimMin = other;
+          }
         }
       }
+      if (!complete) continue; // a data gap in the box would give a false prominence
       const lon = d.lon1 + i * d.di;
       const lat = d.lat1 - j * d.dj;
-      if (isHigh && val - ringMin >= MIN_PROMINENCE_PA)
-        candidates.push({ kind: 'H', val, lon, lat, score: val - ringMin });
-      if (isLow && ringMax - val >= MIN_PROMINENCE_PA)
-        candidates.push({ kind: 'L', val, lon, lat, score: ringMax - val });
+      if (isHigh && val - perimMax >= MIN_PROMINENCE_PA)
+        candidates.push({ kind: 'H', val, lon, lat, score: val - perimMax });
+      if (isLow && perimMin - val >= MIN_PROMINENCE_PA)
+        candidates.push({ kind: 'L', val, lon, lat, score: perimMin - val });
     }
   }
 
