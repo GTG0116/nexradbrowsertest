@@ -370,13 +370,26 @@ async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgres
   const ahi = ABI_TO_AHI[abiBand];
   const alloc = () => new Float32Array(gridRef.grid.W * gridRef.grid.H).fill(NaN);
   if (ahi == null) return { data: gridRef.grid ? alloc() : null, nav: null };
-  let out = null, nav = null;
+  // Fetch every segment concurrently. The full disk is 10 vertical strips, and
+  // downloading them one-at-a-time — each its own S3 round-trip before the next
+  // could even start — was the dominant cost of loading a Himawari frame. Firing
+  // all the requests at once lets the browser saturate its connection pool, so
+  // wall-clock load time drops toward that of a single segment. The CPU-bound
+  // bzip2 decode + resample still runs sequentially below (in segment order),
+  // which is what the resample needs anyway.
+  let done = 0;
+  const segFetches = [];
   for (let s = 1; s <= sector.segments; s++) {
-    let bytes;
-    try {
-      bytes = await fetchBytes(bucket, himawariSegKey(meta, sector, ahi, s),
-        onProgress ? (p) => onProgress((s - 1 + p) / sector.segments) : null);
-    } catch (_) { continue; }
+    segFetches.push(
+      fetchBytes(bucket, himawariSegKey(meta, sector, ahi, s))
+        .catch(() => null)
+        .then((bytes) => { if (onProgress) onProgress(++done / sector.segments); return bytes; })
+    );
+  }
+  const segments = await Promise.all(segFetches);
+  let out = null, nav = null;
+  for (const bytes of segments) {
+    if (!bytes) continue;
     const hdr = parseHsdHeader(bytes);
     if (!gridRef.grid) gridRef.grid = sector.grid || deriveGrid(hdr, sector.commonCFAC);
     if (!out) out = alloc();
@@ -427,9 +440,13 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
   if (!meta) throw new Error('bad Himawari scene key');
   const sector = SECTORS[sectorKey];
   const gridRef = { grid: sector.grid || null };
-  // Regional grids come from the headers; bootstrap one if every requested band
-  // lacks a Himawari equivalent (e.g. a lone 1.37 µm cirrus channel).
-  if (!gridRef.grid && bands.every((b) => ABI_TO_AHI[b] == null)) {
+  // Regional grids come from the headers. Establish the common grid once, up
+  // front, from a single segment header (band 13 is always produced) so the
+  // per-band decodes below can run in parallel without racing to set it and so a
+  // band with no Himawari equivalent still allocates a correctly-sized NaN array.
+  // The full disk already carries a fixed grid, so this probe only fires for the
+  // single-segment regional sectors.
+  if (!gridRef.grid) {
     try {
       const bytes = await fetchBytes(sat.bucket, himawariSegKey(meta, sector, 13, 1));
       gridRef.grid = deriveGrid(parseHsdHeader(bytes), sector.commonCFAC);
@@ -437,10 +454,19 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
   }
   const channels = {};
   let nav = null;
-  for (let i = 0; i < bands.length; i++) {
-    const r = await himawariChannel(sat.bucket, meta, sector, bands[i], gridRef,
-      onProgress ? (p) => onProgress((i + p) / bands.length) : null);
-    if (r.data) channels[bands[i]] = r.data;
+  // Decode all requested bands concurrently. Each band's segments already fetch
+  // in parallel; overlapping the bands too means a multi-band RGB composite
+  // (GeoColor pulls four channels) loads in roughly the time of its slowest band
+  // instead of the sum of them. The grid is fixed before this point, so the
+  // channels never race on it.
+  let done = 0;
+  const results = await Promise.all(bands.map((b) =>
+    himawariChannel(sat.bucket, meta, sector, b, gridRef,
+      onProgress ? () => onProgress(Math.min(1, (done + 0.5) / bands.length)) : null)
+      .then((r) => { done++; if (onProgress) onProgress(done / bands.length); return { b, r }; })
+  ));
+  for (const { b, r } of results) {
+    if (r.data) channels[b] = r.data;
     if (r.nav && !nav) nav = r.nav;
   }
   return himawariScene(meta, channels, nav, gridRef.grid, sat, key);
@@ -494,11 +520,14 @@ export async function ensureBands(scene, bands) {
   if (scene._himawariMeta) {
     const sector = SECTORS[scene._himawariMeta.sectorKey];
     const gridRef = { grid: scene._himawariGrid };
-    for (const b of bands) {
-      if (scene.channels[b]) continue;
-      const r = await himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef);
-      if (r.data) scene.channels[b] = r.data;
-    }
+    // Decode the missing bands concurrently (each also fetches its segments in
+    // parallel), so switching to an RGB product that needs several more channels
+    // doesn't stall band-by-band.
+    const need = bands.filter((b) => !scene.channels[b]);
+    const results = await Promise.all(need.map((b) =>
+      himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef)
+        .then((r) => ({ b, r }))));
+    for (const { b, r } of results) if (r.data) scene.channels[b] = r.data;
     return scene;
   }
   if (!scene._h5) return scene;

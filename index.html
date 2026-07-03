@@ -306,6 +306,7 @@
              control), playback frame count and the .pal color-table tools. -->
         <section class="panel" id="displayPanel" hidden>
           <h2 class="panel-title">Display options</h2>
+          <div class="group-label">Data &amp; rendering</div>
           <div class="toggle-field" id="dealiasField">
             <span>Dealias velocity</span>
             <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
@@ -351,6 +352,7 @@
               </select>
             </label>
           </div>
+          <div class="group-label">Overlays</div>
           <div class="toggle-field" id="metarsField">
             <span>METAR overlay</span>
             <button id="metarsToggle" class="alerts-toggle" title="Show surface observation station plots">OFF</button>
@@ -367,6 +369,7 @@
             <span>Cyclone cone</span>
             <button id="cyclonesConeToggle" class="alerts-toggle active" title="Show the NHC cone of uncertainty (JTWC storms have no cone)">ON</button>
           </div>
+          <div class="group-label">Playback &amp; view</div>
           <div class="toggle-field" id="loopField">
             <span>Playback loop</span>
             <button id="loopBtn" class="alerts-toggle" title="Animate recent frames (forecast hours for models)">▶</button>
@@ -379,6 +382,7 @@
             <span>Playback frames <b id="playFramesVal">5</b></span>
             <input type="range" id="playFrames" min="2" max="20" value="5" />
           </label>
+          <div class="group-label">Color tables</div>
           <div class="pal-row">
             <label class="pal-btn" for="palInput">⤓ Load .pal</label>
             <input type="file" id="palInput" accept=".pal,.txt" hidden />

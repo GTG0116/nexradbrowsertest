@@ -244,11 +244,20 @@ function pressureCenterGeoJSON(grid) {
 
   const radius = Math.max(3, Math.round(0.75 / Math.max(d.di, d.dj)));
   // A center must stand this many Pa (0.75 hPa) above/below its surroundings.
-  // Detection is purely relative — a local extremum with enough prominence — so
-  // H/L placement stays consistent across models regardless of the field's
-  // absolute level (a genuine 1013 hPa low is a low whether the ambient pressure
-  // runs high or low).
+  // *Placement* is relative — a local extremum with enough prominence, so a closed
+  // center is found consistently across models regardless of the field's absolute
+  // level — but the H/L *label* it gets is then decided by absolute pressure
+  // (see HIGH_MIN_PA below).
   const MIN_PROMINENCE_PA = 75;
+  // A closed center's H/L label is decided by its *absolute* central pressure, not
+  // only by whether it's a local max or min. A weak bump that's a relative maximum
+  // inside a broadly sub-standard field is still low pressure — flagging it "H"
+  // (e.g. a 1016 hPa ridge in an otherwise ~1010 field) reads as wrong. Anything at
+  // or below ~1016 hPa is a low; a genuine high (1017 hPa and up, and the real ones
+  // run 1020–1040) stays a high. The threshold sits just above the rounded 1016 mb
+  // label so a marker reading "1016 mb" always draws as an L.
+  const HIGH_MIN_PA = 101650; // rounds to 1017 mb; ≤ 1016 mb reads as a low
+  const kindFor = (val) => (val >= HIGH_MIN_PA ? 'H' : 'L');
   const candidates = [];
   const idx = (i, j) => j * d.w + i;
   // Test every cell (no row/column stride): a sharp, compact low — an intense
@@ -289,9 +298,9 @@ function pressureCenterGeoJSON(grid) {
       const lon = d.lon1 + i * d.di;
       const lat = d.lat1 - j * d.dj;
       if (isHigh && val - perimMax >= MIN_PROMINENCE_PA)
-        candidates.push({ kind: 'H', val, lon, lat, score: val - perimMax });
+        candidates.push({ kind: kindFor(val), val, lon, lat, score: val - perimMax });
       if (isLow && perimMin - val >= MIN_PROMINENCE_PA)
-        candidates.push({ kind: 'L', val, lon, lat, score: perimMin - val });
+        candidates.push({ kind: kindFor(val), val, lon, lat, score: perimMin - val });
     }
   }
 

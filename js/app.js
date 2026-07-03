@@ -6479,6 +6479,31 @@ function setupMapTools() {
       maps.push(...state.splitView.getMaps());
     return maps.filter((m) => m && m.getStyle);
   };
+  // The custom overlay symbols (H/L pressure centers and their mb labels) are GL
+  // symbol layers, not basemap labels, so the town-label boost above never
+  // touches them — at export/share resolution their on-screen text stayed small
+  // next to the scaled-up banners and legend. Bump their text-size (and halo, so
+  // they stay legible over busy fields) during the capture and restore it after.
+  // [layerId, kind ('layout'|'paint'), property, on-screen value, export value]
+  const OVERLAY_EXPORT_SIZES = [
+    ['pressure-centers', 'layout', 'text-size', 30, 46],
+    ['pressure-centers', 'paint', 'text-halo-width', 2, 3],
+    ['pressure-center-labels', 'layout', 'text-size', 12, 18],
+    ['pressure-center-labels', 'paint', 'text-halo-width', 1.6, 2.4],
+  ];
+  const applyExportOverlayBoost = (maps, boost) => {
+    for (const m of maps) {
+      if (!m || !m.getLayer) continue;
+      for (const [id, kind, prop, base0, boosted] of OVERLAY_EXPORT_SIZES) {
+        if (!m.getLayer(id)) continue;
+        const val = boost ? boosted : base0;
+        try {
+          if (kind === 'paint') m.setPaintProperty(id, prop, val);
+          else m.setLayoutProperty(id, prop, val);
+        } catch (_) {}
+      }
+    }
+  };
   const applyExportLabelStyle = (maps, boost) => {
     const base = normalizeMapStyle(state.mapStyle);
     const opts = boost
@@ -6491,6 +6516,7 @@ function setupMapTools() {
     for (const m of maps) {
       try { applyMapStyle(m, opts, firstLabelLayerId(m), { fresh: false }); } catch (_) {}
     }
+    applyExportOverlayBoost(maps, boost);
   };
   // Resolve once the map has re-laid-out its labels (or after a short cap —
   // label placement runs in workers, so 'idle' is the only reliable signal).
