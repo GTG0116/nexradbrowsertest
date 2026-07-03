@@ -567,6 +567,44 @@ const GUIDANCE = {
       'Keep your phone charged and be prepared to leave quickly.',
     ],
   },
+  'Typhoon Watch': {
+    lead: 'A typhoon is forecasted to head towards the area. Winds of 74mph+ are expected within the next 48 hours.',
+    points: [
+      'Evacuate if told by local officials.',
+      'Start acting on preperations to protect property such as boarding windows, doors, and placing down sandbags.',
+      'If evacuating, get out as early as possible to give plenty of time incase of delays.',
+      'Prepare as if it would be the worst case scenario, even though it likely will not be.',
+    ],
+  },
+  'Hurricane Watch': {
+    lead: 'A hurricane is forecasted to head towards the area. Winds of 74mph+ are expected within the next 48 hours.',
+    points: [
+      'Evacuate if told by local officials.',
+      'Start acting on preperations to protect property such as boarding windows, doors, and placing down sandbags.',
+      'If evacuating, get out as early as possible to give plenty of time incase of delays.',
+      'Prepare as if it would be the worst case scenario, even though it likely will not be.',
+    ],
+  },
+  'Hurricane Warning': {
+    lead: 'A hurricane is forecasted to head towards the area. Winds of 74mph+ are expected within the next 36 hours.',
+    points: [
+      'Follow any given evacuation orders or recommendations.',
+      'Finalize preperations to protect property such as boarding windows, doors, and placing down sandbags.',
+      'If evacuating, get out NOW as there is little to no time left to evacuate safely.',
+      'Prepare as if it would be the worst case scenario, even though it likely will not be.',
+      'If you are riding out the storm, ensure you have enough food, water, and medicine to last up to two weeks.',
+    ],
+  },
+  'Typhoon Warning': {
+    lead: 'A typhoon is forecasted to head towards the area. Winds of 74mph+ are expected within the next 36 hours.',
+    points: [
+      'Follow any given evacuation orders or recommendations.',
+      'Finalize preperations to protect property such as boarding windows, doors, and placing down sandbags.',
+      'If evacuating, get out NOW as there is little to no time left to evacuate safely.',
+      'Prepare as if it would be the worst case scenario, even though it likely will not be.',
+      'If you are riding out the storm, ensure you have enough food, water, and medicine to last up to two weeks.',
+    ],
+  },
   'Tsunami Advisory': {
     lead: 'Strong currents or waves dangerous to people in or near the water are expected or occurring.',
     points: [
