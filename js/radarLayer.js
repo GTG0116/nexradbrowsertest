@@ -102,18 +102,33 @@ void main() {
     float rc = az / 360.0 * u_naz - 0.5;
     float gn = floor(gc + 0.5), rn = floor(rc + 0.5);
     float inv2s2 = 1.0 / (2.0 * sigma * sigma);
-    float sv = 0.0, sw = 0.0;
+    float sv = 0.0, sw = 0.0, wfull = 0.0;
+    // Whether the gate the pixel actually sits on carries an echo. Kept so the
+    // native footprint is preserved exactly (every gate that draws unsmoothed
+    // still draws), and only genuinely-enclosed holes are additionally filled.
+    bool centreValid = gateValue(gn, rn).y > 0.5;
     for (int m = -3; m <= 3; m++) {
       for (int n = -3; n <= 3; n++) {
         float gi = gn + float(n), ri = rn + float(m);
         vec2 gv = gateValue(gi, ri);
         float dg = gi - gc, dr = ri - rc;
-        float w = exp(-(dg * dg + dr * dr) * inv2s2) * gv.y;
-        sv += gv.x * w;
-        sw += w;
+        float w = exp(-(dg * dg + dr * dr) * inv2s2);
+        // The azimuth row wraps (closed sweep) so it is always in bounds; only
+        // the gate index can fall off the end. wfull counts every in-bounds tap,
+        // valid or not, so coverage reads the fraction of the neighbourhood
+        // that actually holds data.
+        if (gi >= 0.0 && gi < u_ngate) wfull += w;
+        sv += gv.x * w * gv.y;
+        sw += w * gv.y;
       }
     }
     if (sw < 1e-4) discard;    // no valid gate nearby
+    // Draw where the pixel's own gate has an echo (native footprint) OR where the
+    // hole is well enclosed by echo (>=50% of the surrounding gates carry data) —
+    // so a dropped gate in the middle of a storm gets filled instead of punching a
+    // hole, while the smoothed echo never balloons out across genuinely clear air.
+    float coverage = sw / max(wfull, 1e-4);
+    if (!centreValid && coverage < 0.5) discard;
     v = sv / sw;
   }
 

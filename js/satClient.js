@@ -47,12 +47,23 @@ export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress) {
 }
 
 // Decode any of `bands` not already on the scene, merging the new channel arrays
-// into scene.channels. Returns the same scene for chaining.
+// into scene.channels. Returns the same scene for chaining. Himawari bands are
+// ten separately-fetched HSD segments each, so a transient S3 hiccup can drop a
+// band; a single retry of whatever is still missing turns those flaky switches
+// into reliable ones instead of leaving the newly-selected product blank.
 export function ensureBandsAsync(scene, satKey, sectorKey, bands) {
   const need = bands.filter((b) => !scene.channels[b]);
   if (!need.length) return Promise.resolve(scene);
-  return call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: need })
-    .then((m) => { Object.assign(scene.channels, m.channels); return scene; });
+  const request = (want) =>
+    call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: want })
+      .then((m) => { Object.assign(scene.channels, m.channels); });
+  return request(need)
+    .then(() => {
+      const still = need.filter((b) => !scene.channels[b]);
+      return still.length ? request(still) : null;
+    })
+    .catch(() => {})
+    .then(() => scene);
 }
 
 // Drop a scene's cached decode state in the worker (frees a GOES file's bytes).
