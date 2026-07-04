@@ -6475,8 +6475,14 @@ function ensureLiveForSwitch() {
 function fmtClock(d, withSeconds) {
   const p = (n) => String(n).padStart(2, '0');
   if (state.tzLocal) {
-    const base = `${p(d.getHours())}:${p(d.getMinutes())}`;
-    return `${withSeconds ? `${base}:${p(d.getSeconds())}` : base} ${localTzLabel(d)}`;
+    // Local time is shown 12-hour with an AM/PM suffix (military is kept only
+    // for the always-Zulu UTC clock).
+    const h24 = d.getHours();
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    const h12 = ((h24 + 11) % 12) + 1;
+    const base = `${h12}:${p(d.getMinutes())}`;
+    const time = withSeconds ? `${base}:${p(d.getSeconds())}` : base;
+    return `${time} ${ampm} ${localTzLabel(d)}`;
   }
   const base = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
   return `${withSeconds ? `${base}:${p(d.getUTCSeconds())}` : base} UTC`;
@@ -6617,6 +6623,45 @@ function isoDate(d) {
 // ---------------------------------------------------------------------------
 // Map tools — METAR station plots, draw / measure / storm-track, split screen
 // ---------------------------------------------------------------------------
+// Populate (or hide) the storm-track side briefing: the full ordered list of
+// towns in the cone with their lead time + ETA. Replaces the old, unreadable
+// per-town labels stamped over the map. Passing null hides the panel.
+function renderStormBriefing(data) {
+  let panel = document.getElementById('stormBriefing');
+  if (!data || !data.towns || !data.towns.length) {
+    if (panel) panel.hidden = true;
+    document.body.classList.remove('storm-briefing-open');
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'stormBriefing';
+    panel.className = 'storm-briefing';
+    document.body.appendChild(panel);
+  }
+  const rows = data.towns.map((t) => `
+    <li class="sb-row">
+      <span class="sb-name">${escapeHTML(t.name)}</span>
+      <span class="sb-eta"><span class="sb-lead">+${t.tMin}m</span><span class="sb-time">${escapeHTML(t.eta)}</span></span>
+    </li>`).join('');
+  const more = data.total > data.shownCount
+    ? `<div class="sb-more">Showing ${data.shownCount} of ${data.total} — raise “Max towns” for more</div>`
+    : '';
+  panel.innerHTML = `
+    <div class="sb-head">
+      <span class="sb-dot"></span>
+      <div class="sb-titlewrap">
+        <div class="sb-kicker">Storm track</div>
+        <div class="sb-motion">${escapeHTML(data.heading)} · ${data.speed} mph · ${data.minutes} min lead</div>
+      </div>
+    </div>
+    <div class="sb-colhead"><span>Town</span><span>Lead · ETA</span></div>
+    <ol class="sb-list">${rows}</ol>
+    ${more}`;
+  panel.hidden = false;
+  document.body.classList.add('storm-briefing-open');
+}
+
 function setupMapTools() {
   // Surface observations (METAR station plots).
   state.metars = new MetarController(state.map);
@@ -6645,6 +6690,8 @@ function setupMapTools() {
   };
   // When a tool finishes (or is cancelled), drop the pressed state on its button.
   state.mapTools.onToolEnd = () => syncToolButtons();
+  // Storm track hands its ordered town list here; show it in the side briefing.
+  state.mapTools.onTowns = (data) => renderStormBriefing(data);
 
   const toolButtons = [
     [el.toolDraw, 'draw'],
@@ -7447,6 +7494,9 @@ function buildExportScene() {
   const paneLabels = state.splitView && state.splitView.active && state.splitView.paneProducts
     ? state.splitView.paneProducts()
     : null;
+  // Storm-track briefing (town list + motion) reproduced as an alert-style side
+  // panel on the export, when the storm tool has an active track.
+  const stormBriefing = state.mapTools ? state.mapTools.stormBriefing() : null;
   return {
     canvases,
     paneLabels,
@@ -7454,6 +7504,7 @@ function buildExportScene() {
     legendEl: el.legend,
     alert,
     briefing,
+    stormBriefing,
     theme: exportTheme(),
     modelStats: visibleModelExtrema(),
   };

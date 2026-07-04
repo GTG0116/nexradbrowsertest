@@ -3632,14 +3632,142 @@ input[type='range']::-moz-range-thumb {
   color: var(--accent);
 }
 
-/* While the storm-track tool owns the screen, hide the bottom UI (dock, legend,
-   footer, playback bar) so the track + town labels read cleanly. The storm card
-   stays — it's the control surface for the tool. */
+/* While the storm-track tool owns the screen, hide the surrounding UI — the
+   bottom dock/legend/footer/playback AND the left side panel — so the track and
+   the town-list briefing own the view. The storm card (bottom-center) stays;
+   it's the control surface for the tool. */
 body.storm-active .mobile-dock,
 body.storm-active .map-hud,
 body.storm-active .footer,
-body.storm-active .playback-bar {
+body.storm-active .playback-bar,
+body.storm-active .sidebar {
   display: none !important;
+}
+
+/* Storm-track side briefing: the full ordered list of towns in the cone with
+   their lead time + ETA. Takes over the space the hidden sidebar left, styled
+   like the alert briefing so it reads the same on screen and in exports. */
+.storm-briefing {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: clamp(244px, 25vw, 344px);
+  max-width: 92vw;
+  z-index: 1258;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+  border-right: 1px solid #ff5a7a;
+  box-shadow: var(--glow-strong), 0 0 28px rgba(255, 90, 122, 0.18);
+  font-family: 'Manrope', system-ui, sans-serif;
+}
+.storm-briefing[hidden] { display: none; }
+.storm-briefing .sb-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  background: #ff5a7a;
+  color: #1a0410;
+  flex: none;
+}
+.storm-briefing .sb-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #1a0410;
+  box-shadow: 0 0 0 3px rgba(26, 4, 16, 0.25);
+  flex: none;
+}
+.storm-briefing .sb-kicker {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.storm-briefing .sb-motion {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  opacity: 0.82;
+  margin-top: 2px;
+}
+.storm-briefing .sb-colhead {
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 14px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  border-bottom: 1px solid var(--panel-edge);
+  flex: none;
+}
+.storm-briefing .sb-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 12px;
+  overflow-y: auto;
+  flex: 1;
+}
+.storm-briefing .sb-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.08);
+}
+.storm-briefing .sb-row:nth-child(even) {
+  background: rgba(255, 90, 122, 0.055);
+}
+.storm-briefing .sb-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.storm-briefing .sb-eta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: none;
+  font-family: 'JetBrains Mono', monospace;
+}
+.storm-briefing .sb-lead {
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+.storm-briefing .sb-time {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff7a94;
+}
+.storm-briefing .sb-more {
+  padding: 9px 14px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  border-top: 1px solid var(--panel-edge);
+  flex: none;
+}
+@media (max-width: 760px) {
+  .storm-briefing {
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: auto;
+    width: auto;
+    max-height: 46vh;
+    border-right: none;
+    border-bottom: 1px solid #ff5a7a;
+  }
 }
 
 /* ---- Split screen (second synced pane) ---- */

@@ -245,7 +245,11 @@ export async function listScenes(satKey, sectorKey, date) {
 
 export async function fetchBytes(bucket, key, onProgress) {
   const res = await fetch(`${bucket}/${key}`);
-  if (!res.ok) throw new Error(`GOES download failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`GOES download failed: ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
@@ -262,6 +266,33 @@ export async function fetchBytes(bucket, key, onProgress) {
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
+}
+
+// Retry only failures that are actually transient — a network drop or an S3 5xx/
+// 429. A 403/404 means the object genuinely isn't there yet (a scene still
+// uploading its segments), so retrying it just wastes time and shouldn't be done.
+function isRetryableFetch(err) {
+  const s = err && err.status;
+  return s == null || s === 429 || s >= 500;
+}
+
+// fetchBytes with a short exponential backoff. Himawari full-disk scenes are 10
+// separate segment objects per band; before this, a single dropped segment left
+// a permanent NaN stripe across the whole image ("loads only half") and a blip on
+// the grid probe made the scene "refuse to load". Retrying the transient cases
+// makes both far rarer without stalling on segments that aren't uploaded yet.
+export async function fetchBytesRetry(bucket, key, { retries = 3, onProgress } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetchBytes(bucket, key, onProgress);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= retries || !isRetryableFetch(err)) break;
+      await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
+    }
+  }
+  throw lastErr;
 }
 
 // Read one ABI channel into physical units (reflectance factor for the visible/
@@ -381,7 +412,7 @@ async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgres
   const segFetches = [];
   for (let s = 1; s <= sector.segments; s++) {
     segFetches.push(
-      fetchBytes(bucket, himawariSegKey(meta, sector, ahi, s))
+      fetchBytesRetry(bucket, himawariSegKey(meta, sector, ahi, s))
         .catch(() => null)
         .then((bytes) => { if (onProgress) onProgress(++done / sector.segments); return bytes; })
     );
@@ -453,7 +484,7 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
   // single-segment regional sectors.
   if (!gridRef.grid) {
     try {
-      const bytes = await fetchBytes(sat.bucket, himawariSegKey(meta, sector, 13, 1));
+      const bytes = await fetchBytesRetry(sat.bucket, himawariSegKey(meta, sector, 13, 1));
       gridRef.grid = deriveGrid(parseHsdHeader(bytes), sector.commonCFAC);
     } catch (_) { /* leave empty; the channel will be blank */ }
   }

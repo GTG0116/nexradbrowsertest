@@ -83,13 +83,17 @@ export class ExportTool {
     // The panel's width and text unit are derived from a single pane's
     // dimensions (not the whole grid) so the briefing renders at the same size
     // whether the export carries one pane or four.
+    // An open alert briefing takes precedence over the storm briefing for the
+    // docked side panel (both would otherwise want the same left column).
     const dockBriefing = !!scene.briefing && !mobile;
+    const dockStorm = !dockBriefing && !!scene.stormBriefing && !mobile;
+    const sidePanel = dockBriefing || dockStorm;
     const bu = Math.min(
       mobile ? clamp(cellW / 34, 28, 56) : clamp(cellW / 42, 22, 56),
       Math.max(18, cellH / 12));
-    const briefingW = dockBriefing ? briefingPanelWidth(cellW, bu, mobile) : 0;
-    const mapX = dockBriefing ? briefingW : 0;
-    const outW = mapW + (dockBriefing ? briefingW : 0);
+    const briefingW = sidePanel ? briefingPanelWidth(cellW, bu, mobile) : 0;
+    const mapX = sidePanel ? briefingW : 0;
+    const outW = mapW + (sidePanel ? briefingW : 0);
 
     const out = document.createElement('canvas');
     out.width = outW;
@@ -138,6 +142,15 @@ export class ExportTool {
         });
       } else {
         drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
+      }
+    }
+    else if (scene.stormBriefing) {
+      if (dockStorm) {
+        drawStormBriefing(ctx, scene.stormBriefing, 0, headerH, briefingW, mapH, bu, mobile, theme, {
+          panelW: briefingW,
+        });
+      } else {
+        drawStormBriefing(ctx, scene.stormBriefing, 0, headerH, mapW, mapH, u, mobile, theme);
       }
     }
     else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile, theme);
@@ -728,6 +741,108 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
 }
 
 // Word-wrap `text` to fit `maxW` px in the current font, returning the lines.
+// Storm-track briefing: an alert-style side panel listing the towns in the
+// forecast cone with their lead time + ETA, in the same visual language as the
+// alert briefing so a shared screenshot reads consistently.
+function drawStormBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opts = {}) {
+  const panelW = opts.panelW || briefingPanelWidth(mapW, u, mobile);
+  const x0 = mapX, y0 = mapY, panelH = mapH;
+  const pad = Math.round(u * 1.2);
+  const innerW = panelW - pad * 2;
+  const bottom = y0 + panelH - pad;
+  const accent = '#ff5a7a';
+  let y = y0;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, panelW, panelH);
+  ctx.clip();
+
+  // Panel background + right-edge hairline.
+  ctx.fillStyle = theme.alertPanel;
+  ctx.fillRect(x0, y0, panelW, panelH);
+  ctx.fillStyle = theme.separator;
+  ctx.fillRect(x0 + panelW - 1, y0, 1, panelH);
+
+  // Coloured header band: title + storm motion.
+  const headH = Math.round(u * 2.9);
+  ctx.fillStyle = accent;
+  ctx.fillRect(x0, y, panelW, headH);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#1a0410';
+  ctx.font = `700 ${Math.round(u * 1.05)}px ${SANS}`;
+  ctx.fillText('STORM TRACK', x0 + pad, y + headH * 0.37);
+  ctx.font = `600 ${Math.round(u * 0.7)}px ${MONO}`;
+  ctx.fillText(`${b.heading} · ${b.speed} MPH · ${b.minutes} MIN LEAD`.toUpperCase(),
+    x0 + pad, y + headH * 0.72);
+  y += headH + Math.round(u * 1.1);
+  ctx.textBaseline = 'alphabetic';
+
+  // Column header + rule.
+  ctx.fillStyle = theme.dim;
+  ctx.font = `600 ${Math.round(u * 0.6)}px ${MONO}`;
+  ctx.textAlign = 'left';
+  ctx.fillText('TOWN', x0 + pad, y);
+  ctx.textAlign = 'right';
+  ctx.fillText('LEAD · ETA', x0 + panelW - pad, y);
+  y += Math.round(u * 0.55);
+  ctx.fillStyle = theme.separator;
+  ctx.fillRect(x0 + pad, y, innerW, 1);
+  y += Math.round(u * 1.15);
+
+  // Rows.
+  const rowH = Math.round(u * 1.5);
+  const nameFont = `600 ${Math.round(u * 0.86)}px ${SANS}`;
+  const etaFont = `700 ${Math.round(u * 0.82)}px ${MONO}`;
+  const towns = b.towns || [];
+  let drawn = 0;
+  for (const t of towns) {
+    if (y + rowH > bottom) break;
+    if (drawn % 2 === 1) {
+      ctx.fillStyle = theme.alertSoft;
+      ctx.fillRect(x0 + Math.round(pad * 0.5), y - Math.round(rowH * 0.72), panelW - pad, rowH);
+    }
+    const midY = y - Math.round(rowH * 0.22);
+    ctx.textBaseline = 'middle';
+    const etaText = `+${t.tMin}m · ${t.eta}`;
+    ctx.font = etaFont;
+    const etaW = ctx.measureText(etaText).width;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = theme.text;
+    ctx.font = nameFont;
+    ctx.fillText(ellipsize(ctx, t.name, innerW - etaW - Math.round(u * 0.8)), x0 + pad, midY);
+    ctx.textAlign = 'right';
+    ctx.font = etaFont;
+    ctx.fillStyle = accent;
+    ctx.fillText(etaText, x0 + panelW - pad, midY);
+    ctx.textBaseline = 'alphabetic';
+    y += rowH;
+    drawn++;
+  }
+
+  // "+N more" note when the list is capped or clipped by the panel.
+  const remaining = Math.max(0, (b.total || towns.length) - drawn);
+  if (remaining > 0 && y <= bottom) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = theme.dim;
+    ctx.font = `600 ${Math.round(u * 0.72)}px ${SANS}`;
+    ctx.fillText(`+${remaining} more town${remaining === 1 ? '' : 's'} in cone`,
+      x0 + pad, y + Math.round(u * 0.4));
+  }
+
+  ctx.restore();
+}
+
+// Truncate `text` with an ellipsis so it fits `maxW` at the current font.
+function ellipsize(ctx, text, maxW) {
+  let s = String(text == null ? '' : text);
+  if (maxW <= 0) return '';
+  if (ctx.measureText(s).width <= maxW) return s;
+  while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+  return s + '…';
+}
+
 function wrapText(ctx, text, maxW) {
   const words = String(text == null ? '' : text).split(/\s+/).filter(Boolean);
   const lines = [];

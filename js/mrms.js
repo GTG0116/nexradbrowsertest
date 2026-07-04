@@ -96,7 +96,6 @@ export const MRMS_PRODUCTS = {
   REF0C: product('REF0C', 'Reflectivity_0C_00.50', 'Reflectivity at 0°C', 'dBZ', 5, 75, 5, REFL),
   REFM20C: product('REFM20C', 'Reflectivity_-20C_00.50', 'Reflectivity at −20°C', 'dBZ', 5, 75, 5, REFL),
   // ---- Echo tops ----
-  HREET: product('HREET', 'LVL3_HREET_00.50', 'Enhanced Echo Top (18 dBZ)', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
   ET18: product('ET18', 'EchoTop_18_00.50', '18 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
   ET30: product('ET30', 'EchoTop_30_00.50', '30 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
   ET50: product('ET50', 'EchoTop_50_00.50', '50 dBZ Echo Top', 'km', 0, 23, 0.5, ETOP, { unit: 'kft', factor: KM_TO_KFT }),
@@ -170,7 +169,7 @@ export const MRMS_CATEGORIES = [
   { id: 'lightning', name: 'Lightning', products: ['LTG30', 'LTG60', 'CGD1', 'CGD5', 'CGD15', 'CGD30'] },
   { id: 'precip', name: 'Precip Accumulation', products: ['PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
   { id: 'flooding', name: 'Flooding', products: ['ARI1H', 'ARI3H', 'ARI6H', 'ARI24H', 'ARIMAX', 'FFG1H', 'FFG3H', 'FFG6H', 'FFGMAX'] },
-  { id: 'echotops', name: 'Echo Tops', products: ['HREET', 'ET18', 'ET30', 'ET50', 'ET60'] },
+  { id: 'echotops', name: 'Echo Tops', products: ['ET18', 'ET30', 'ET50', 'ET60'] },
   { id: 'vil', name: 'Vertically Integrated Liquid', products: ['VIL', 'VILD', 'VIL2H', 'VIL24H', 'VII'] },
 ];
 
