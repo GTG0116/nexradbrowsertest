@@ -94,6 +94,18 @@ export function bandsFor(productId) {
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
+// Read one channel sample, tolerating a band that never decoded. A Himawari
+// full-disk band is ten separately-fetched segments; if a segment (or a whole
+// band) fails to load, that channel array can be missing from the scene. Returning
+// NaN — the same "no data" sentinel a real off-disk pixel uses — lets the RGBA
+// build finish and just leave those pixels transparent, instead of throwing on
+// `ch[band][i]` and aborting the whole render (which left the *previous* product
+// frozen on screen — the "Himawari won't switch products" bug).
+function chAt(ch, band, i) {
+  const arr = ch[band];
+  return arr ? arr[i] : NaN;
+}
+
 // Stretch a physical value to 0..1 across [lo,hi] (lo>hi inverts), with gamma.
 function stretch(v, lo, hi, gamma) {
   if (Number.isNaN(v)) return NaN;
@@ -209,7 +221,7 @@ function buildGeoColor(scene, recipe, out, crop = null) {
   const ir = ch[recipe.ir.band];
   const sun = subsolarPoint(scene.time);
   const D2R = Math.PI / 180;
-  const comp = (spec, i) => stretch(ch[spec.band][i], spec.lo, spec.hi, spec.gamma);
+  const comp = (spec, i) => stretch(chAt(ch, spec.band, i), spec.lo, spec.hi, spec.gamma);
   for (let row = c.y; row < c.y + c.height; row++) {
     const yy = scene.yOffset + row * scene.yScale;
     for (let col = c.x; col < c.x + c.width; col++) {
@@ -270,7 +282,7 @@ export function buildRGBA(scene, productId, opts = {}) {
       const srcBase = row * W;
       const dstBase = (row - crop.y) * crop.width;
       for (let col = crop.x; col < crop.x + crop.width; col++) {
-        const v = data[srcBase + col];
+        const v = data ? data[srcBase + col] : NaN;
         const o = (dstBase + (col - crop.x)) * 4;
         if (Number.isNaN(v)) { out[o + 3] = 0; continue; }
         if (isVis) {
@@ -298,10 +310,10 @@ export function buildRGBA(scene, productId, opts = {}) {
   const comp = (spec, i) => {
     if (!spec) return 0;
     if (spec.diff) {
-      const a = ch[spec.diff[0]][i], b = ch[spec.diff[1]][i];
+      const a = chAt(ch, spec.diff[0], i), b = chAt(ch, spec.diff[1], i);
       return stretch(a - b, spec.lo, spec.hi, spec.gamma);
     }
-    return stretch(ch[spec.band][i], spec.lo, spec.hi, spec.gamma);
+    return stretch(chAt(ch, spec.band, i), spec.lo, spec.hi, spec.gamma);
   };
   for (let row = crop.y; row < crop.y + crop.height; row++) {
     const srcBase = row * W;

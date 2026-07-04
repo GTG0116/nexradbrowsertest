@@ -96,16 +96,22 @@ void main() {
     // field instead of staying visible as blocks. The texels are premultiplied,
     // so blending colour and alpha with the Gaussian weights is colour-correct;
     // off-disk neighbours (alpha 0) just soften the disk edge.
+    //
+    // Crucially the taps sit at CONTINUOUS positions (col+n, row+m), not at the
+    // integer texel centres (floor(col)+n). With the texture sampled bilinearly
+    // (LINEAR filtering is switched on for the smoothed pass in render()) each tap
+    // interpolates between the four surrounding ABI pixels, so the result is a
+    // genuinely smooth high-resolution wash. The old code snapped every tap to a
+    // texel centre, which just box-averaged whole pixels and left the imagery
+    // looking blocky/low-quality even with smoothing on.
     float sigma = u_smooth < 1.5 ? 0.6 : (u_smooth < 2.5 ? 1.1 : 1.8);
-    float cn = floor(col + 0.5), rn = floor(row + 0.5);
     float inv2s2 = 1.0 / (2.0 * sigma * sigma);
     vec4 sum = vec4(0.0);
     float wsum = 0.0;               // total Gaussian weight (incl. off-disk taps)
     for (int m = -3; m <= 3; m++) {
       for (int n = -3; n <= 3; n++) {
-        float ci = cn + float(n), rj = rn + float(m);
-        float dx = ci - col, dy = rj - row;
-        float w = exp(-(dx * dx + dy * dy) * inv2s2);
+        float ci = col + float(n), rj = row + float(m);
+        float w = exp(-(float(n) * float(n) + float(m) * float(m)) * inv2s2);
         sum += texelAt(ci, rj) * w;
         wsum += w;
       }
@@ -261,6 +267,12 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.uniform1i(this.u.u_tex, 0);
+      // Crisp NEAREST at level 0 keeps each ABI pixel exact; the smoothed pass
+      // wants bilinear so its continuous-position taps interpolate between pixels
+      // for a smooth, high-quality wash instead of box-averaged blocks.
+      const filt = this.smooth > 0 ? gl.LINEAR : gl.NEAREST;
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
 
       const U = this.uni;
       gl.uniform1f(this.u.u_W, U.W);

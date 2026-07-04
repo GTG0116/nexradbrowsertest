@@ -874,7 +874,7 @@ function cacheEls() {
   el.modelCityValuesField = $('#modelCityValuesField');
   el.modelCityValuesToggle = $('#modelCityValuesToggle');
   el.cityValuesProducts = $('#cityValuesProducts');
-  el.layeringField = $('#layeringField');
+  el.layerPanel = $('#layerPanel');
   el.layeringToggle = $('#layeringToggle');
   el.layerControls = $('#layerControls');
   el.layerList = $('#layerList');
@@ -883,6 +883,14 @@ function cacheEls() {
   el.layerDown = $('#layerDown');
   el.layerRemove = $('#layerRemove');
   el.layerSourceSelect = $('#layerSourceSelect');
+  el.layerSiteField = $('#layerSiteField');
+  el.layerSiteSelect = $('#layerSiteSelect');
+  el.layerSatField = $('#layerSatField');
+  el.layerSatSelect = $('#layerSatSelect');
+  el.layerSectorField = $('#layerSectorField');
+  el.layerSectorSelect = $('#layerSectorSelect');
+  el.layerModelField = $('#layerModelField');
+  el.layerModelSelect = $('#layerModelSelect');
   el.layerProductSelect = $('#layerProductSelect');
   el.layerStyleSelect = $('#layerStyleSelect');
   el.metarsToggle = $('#metarsToggle');
@@ -2297,13 +2305,20 @@ function applyModePanels() {
     const sm = MODELS[state.models.modelKey];
     el.stormFields.hidden = state.mode !== 'models' || !(sm && sm.stormBased);
   }
-  el.tiltPanel.hidden = state.mode !== 'radar';
-  if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models';
+  // With the layer stack on (desktop), the current product's own controls are
+  // swapped out for the layer editor — hide the Product picker, tilt, forecast-
+  // hour, outlook-detail and satellite-option panels, while Source, alerts,
+  // cyclones and the rest stay put. (No effect on mobile, where the swipe sheet
+  // keeps the product controls a swipe away regardless.)
+  const hideProduct = layeringUiActive();
+  if (el.productPanel) el.productPanel.hidden = hideProduct;
+  el.tiltPanel.hidden = state.mode !== 'radar' || hideProduct;
+  if (el.fhourPanel) el.fhourPanel.hidden = state.mode !== 'models' || hideProduct;
   // Outlook mode carries its day/product picker in a dedicated sidebar panel;
   // the generic scan list (volumePanel) has nothing to show, so swap them.
-  if (el.outlookDetailPanel) el.outlookDetailPanel.hidden = state.mode !== 'outlooks';
+  if (el.outlookDetailPanel) el.outlookDetailPanel.hidden = state.mode !== 'outlooks' || hideProduct;
   if (el.volumePanel) el.volumePanel.hidden = state.mode === 'outlooks';
-  el.satOptsPanel.hidden = state.mode !== 'satellite';
+  el.satOptsPanel.hidden = state.mode !== 'satellite' || hideProduct;
   // Keep the dock tool slot in sync with the active source.
   if (state._refreshDockTools) state._refreshDockTools();
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
@@ -3756,7 +3771,7 @@ function layerId() {
   return `user-${Date.now().toString(36)}-${state.layers.seq.toString(36)}`;
 }
 
-function layerProductOptions(source) {
+function layerProductOptions(source, layer = null) {
   if (source === 'radar') {
     return availableProductOrder().map((id) => ({ value: id, label: `${id} - ${radarProduct(id).name}` }));
   }
@@ -3769,8 +3784,11 @@ function layerProductOptions(source) {
     return MRMS_ORDER.filter((id) => MRMS_PRODUCTS[id]).map((id) => ({ value: id, label: `${id} - ${MRMS_PRODUCTS[id].name}` }));
   }
   if (source === 'models') {
+    // A layer draws whatever model it's pinned to (layer.modelKey), independent of
+    // the main view's model, so its product menu must reflect that model's fields.
+    const modelKey = (layer && layer.modelKey) || state.models.modelKey;
     return MODEL_ORDER
-      .filter((id) => MODEL_PRODUCTS[id] && modelSupports(state.models.modelKey, id))
+      .filter((id) => MODEL_PRODUCTS[id] && modelSupports(modelKey, id))
       .map((id) => ({ value: id, label: `${id} - ${MODEL_PRODUCTS[id].name}` }));
   }
   if (source === 'observations') {
@@ -3806,8 +3824,31 @@ function defaultLayerProduct(source) {
   return (layerProductOptions(source)[0] || {}).value || '';
 }
 
+// The active view's radar site (ICAO), used as the default for a new radar layer.
+function activeSiteIcao() {
+  return (state.volume && state.volume.icao) || state.site || 'KTLX';
+}
+
+// Fill in a layer's source-specific selectors (site / satellite+sector / model)
+// from the current view when they're not already set, so a freshly-added or
+// source-switched layer starts on something sensible.
+function ensureLayerTargets(layer) {
+  if (layer.source === 'radar' && !layer.siteId) layer.siteId = activeSiteIcao();
+  if (layer.source === 'satellite') {
+    if (!layer.satKey || !SATELLITES[layer.satKey]) layer.satKey = state.sat.satKey;
+    const sectors = sectorsForSatellite(layer.satKey);
+    if (!layer.sectorKey || !sectors[layer.sectorKey]) {
+      layer.sectorKey = sectors[state.sat.sectorKey] ? state.sat.sectorKey : Object.keys(sectors)[0];
+    }
+  }
+  if (layer.source === 'models' && (!layer.modelKey || !MODELS[layer.modelKey])) {
+    layer.modelKey = state.models.modelKey;
+  }
+}
+
 function normalizeLayerProduct(layer, value = null) {
-  const options = layerProductOptions(layer.source);
+  ensureLayerTargets(layer);
+  const options = layerProductOptions(layer.source, layer);
   const chosen = value || layer.productId || (options[0] && options[0].value) || '';
   const opt = options.find((o) => o.value === chosen) || options[0];
   if (!opt) return;
@@ -3847,6 +3888,19 @@ function layerProductName(layer) {
   return layer.productId;
 }
 
+// A short tag for the layer's target (radar site / satellite+sector / model), so
+// two layers on the same source but different targets read distinctly in the list.
+function layerTargetLabel(layer) {
+  if (layer.source === 'radar') return layer.siteId || '';
+  if (layer.source === 'satellite') {
+    const sat = SATELLITES[layer.satKey];
+    const sec = sectorsForSatellite(layer.satKey || '')[layer.sectorKey];
+    return [sat && sat.label, sec && sec.label].filter(Boolean).join(' ');
+  }
+  if (layer.source === 'models') return (MODELS[layer.modelKey] && MODELS[layer.modelKey].label) || layer.modelKey || '';
+  return '';
+}
+
 function contourCapable(layer) {
   return layer.source === 'mrms' || layer.source === 'models' || layer.source === 'observations' || layer.source === 'outlooks';
 }
@@ -3854,13 +3908,69 @@ function contourCapable(layer) {
 function syncLayerProductSelect(layer) {
   if (!el.layerProductSelect || !layer) return;
   el.layerProductSelect.innerHTML = '';
-  for (const opt of layerProductOptions(layer.source)) {
+  for (const opt of layerProductOptions(layer.source, layer)) {
     const o = document.createElement('option');
     o.value = opt.value;
     o.textContent = opt.label;
     el.layerProductSelect.appendChild(o);
   }
   el.layerProductSelect.value = layerDisplayValue(layer);
+}
+
+// Populate a <select> once from [value,label] pairs (skips if already filled).
+function fillSelectOnce(sel, pairs) {
+  if (!sel || sel.options.length) return;
+  for (const [value, label] of pairs) {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    sel.appendChild(o);
+  }
+}
+
+// Show the source-specific selectors (radar site / satellite + sector / model)
+// for the active layer and reflect its current picks.
+function syncLayerTargetSelects(layer) {
+  const show = (field, on) => { if (field) field.hidden = !on; };
+  show(el.layerSiteField, !!layer && layer.source === 'radar');
+  show(el.layerSatField, !!layer && layer.source === 'satellite');
+  show(el.layerSectorField, !!layer && layer.source === 'satellite');
+  show(el.layerModelField, !!layer && layer.source === 'models');
+  if (!layer) return;
+
+  if (layer.source === 'radar' && el.layerSiteSelect) {
+    fillSelectOnce(el.layerSiteSelect,
+      [...RADARS].sort((a, b) => a[0].localeCompare(b[0])).map(([code, name]) => [code, `${code} — ${name}`]));
+    el.layerSiteSelect.value = layer.siteId || activeSiteIcao();
+  }
+  if (layer.source === 'satellite') {
+    if (el.layerSatSelect) {
+      fillSelectOnce(el.layerSatSelect, Object.entries(SATELLITES).map(([key, sat]) => [key, sat.label]));
+      el.layerSatSelect.value = layer.satKey;
+    }
+    if (el.layerSectorSelect) {
+      // Sectors depend on the chosen satellite, so this one is rebuilt each time.
+      el.layerSectorSelect.innerHTML = '';
+      for (const [key, sec] of Object.entries(sectorsForSatellite(layer.satKey))) {
+        const o = document.createElement('option');
+        o.value = key;
+        o.textContent = sec.label;
+        el.layerSectorSelect.appendChild(o);
+      }
+      el.layerSectorSelect.value = layer.sectorKey;
+    }
+  }
+  if (layer.source === 'models' && el.layerModelSelect) {
+    fillSelectOnce(el.layerModelSelect, Object.entries(MODELS).map(([key, m]) => [key, m.label || key]));
+    el.layerModelSelect.value = layer.modelKey;
+  }
+}
+
+// The layer editor replaces the product controls only on the desktop sidebar; on
+// mobile the swipe sheet already keeps everything reachable, so the swap is skipped
+// there and the layer controls simply live alongside the rest.
+function layeringUiActive() {
+  return !!state.layers.enabled && !mqSmallScreen.matches;
 }
 
 function buildLayerControls() {
@@ -3879,6 +3989,10 @@ function buildLayerControls() {
   }
 
   const layer = activeUserLayer();
+  // Backfill targets before rendering the list/selects, so a layer restored from
+  // an older settings blob (no siteId/satKey/modelKey yet) shows the right site,
+  // satellite and model rather than a blank pick until its first draw.
+  for (const ly of state.layers.items) ensureLayerTargets(ly);
   el.layerList.innerHTML = '';
   for (let i = state.layers.items.length - 1; i >= 0; i--) {
     const ly = state.layers.items[i];
@@ -3886,7 +4000,9 @@ function buildLayerControls() {
     btn.type = 'button';
     btn.className = 'layer-item';
     btn.classList.toggle('active', ly.id === state.layers.activeId);
-    btn.innerHTML = `<b>${escapeHTML(layerProductName(ly))}</b><span>${escapeHTML((LAYER_STACK_SOURCE_LABELS[ly.source] || ly.source) + ' · ' + ly.style)}</span>`;
+    const target = layerTargetLabel(ly);
+    const sub = (LAYER_STACK_SOURCE_LABELS[ly.source] || ly.source) + (target ? ` · ${target}` : '') + ' · ' + ly.style;
+    btn.innerHTML = `<b>${escapeHTML(layerProductName(ly))}</b><span>${escapeHTML(sub)}</span>`;
     btn.addEventListener('click', () => {
       state.layers.activeId = ly.id;
       buildLayerControls();
@@ -3896,13 +4012,16 @@ function buildLayerControls() {
   }
 
   const disabled = !layer;
-  for (const node of [el.layerSourceSelect, el.layerProductSelect, el.layerStyleSelect, el.layerRemove, el.layerUp, el.layerDown])
+  for (const node of [el.layerSourceSelect, el.layerProductSelect, el.layerStyleSelect, el.layerRemove, el.layerUp, el.layerDown,
+    el.layerSiteSelect, el.layerSatSelect, el.layerSectorSelect, el.layerModelSelect])
     if (node) node.disabled = disabled;
   if (!layer) {
     el.layerProductSelect.innerHTML = '';
+    syncLayerTargetSelects(null);
     return;
   }
   el.layerSourceSelect.value = layer.source;
+  syncLayerTargetSelects(layer);
   syncLayerProductSelect(layer);
   el.layerStyleSelect.value = contourCapable(layer) ? layer.style : 'fill';
 }
@@ -3910,6 +4029,7 @@ function buildLayerControls() {
 function addUserLayer() {
   const source = defaultLayerSource();
   const layer = { id: layerId(), source, productId: defaultLayerProduct(source), detailId: '', style: 'fill' };
+  ensureLayerTargets(layer);
   normalizeLayerProduct(layer, layer.productId);
   state.layers.items.push(layer);
   state.layers.activeId = layer.id;
@@ -3963,7 +4083,11 @@ function rememberLayerArtifacts(layers, sources = []) {
 }
 
 function layerCacheKey(layer, extra = '') {
-  return `${layer.source}:${layer.productId}:${layer.detailId || ''}:${extra}`;
+  const target = layer.source === 'radar' ? (layer.siteId || '')
+    : layer.source === 'satellite' ? `${layer.satKey || ''}/${layer.sectorKey || ''}`
+    : layer.source === 'models' ? (layer.modelKey || '')
+    : '';
+  return `${layer.source}:${target}:${layer.productId}:${layer.detailId || ''}:${extra}`;
 }
 
 async function loadLayerGrid(layer) {
@@ -3991,22 +4115,38 @@ async function loadLayerGrid(layer) {
     return state.layers.cache.get(ck);
   }
   if (layer.source === 'models') {
-    if (state.mode === 'models' && layer.productId === state.models.productId && state.models.grid) return state.models.grid;
-    if (!modelSupports(state.models.modelKey, layer.productId)) return null;
+    const modelKey = (layer.modelKey && MODELS[layer.modelKey]) ? layer.modelKey : state.models.modelKey;
+    if (!modelSupports(modelKey, layer.productId)) return null;
+    const onActiveModel = modelKey === state.models.modelKey;
+    // When the layer rides the same model as the main view, reuse its live grid /
+    // run / forecast hour so the two stay in lockstep and nothing re-downloads.
+    if (onActiveModel && state.mode === 'models' && layer.productId === state.models.productId && state.models.grid)
+      return state.models.grid;
     // A models layer must render even when models mode was never entered (so the
     // run list is empty): list the cycles on demand and take the latest. Storm-
     // based models need their run stamped so loadModel can build the frame key.
-    let run = currentModelRun();
+    let run = onActiveModel ? currentModelRun() : null;
+    let stormId = onActiveModel ? (state.models.stormId || '') : '';
     if (!run) {
       const when = state.live ? new Date() : state.date;
-      const runs = await listModels(state.models.modelKey, layer.productId, when);
+      const runs = await listModels(modelKey, layer.productId, when);
       run = runs[runs.length - 1] || null;
-      const model = MODELS[state.models.modelKey];
-      if (run && model && model.stormBased) stampModelStorm(run);
+      const model = MODELS[modelKey];
+      if (run && model && model.stormBased && run.storms && run.storms.length) {
+        // Pick a storm for the layer without disturbing the main view's selection.
+        const storm = run.storms.find((s) => s.id === state.models.stormId) || run.storms[0];
+        stormId = storm.id;
+        run.storm = storm.id;
+        run.fhours = storm.fhours;
+        run.maxFhour = storm.fhours[storm.fhours.length - 1] || 0;
+      }
     }
     if (!run) return null;
-    const ck = layerCacheKey(layer, `${state.models.modelKey}:${state.models.stormId || ''}:${run.key}:${state.models.fhour}`);
-    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadModel(state.models.modelKey, layer.productId, run, state.models.fhour));
+    // Only a same-model layer can follow the main view's forecast hour; a
+    // different model has no shared timeline, so it shows F00.
+    const fhour = onActiveModel ? state.models.fhour : 0;
+    const ck = layerCacheKey(layer, `${modelKey}:${stormId}:${run.key}:${fhour}`);
+    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadModel(modelKey, layer.productId, run, fhour));
     return state.layers.cache.get(ck);
   }
   return null;
@@ -4078,12 +4218,56 @@ async function renderGridUserLayer(layer, seq) {
   rememberLayerArtifacts([id]);
 }
 
-function renderRadarUserLayer(layer) {
+// Fetch + decode the latest Level II volume for a radar site a layer wants to
+// draw, independent of the site the main view is on. Cached per site (and briefly
+// re-used while LIVE), so several layers or a repaint don't re-download.
+async function loadLayerRadarVolume(siteId, seq) {
+  state.layers.radarCache = state.layers.radarCache || new Map();
+  const cache = state.layers.radarCache;
+  const hit = cache.get(siteId);
+  if (hit && (!state.live || Date.now() - hit.ts < 120000)) return hit.volume;
+  const when = state.live ? new Date() : state.date;
+  let vols;
+  try { vols = await listVolumes(siteId, when); } catch (_) { return hit ? hit.volume : null; }
+  if (seq !== state.layers.renderSeq) return hit ? hit.volume : null;
+  if (!vols || !vols.length) return hit ? hit.volume : null;
+  const key = vols[vols.length - 1].key;
+  if (hit && hit.key === key) { hit.ts = Date.now(); return hit.volume; }
+  let volume;
+  try {
+    const bytes = await fetchVolume(key);
+    if (seq !== state.layers.renderSeq) return hit ? hit.volume : null;
+    volume = await decodeVolume(bytes);
+  } catch (_) { return hit ? hit.volume : null; }
+  if (!volume) return hit ? hit.volume : null;
+  cache.set(siteId, { volume, key, ts: Date.now() });
+  while (cache.size > 4) cache.delete(cache.keys().next().value);
+  return volume;
+}
+
+async function renderRadarUserLayer(layer, seq) {
   const map = state.map;
   const product = radarProduct(layer.productId);
-  const sweep = radarSweepFor(layer.productId);
-  const site = state.shownSite || (state.volume && state.volume.site);
-  if (!product || !sweep || !site) return;
+  // Level III products aren't drawn from Level II sweeps; skip (and don't waste a
+  // volume download on) them, matching the main radar path.
+  if (!product || !PRODUCTS[layer.productId]) return;
+  const siteId = layer.siteId || activeSiteIcao();
+  let sweep = null, site = null;
+  if (siteId === activeSiteIcao() && state.sweeps && state.sweeps.length) {
+    // Same site as the main view — reuse its already-decoded, dealiased sweep.
+    sweep = radarSweepFor(layer.productId);
+    site = state.shownSite || (state.volume && state.volume.site);
+  } else {
+    const volume = await loadLayerRadarVolume(siteId, seq);
+    if (seq !== state.layers.renderSeq || !volume) return;
+    sweep = pickSweep(volume.sweeps, layer.productId);
+    if (sweep) {
+      if (layer.productId === 'SRV') sweep = stormRelativeSweep(dealiasSweep(sweep));
+      else if (state.dealias && layer.productId === 'VEL') sweep = dealiasSweep(sweep);
+    }
+    site = volume.site;
+  }
+  if (!sweep || !site || seq !== state.layers.renderSeq) return;
   const id = `rn-user-${layer.id}`;
   const glLayer = createRadarLayer(id);
   map.addLayer(glLayer, dataLayerAnchor(map));
@@ -4095,31 +4279,47 @@ function renderRadarUserLayer(layer) {
 }
 
 // A satellite layer in the stack must render even when satellite mode was never
-// entered (so state.sat.scene is null). List the scenes for the active
+// entered (so state.sat.scene is null). List the scenes for the layer's chosen
 // satellite/sector on demand, load the latest, and cache it keyed by scene key
 // (so LIVE picks up new frames) — separate from the mode's own state.sat.scene.
-async function ensureLayerSatScene(seq) {
-  if (state.sat.scene) return state.sat.scene;
+// When the layer targets the exact satellite+sector the main view is showing, the
+// already-decoded live scene is reused instead of a second download.
+async function ensureLayerSatScene(layer, seq) {
+  const satKey = (layer.satKey && SATELLITES[layer.satKey]) ? layer.satKey : state.sat.satKey;
+  const sectors = sectorsForSatellite(satKey);
+  const sectorKey = sectors[layer.sectorKey] ? layer.sectorKey : state.sat.sectorKey;
+  if (state.sat.scene && satKey === state.sat.satKey && sectorKey === state.sat.sectorKey)
+    return { scene: state.sat.scene, satKey, sectorKey };
   const when = state.live ? new Date() : state.date;
-  const scenes = await listScenes(state.sat.satKey, state.sat.sectorKey, when);
+  const scenes = await listScenes(satKey, sectorKey, when);
   if (seq !== state.layers.renderSeq || !scenes.length) return null;
   const key = scenes[scenes.length - 1].key;
-  const ck = `layerscene:${state.sat.satKey}:${state.sat.sectorKey}:${key}`;
-  if (state.layers.cache.has(ck)) return state.layers.cache.get(ck);
-  const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId));
+  const ck = `layerscene:${satKey}:${sectorKey}:${key}`;
+  if (state.layers.cache.has(ck)) return { scene: state.layers.cache.get(ck), satKey, sectorKey };
+  const scene = await loadSceneAsync(satKey, sectorKey, key, bandsFor(layer.productId));
   if (seq !== state.layers.renderSeq) return null;
   state.layers.cache.set(ck, scene);
-  return scene;
+  return { scene, satKey, sectorKey };
 }
 
 async function renderSatelliteUserLayer(layer, seq) {
   const map = state.map;
-  const scene = await ensureLayerSatScene(seq);
+  const got = await ensureLayerSatScene(layer, seq);
   if (seq !== state.layers.renderSeq) return;
-  if (!scene) return;
-  await ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(layer.productId));
+  if (!got || !got.scene) return;
+  const { scene, satKey, sectorKey } = got;
+  await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(layer.productId));
   if (seq !== state.layers.renderSeq) return;
-  const payload = buildSatPayload(scene, layer.productId);
+  // Only borrow the main view's crop (a CONUS region / cyclone box) when the layer
+  // is on the very satellite+sector that crop was computed for; otherwise render
+  // the layer's own full scene, or the CONUS box would be projected onto (say) a
+  // Himawari disk and land off-Earth.
+  const sameAsView = satKey === state.sat.satKey && sectorKey === state.sat.sectorKey;
+  const crop = sameAsView ? satelliteCrop(scene) : null;
+  const rgba = buildRGBA(scene, layer.productId, { enhanceIR: state.sat.enhanceIR, crop });
+  const meta = croppedSatMeta(scene, crop);
+  const bbox = crop && crop.bbox ? crop.bbox : sceneBBox(meta);
+  const payload = { meta, rgba, bbox };
   const id = `rn-user-${layer.id}`;
   const glLayer = createSatelliteLayer(id);
   map.addLayer(glLayer, dataLayerAnchor(map));
@@ -4166,7 +4366,7 @@ async function renderOneUserLayer(layer, seq) {
   if (!state.map || seq !== state.layers.renderSeq) return;
   normalizeLayerProduct(layer, layerDisplayValue(layer));
   if (layer.source !== 'outlooks' && !contourCapable(layer) && layer.style === 'contour') layer.style = 'fill';
-  if (layer.source === 'radar') renderRadarUserLayer(layer);
+  if (layer.source === 'radar') await renderRadarUserLayer(layer, seq);
   else if (layer.source === 'satellite') await renderSatelliteUserLayer(layer, seq);
   else if (layer.source === 'outlooks') await renderOutlookUserLayer(layer, seq);
   else await renderGridUserLayer(layer, seq);
@@ -4194,7 +4394,9 @@ function setupLayerControls() {
         renderLayerStack();
         saveSettings();
       }
-      setStatus(state.layers.enabled ? 'layer stack on' : 'layer stack off');
+      // Swap the product controls for the layer editor (or back) on the sidebar.
+      applyModePanels();
+      setStatus(state.layers.enabled ? 'layers on' : 'layers off');
     });
   }
   if (el.layerAdd) el.layerAdd.addEventListener('click', addUserLayer);
@@ -4206,10 +4408,58 @@ function setupLayerControls() {
       const layer = activeUserLayer();
       if (!layer) return;
       layer.source = el.layerSourceSelect.value;
+      ensureLayerTargets(layer);
       layer.productId = defaultLayerProduct(layer.source);
       layer.detailId = '';
       normalizeLayerProduct(layer, layer.productId);
       if (!contourCapable(layer)) layer.style = 'fill';
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  // Per-source targets: a layer can ride a different radar site, satellite +
+  // sector, or model than the main view. Changing one re-validates the product
+  // menu against the new target and re-renders just the stack.
+  if (el.layerSiteSelect) {
+    el.layerSiteSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer || layer.source !== 'radar') return;
+      layer.siteId = el.layerSiteSelect.value;
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  if (el.layerSatSelect) {
+    el.layerSatSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer || layer.source !== 'satellite') return;
+      layer.satKey = el.layerSatSelect.value;
+      const sectors = sectorsForSatellite(layer.satKey);
+      if (!sectors[layer.sectorKey]) layer.sectorKey = Object.keys(sectors)[0];
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  if (el.layerSectorSelect) {
+    el.layerSectorSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer || layer.source !== 'satellite') return;
+      layer.sectorKey = el.layerSectorSelect.value;
+      buildLayerControls();
+      renderLayerStack();
+      saveSettings();
+    });
+  }
+  if (el.layerModelSelect) {
+    el.layerModelSelect.addEventListener('change', () => {
+      const layer = activeUserLayer();
+      if (!layer || layer.source !== 'models') return;
+      layer.modelKey = el.layerModelSelect.value;
+      // The new model may not carry the layer's current product — snap to a valid one.
+      normalizeLayerProduct(layer, layer.productId);
       buildLayerControls();
       renderLayerStack();
       saveSettings();
@@ -5309,7 +5559,7 @@ function layoutMobilePages() {
   // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
   // "MRMS frames" / "Model runs") lives with the product controls so the frame
   // picker sits beside the product/tilt controls instead of on the source page.
-  el.pageControls.append(el.productPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageControls.append(el.productPanel, el.layerPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
   el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel, el.cyclonesPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Controls', 'Settings', 'Map');
@@ -5324,7 +5574,7 @@ function layoutDesktopSidebar() {
   // footer note must be included here too (last) or they'd get stranded
   // above whichever of these panels happens to already sit below them.
   el.sidebar.append(
-    el.sourcePanel, el.layoutPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
+    el.sourcePanel, el.layoutPanel, el.layerPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
     el.cyclonesPanel, el.settingsBtn, el.sidebarFoot
   );
   placeDesktopVolumePanel();
@@ -5434,6 +5684,10 @@ function applyResponsiveLayout() {
     }
   }
   updateLayoutSwitchUI();
+  // Re-evaluate the layer/product panel swap for the new breakpoint: the sidebar
+  // hides the product controls when layering is on, but mobile never does, so a
+  // desktop→mobile switch must un-hide them (and vice-versa).
+  applyModePanels();
   refreshIcons();
   setTimeout(() => state.map && state.map.resize(), 60);
 }
@@ -7986,7 +8240,8 @@ function saveSettings() {
         layers: {
           enabled: !!state.layers.enabled,
           activeId: state.layers.activeId,
-          items: state.layers.items.map(({ id, source, productId, detailId, style }) => ({ id, source, productId, detailId, style })),
+          items: state.layers.items.map(({ id, source, productId, detailId, style, siteId, satKey, sectorKey, modelKey }) =>
+            ({ id, source, productId, detailId, style, siteId, satKey, sectorKey, modelKey })),
         },
         alertsOn: state.alerts ? state.alerts.enabled : true,
         cyclones: state.cyclones
@@ -8085,6 +8340,12 @@ function applyStoredSettings(s) {
           productId: ly.productId,
           detailId: typeof ly.detailId === 'string' ? ly.detailId : '',
           style: ly.style === 'contour' ? 'contour' : 'fill',
+          // Per-layer targets (validated against the current catalogs; missing
+          // ones are backfilled from the live view by ensureLayerTargets at render).
+          siteId: typeof ly.siteId === 'string' ? ly.siteId : undefined,
+          satKey: typeof ly.satKey === 'string' && SATELLITES[ly.satKey] ? ly.satKey : undefined,
+          sectorKey: typeof ly.sectorKey === 'string' ? ly.sectorKey : undefined,
+          modelKey: typeof ly.modelKey === 'string' && MODELS[ly.modelKey] ? ly.modelKey : undefined,
         }))
       : [];
     if (!state.layers.items.some((ly) => ly.id === state.layers.activeId))

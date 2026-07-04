@@ -153,6 +153,59 @@
             </div>
           </section>
 
+          <!-- Layer stack. On desktop, turning this on hides the current
+               product's controls (Product / tilt / forecast-hour / outlook
+               detail) and shows the layer editor in their place, while Source,
+               alerts and everything else stay put. Each layer picks its own
+               source, and for radar/satellite/models its own site / satellite /
+               sector / model — independent of the main view. -->
+          <section class="panel" id="layerPanel">
+            <h2 class="panel-title alerts-title">
+              Layers
+              <button id="layeringToggle" class="alerts-toggle" title="Show editable product layers instead of the current product controls">OFF</button>
+            </h2>
+            <div id="layerControls" class="layer-controls" hidden>
+              <div class="layer-toolbar">
+                <button id="layerAdd" class="pal-btn" type="button" title="Add layer"><i data-lucide="plus" class="lucide sm"></i></button>
+                <button id="layerUp" class="pal-btn ghost" type="button" title="Move layer up"><i data-lucide="arrow-up" class="lucide sm"></i></button>
+                <button id="layerDown" class="pal-btn ghost" type="button" title="Move layer down"><i data-lucide="arrow-down" class="lucide sm"></i></button>
+                <button id="layerRemove" class="pal-btn ghost" type="button" title="Remove layer"><i data-lucide="trash-2" class="lucide sm"></i></button>
+              </div>
+              <div id="layerList" class="layer-list"></div>
+              <label class="field">
+                <span>Layer source</span>
+                <select id="layerSourceSelect"></select>
+              </label>
+              <label class="field" id="layerSiteField" hidden>
+                <span>Radar site</span>
+                <select id="layerSiteSelect"></select>
+              </label>
+              <label class="field" id="layerSatField" hidden>
+                <span>Satellite</span>
+                <select id="layerSatSelect"></select>
+              </label>
+              <label class="field" id="layerSectorField" hidden>
+                <span>Sector</span>
+                <select id="layerSectorSelect"></select>
+              </label>
+              <label class="field" id="layerModelField" hidden>
+                <span>Model</span>
+                <select id="layerModelSelect"></select>
+              </label>
+              <label class="field">
+                <span>Layer product</span>
+                <select id="layerProductSelect"></select>
+              </label>
+              <label class="field">
+                <span>Layer style</span>
+                <select id="layerStyleSelect">
+                  <option value="fill">Fill</option>
+                  <option value="contour">Contour</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
           <section class="panel" id="productPanel">
             <h2 class="panel-title">Product</h2>
             <div id="productButtons" class="product-grid"></div>
@@ -324,34 +377,6 @@
             <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled grid values above city labels">ON</button>
           </div>
           <div id="cityValuesProducts" class="city-product-list" hidden></div>
-          <div class="toggle-field" id="layeringField">
-            <span>Layer stack</span>
-            <button id="layeringToggle" class="alerts-toggle" title="Add editable product layers on top of the map">OFF</button>
-          </div>
-          <div id="layerControls" class="layer-controls" hidden>
-            <div class="layer-toolbar">
-              <button id="layerAdd" class="pal-btn" type="button" title="Add layer"><i data-lucide="plus" class="lucide sm"></i></button>
-              <button id="layerUp" class="pal-btn ghost" type="button" title="Move layer up"><i data-lucide="arrow-up" class="lucide sm"></i></button>
-              <button id="layerDown" class="pal-btn ghost" type="button" title="Move layer down"><i data-lucide="arrow-down" class="lucide sm"></i></button>
-              <button id="layerRemove" class="pal-btn ghost" type="button" title="Remove layer"><i data-lucide="trash-2" class="lucide sm"></i></button>
-            </div>
-            <div id="layerList" class="layer-list"></div>
-            <label class="field">
-              <span>Layer source</span>
-              <select id="layerSourceSelect"></select>
-            </label>
-            <label class="field">
-              <span>Layer product</span>
-              <select id="layerProductSelect"></select>
-            </label>
-            <label class="field">
-              <span>Layer style</span>
-              <select id="layerStyleSelect">
-                <option value="fill">Fill</option>
-                <option value="contour">Contour</option>
-              </select>
-            </label>
-          </div>
           <div class="group-label">Overlays</div>
           <div class="toggle-field" id="metarsField">
             <span>METAR overlay</span>

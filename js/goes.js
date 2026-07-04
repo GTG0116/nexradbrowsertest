@@ -396,7 +396,12 @@ async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgres
     resampleHsd(hdr, gridRef.grid, out);
     if (!nav) nav = hdr.nav;
   }
-  if (!out && gridRef.grid) out = alloc();
+  // If *no* segment came back (a transient S3 failure — nothing decoded), leave
+  // the band absent (data: null) rather than caching an all-NaN array. A cached
+  // NaN array reads as "present" forever, so a product switch that needs it would
+  // stay blank and never re-fetch; returning null keeps the band missing so
+  // ensureBands retries it on the next switch. A partial decode (some segments
+  // present, some missing) is real data and is kept as-is.
   return { data: out, nav };
 }
 

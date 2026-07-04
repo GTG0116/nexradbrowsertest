@@ -66,30 +66,40 @@ void main() {
     // integer indices in (fi-0.5, fj-0.5) space; each tap is weighted by a
     // Gaussian of its distance from the sample point AND by the cell's validity,
     // then renormalised so missing cells neither leak nor darken the result.
-    // Confine the smoothed echo to the cells that actually hold data. Without
-    // this guard the validity-renormalised blur lets a lone valid cell spread its
-    // value across every missing neighbour, so sparse MRMS echoes balloon into
-    // huge blobs. Drawing only where the cell under the sample point is valid
-    // keeps the footprint identical to NEAREST while still smoothing the interior.
-    // Dense fields (the resampled model grids) have no missing cells, so they are
-    // unaffected — only MRMS, which is full of gaps, needs this.
-    if (cellValue(floor(fi), floor(fj)).y < 0.5) discard;
+    //
+    // Two failure modes to avoid at once:
+    //  - Ballooning: a lone valid cell must not spread its value across every
+    //    missing neighbour, or sparse MRMS echoes swell into huge blobs.
+    //  - Hole-punching: a single sub-threshold cell in the middle of a solid
+    //    echo (a model storm's reflectivity, a dropped MRMS cell) must not stay
+    //    transparent, or the smoothed field looks pocked with missing pixels even
+    //    though the eye expects continuous precip there.
+    // coverage (fraction of the in-bounds neighbourhood that holds data) tells
+    // the two apart: an enclosed hole is surrounded by data (high coverage) while
+    // a lone cell's empty neighbours are not (low coverage). Draw where the cell
+    // under the sample point is valid (native footprint, never eroded) OR where a
+    // hole is well enclosed, so interior gaps fill without the echo blooming
+    // outward into genuinely empty cells.
+    bool centreValid = cellValue(floor(fi), floor(fj)).y > 0.5;
     float sigma = smoothSigma(u_smooth);
     float pc = fi - 0.5, pr = fj - 0.5;
     float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
     float inv2s2 = 1.0 / (2.0 * sigma * sigma);
-    float st = 0.0, sw = 0.0;
+    float st = 0.0, sw = 0.0, wfull = 0.0;
     for (int m = -3; m <= 3; m++) {
       for (int n = -3; n <= 3; n++) {
         float ci = cn + float(n), cj = rn + float(m);
         vec2 cv = cellValue(ci, cj);
         float dx = ci - pc, dy = cj - pr;
-        float w = exp(-(dx * dx + dy * dy) * inv2s2) * cv.y;
-        st += cv.x * w;
-        sw += w;
+        float w = exp(-(dx * dx + dy * dy) * inv2s2);
+        if (ci >= 0.0 && ci < u_ni && cj >= 0.0 && cj < u_nj) wfull += w;
+        st += cv.x * w * cv.y;
+        sw += w * cv.y;
       }
     }
     if (sw < 1e-4) discard;                       // no valid cell nearby
+    float coverage = sw / max(wfull, 1e-4);
+    if (!centreValid && coverage < 0.5) discard;
     t = st / sw;
   }
 
