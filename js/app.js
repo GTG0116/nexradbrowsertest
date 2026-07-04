@@ -3992,8 +3992,19 @@ async function loadLayerGrid(layer) {
   }
   if (layer.source === 'models') {
     if (state.mode === 'models' && layer.productId === state.models.productId && state.models.grid) return state.models.grid;
-    const run = currentModelRun();
-    if (!run || !modelSupports(state.models.modelKey, layer.productId)) return null;
+    if (!modelSupports(state.models.modelKey, layer.productId)) return null;
+    // A models layer must render even when models mode was never entered (so the
+    // run list is empty): list the cycles on demand and take the latest. Storm-
+    // based models need their run stamped so loadModel can build the frame key.
+    let run = currentModelRun();
+    if (!run) {
+      const when = state.live ? new Date() : state.date;
+      const runs = await listModels(state.models.modelKey, layer.productId, when);
+      run = runs[runs.length - 1] || null;
+      const model = MODELS[state.models.modelKey];
+      if (run && model && model.stormBased) stampModelStorm(run);
+    }
+    if (!run) return null;
     const ck = layerCacheKey(layer, `${state.models.modelKey}:${state.models.stormId || ''}:${run.key}:${state.models.fhour}`);
     if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadModel(state.models.modelKey, layer.productId, run, state.models.fhour));
     return state.layers.cache.get(ck);
@@ -4083,9 +4094,28 @@ function renderRadarUserLayer(layer) {
   rememberLayerArtifacts([id]);
 }
 
+// A satellite layer in the stack must render even when satellite mode was never
+// entered (so state.sat.scene is null). List the scenes for the active
+// satellite/sector on demand, load the latest, and cache it keyed by scene key
+// (so LIVE picks up new frames) — separate from the mode's own state.sat.scene.
+async function ensureLayerSatScene(seq) {
+  if (state.sat.scene) return state.sat.scene;
+  const when = state.live ? new Date() : state.date;
+  const scenes = await listScenes(state.sat.satKey, state.sat.sectorKey, when);
+  if (seq !== state.layers.renderSeq || !scenes.length) return null;
+  const key = scenes[scenes.length - 1].key;
+  const ck = `layerscene:${state.sat.satKey}:${state.sat.sectorKey}:${key}`;
+  if (state.layers.cache.has(ck)) return state.layers.cache.get(ck);
+  const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId));
+  if (seq !== state.layers.renderSeq) return null;
+  state.layers.cache.set(ck, scene);
+  return scene;
+}
+
 async function renderSatelliteUserLayer(layer, seq) {
   const map = state.map;
-  const scene = state.sat.scene;
+  const scene = await ensureLayerSatScene(seq);
+  if (seq !== state.layers.renderSeq) return;
   if (!scene) return;
   await ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(layer.productId));
   if (seq !== state.layers.renderSeq) return;
