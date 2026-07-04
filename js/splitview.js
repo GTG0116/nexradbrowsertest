@@ -432,6 +432,10 @@ export class SplitView {
 
   // ---- Product selection ----
   _defaultProduct(pane = 2) {
+    // Outlooks compare best as a forecast-day spread of the same hazard, not a
+    // walk through the flat product list (which dropped panes onto the tornado/
+    // wind/hail and experimental day 4-8 probability feeds — the 4-pane mess).
+    if (this.ctx.state.mode === 'outlooks') return this._defaultOutlook(pane);
     const list = this._productList().map(([id]) => id);
     if (!list.length) return 'REF';
     const main = this._mainProduct();
@@ -440,6 +444,31 @@ export class SplitView {
     }
     const start = Math.max(0, list.indexOf(main));
     return list[(start + pane - 1) % list.length] || list[0];
+  }
+
+  // Default outlook for an extra pane: keep the main pane's product family and
+  // hazard type, stepping the forecast day (Day 1 / Day 2 / Day 3 categorical,
+  // …). For single-axis outlook products (fire, ERO, CPC) it steps the detail.
+  _defaultOutlook(pane) {
+    const main = parseOutlookValue(this._mainProduct());
+    const product = OUTLOOKS[main.product] || OUTLOOKS.spc_conv;
+    const ax = product.axes;
+    if (ax) {
+      const { day, type } = ax.split(main.detail);
+      const dayIds = ax.days().map((d) => d.id);
+      // Prefer days that actually carry the main hazard type so a categorical
+      // comparison stays categorical (days 4-8 are probability-only).
+      const usable = dayIds.filter((d) => ax.types(d).some((t) => t.id === type));
+      const pool = usable.length ? usable : dayIds;
+      const start = Math.max(0, pool.indexOf(day));
+      const wantDay = pool[(start + pane - 1) % pool.length];
+      const types = ax.types(wantDay).map((t) => t.id);
+      const wantType = types.includes(type) ? type : types[0];
+      return outlookValue(main.product, ax.join(wantDay, wantType));
+    }
+    const details = product.details.map((d) => d.id);
+    const start = Math.max(0, details.indexOf(main.detail));
+    return outlookValue(main.product, details[(start + pane - 1) % details.length] || details[0]);
   }
 
   _productList() {
@@ -732,6 +761,12 @@ export class SplitView {
     }
     const id = this.productIds[pane] || state.sat.productId;
     const draw = () => {
+      // The band decode is async: by the time it resolves the user may have left
+      // satellite mode, closed the split, or retargeted this pane. Bail rather
+      // than stamp a stale satellite frame over whatever the pane shows now.
+      if (!this.active || pane > this.paneCount || state.mode !== 'satellite') return;
+      if ((this.productIds[pane] || state.sat.productId) !== id) return;
+      if (!state.sat.scene) { this._clearData(pane); return; }
       const payload = this.ctx.satPayloadForProduct
         ? this.ctx.satPayloadForProduct(id)
         : { meta: scene, rgba: buildRGBA(scene, id, { enhanceIR: state.sat.enhanceIR }), bbox: sceneBBox(scene) };
