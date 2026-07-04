@@ -32,6 +32,14 @@ const LIMIT_STORAGE_KEY = 'rn.metars.maxStations';
 // above 300 fall back to the default.)
 const LIMIT_CHOICES = [100, 150, 200, 250, 300];
 const DEFAULT_LIMIT = 300;
+// User-adjustable plot size. The stored value multiplies the zoom-derived base
+// scale in drawStationPlot, so "1.0" keeps the historical sizing.
+const SIZE_STORAGE_KEY = 'rn.metars.plotSize';
+const SIZE_CHOICES = [0.7, 0.85, 1, 1.25, 1.5, 1.8];
+const DEFAULT_SIZE = 1;
+// Plots are kept out of the top strip of the map so they never crowd or peek
+// out from behind the breadcrumb/clock/legend HUD that overlays the top edge.
+const TOP_UI_INSET = 56;
 const IN_HG_TO_HPA = 33.8639;
 // When the view clips more US states than this, one bulk country=US request
 // replaces the per-state fan-out (~3 MB gzipped, a second or two).
@@ -58,6 +66,11 @@ const PLOT_THEMES = {
     dotBg: '#14161a',
     noData: '#8a94a3',
     cat: { VFR: '#35c268', MVFR: '#3f8ef0', IFR: '#f0524f', LIFR: '#c95df0' },
+    // Town-name + border overlay redrawn above the plots so place names and
+    // boundaries always read over the station data.
+    labelInk: '#f4f8ff',
+    labelHalo: 'rgba(10, 12, 16, 0.95)',
+    borderInk: 'rgba(203, 217, 236, 0.85)',
   },
   light: {
     halo: 'rgba(255, 252, 245, 0.94)',
@@ -72,6 +85,9 @@ const PLOT_THEMES = {
     dotBg: '#fffaf2',
     noData: '#8a7f72',
     cat: { VFR: '#1e9e50', MVFR: '#2568c8', IFR: '#cc2f2c', LIFR: '#9c3ec4' },
+    labelInk: '#1b1915',
+    labelHalo: 'rgba(255, 252, 245, 0.95)',
+    borderInk: 'rgba(74, 68, 60, 0.8)',
   },
 };
 
@@ -90,6 +106,15 @@ function loadLimit() {
     return LIMIT_CHOICES.includes(saved) ? saved : DEFAULT_LIMIT;
   } catch {
     return DEFAULT_LIMIT;
+  }
+}
+
+function loadSize() {
+  try {
+    const saved = Number(localStorage.getItem(SIZE_STORAGE_KEY));
+    return SIZE_CHOICES.includes(saved) ? saved : DEFAULT_SIZE;
+  } catch {
+    return DEFAULT_SIZE;
   }
 }
 
@@ -222,6 +247,7 @@ export class MetarController {
     this.obs = [];
     this.drawn = [];
     this.maxStations = loadLimit();
+    this.sizeScale = loadSize();
     this.canvas = null;
     this.ctx = null;
     this.panel = null;
@@ -253,6 +279,12 @@ export class MetarController {
     map.on('resize', this._scheduleRender);
     map.on('rotate', this._scheduleRender);
     map.on('moveend', this._moveend);
+    // Town-name + border overlay: cache the basemap's place-label and boundary
+    // layer ids, and invalidate them whenever the style changes (basemap swap).
+    this._labelLayerIds = null;
+    this._borderLayerIds = null;
+    this._onStyleData = () => { this._labelLayerIds = null; this._borderLayerIds = null; };
+    map.on('styledata', this._onStyleData);
   }
 
   setEnabled(on) {
@@ -390,17 +422,31 @@ export class MetarController {
       this.panel.innerHTML = `
         <div class="metar-panel-row">
           <span>METAR</span>
-          <select aria-label="METAR station limit">
+          <select class="metar-limit" aria-label="METAR station limit">
             ${LIMIT_CHOICES.map((n) => `<option value="${n}">${n}</option>`).join('')}
+          </select>
+        </div>
+        <div class="metar-panel-row">
+          <span>Size</span>
+          <select class="metar-size" aria-label="METAR plot size">
+            ${SIZE_CHOICES.map((n) => `<option value="${n}">${Math.round(n * 100)}%</option>`).join('')}
           </select>
         </div>
         <div class="metar-panel-cats"></div>
         <div class="metar-panel-count"></div>
       `;
-      this.panel.querySelector('select').value = String(this.maxStations);
-      this.panel.querySelector('select').addEventListener('change', (e) => {
+      const limitSel = this.panel.querySelector('.metar-limit');
+      limitSel.value = String(this.maxStations);
+      limitSel.addEventListener('change', (e) => {
         this.maxStations = Number(e.target.value) || DEFAULT_LIMIT;
         try { localStorage.setItem(LIMIT_STORAGE_KEY, String(this.maxStations)); } catch {}
+        this.scheduleRender();
+      });
+      const sizeSel = this.panel.querySelector('.metar-size');
+      sizeSel.value = String(this.sizeScale);
+      sizeSel.addEventListener('change', (e) => {
+        this.sizeScale = Number(e.target.value) || DEFAULT_SIZE;
+        try { localStorage.setItem(SIZE_STORAGE_KEY, String(this.sizeScale)); } catch {}
         this.scheduleRender();
       });
       container.appendChild(this.panel);
@@ -477,7 +523,16 @@ export class MetarController {
     const zoom = this.map.getZoom();
     const selected = this.selectVisible(w, h);
     this.drawn = selected;
-    for (const item of selected) drawStationPlot(ctx, item.ob, item.x, item.y, zoom, theme);
+    for (const item of selected) drawStationPlot(ctx, item.ob, item.x, item.y, zoom, theme, this.sizeScale);
+
+    // Redraw the basemap's town names and borders on top of the station plots so
+    // place labels and boundaries always sit above the METARs (the plots live on
+    // a DOM canvas over the whole GL basemap, so they'd otherwise bury them).
+    // Skipped mid-gesture — querying rendered features every throttled drag frame
+    // is too costly; the overlay is redrawn on moveend when the map settles.
+    if (!(this.map.isMoving && this.map.isMoving())) {
+      this.drawLabelsAndBorders(ctx, w, h, theme);
+    }
 
     const count = this.panel?.querySelector('.metar-panel-count');
     if (count) {
@@ -487,6 +542,100 @@ export class MetarController {
     if (this.onStatus && this.obs.length) {
       const capped = selected.length >= this.maxStations ? `, capped at ${this.maxStations}` : '';
       this.onStatus(`${selected.length}/${this._visibleCount || selected.length} METARs${capped}`);
+    }
+  }
+
+  // Find the basemap's place-label (symbol) and boundary (line) layer ids so the
+  // overlay can query and redraw them. Cached until the style changes.
+  ensureLayerIds() {
+    if (this._labelLayerIds && this._borderLayerIds) return;
+    this._labelLayerIds = [];
+    this._borderLayerIds = [];
+    let layers = [];
+    try { layers = (this.map.getStyle() && this.map.getStyle().layers) || []; } catch (_) { return; }
+    for (const ly of layers) {
+      const id = String(ly.id || '').toLowerCase();
+      const sl = String(ly['source-layer'] || '').toLowerCase();
+      if (ly.type === 'symbol' && ly.layout && ly.layout['text-field']) {
+        const place = /(place|settlement|city|town|village|hamlet)/.test(sl) ||
+          /(place|settlement|city|town|village|hamlet)/.test(id);
+        const nonCity = /road|shield|highway|motorway|airport|aeroway|poi|transit|station|water|marine|natural/.test(sl + ' ' + id);
+        if (place && !nonCity) this._labelLayerIds.push(ly.id);
+      } else if (ly.type === 'line' && /(admin|boundary|border)/.test(id + ' ' + sl)) {
+        this._borderLayerIds.push(ly.id);
+      }
+    }
+  }
+
+  drawLabelsAndBorders(ctx, w, h, theme) {
+    this.ensureLayerIds();
+    const map = this.map;
+
+    // ---- Borders (drawn first, beneath the names) ----
+    if (this._borderLayerIds.length) {
+      let feats = [];
+      try { feats = map.queryRenderedFeatures({ layers: this._borderLayerIds }); } catch (_) { feats = []; }
+      if (feats.length) {
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = theme.borderInk;
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        for (const f of feats) {
+          const g = f.geometry;
+          if (!g) continue;
+          const lines = g.type === 'LineString' ? [g.coordinates]
+            : g.type === 'MultiLineString' ? g.coordinates
+            : g.type === 'Polygon' ? g.coordinates
+            : g.type === 'MultiPolygon' ? g.coordinates.flat() : null;
+          if (!lines) continue;
+          for (const line of lines) {
+            let started = false;
+            for (const c of line) {
+              const p = map.project(c);
+              if (p.x < -40 || p.y < -40 || p.x > w + 40 || p.y > h + 40) { started = false; continue; }
+              if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+              else ctx.lineTo(p.x, p.y);
+            }
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // ---- Town names (drawn last, on top of everything) ----
+    if (this._labelLayerIds.length) {
+      let feats = [];
+      try { feats = map.queryRenderedFeatures({ layers: this._labelLayerIds }); } catch (_) { feats = []; }
+      if (feats.length) {
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = "600 12px 'JetBrains Mono', system-ui, sans-serif";
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = theme.labelHalo;
+        ctx.fillStyle = theme.labelInk;
+        const seen = new Set();
+        for (const f of feats) {
+          const g = f.geometry;
+          if (!g || g.type !== 'Point') continue;
+          const p = f.properties || {};
+          const name = p.name_en || p.name || p.name_script || '';
+          if (!name) continue;
+          const [lon, lat] = g.coordinates;
+          const key = `${name}:${lon.toFixed(2)}:${lat.toFixed(2)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const pt = map.project([lon, lat]);
+          if (pt.x < 0 || pt.y < TOP_UI_INSET || pt.x > w || pt.y > h) continue;
+          ctx.strokeText(name, pt.x, pt.y);
+          ctx.fillText(name, pt.x, pt.y);
+        }
+        ctx.restore();
+      }
     }
   }
 
@@ -512,6 +661,9 @@ export class MetarController {
       if (ob.lat < south || ob.lat > north || !inLngRange(ob.lon, west, east)) continue;
       const pt = this.map.project([ob.lon, ob.lat]);
       if (pt.x < -margin || pt.y < -margin || pt.x > w + margin || pt.y > h + margin) continue;
+      // Keep station plots clear of the top HUD strip (breadcrumb/clock/legend)
+      // so they never render up over the top UI.
+      if (pt.y < TOP_UI_INSET) continue;
       visible++;
       const gx = Math.floor(pt.x / cell);
       const gy = Math.floor(pt.y / cell);
@@ -624,9 +776,9 @@ function detailLevel(zoom) {
   return 0;
 }
 
-function drawStationPlot(ctx, ob, x, y, zoom, t) {
-  // Grows steadily with zoom.
-  const scale = clamp(0.85 + (zoom - 4) * 0.09, 0.85, 1.5);
+function drawStationPlot(ctx, ob, x, y, zoom, t, sizeScale = 1) {
+  // Grows steadily with zoom, then scaled by the user's size preference.
+  const scale = clamp(0.85 + (zoom - 4) * 0.09, 0.85, 1.5) * sizeScale;
   const detail = detailLevel(zoom);
   ctx.save();
   ctx.translate(x, y);

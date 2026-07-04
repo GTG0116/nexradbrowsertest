@@ -165,6 +165,10 @@ export class SplitView {
         this._setupOverlays(n);
         this.renderPane(n);
         this._setDrawSource(n);
+        // A pane's style can finish loading after the user has already panned
+        // the main map; snap it to the current shared camera so it doesn't stay
+        // stranded at wherever it was first created.
+        this._resyncCamera();
       });
       map.on('mousemove', (e) => this._inspectMove(n, e));
       map.on('mouseout', () => {
@@ -235,17 +239,27 @@ export class SplitView {
     const copyFrom = (from) => {
       if (this.syncing) return;
       this.syncing = true;
-      const camera = {
-        center: from.getCenter(),
-        zoom: from.getZoom(),
-        bearing: from.getBearing(),
-        pitch: from.getPitch(),
-      };
-      for (const map of this._allMaps()) {
-        if (map !== from) map.jumpTo(camera);
+      // The reset MUST run even if a jumpTo throws (a pane mid-style-reload can),
+      // otherwise `syncing` sticks true and camera sync silently dies for the
+      // rest of the session — leaving panes stranded on different parts of the
+      // globe. A per-map try/catch also keeps one bad pane from blocking the
+      // others.
+      try {
+        const camera = {
+          center: from.getCenter(),
+          zoom: from.getZoom(),
+          bearing: from.getBearing(),
+          pitch: from.getPitch(),
+        };
+        for (const map of this._allMaps()) {
+          if (map === from) continue;
+          try { map.jumpTo(camera); } catch (_) { /* pane not ready yet */ }
+        }
+      } finally {
+        this.syncing = false;
       }
-      this.syncing = false;
     };
+    this._copyFrom = copyFrom;
 
     for (const map of this._allMaps()) {
       const handler = () => copyFrom(map);
@@ -259,6 +273,15 @@ export class SplitView {
       if (map && handler) map.off('move', handler);
     }
     this._syncHandlers = [];
+  }
+
+  // Force every pane to the main map's current camera. Used when a pane's style
+  // loads late (it may have missed the pans that happened while it was loading)
+  // and as a general "un-stick" if anything ever knocks the panes out of sync.
+  _resyncCamera() {
+    if (!this.active) return;
+    const main = this.ctx.state.map;
+    if (main && this._copyFrom) this._copyFrom(main);
   }
 
   // ---- Shared overlays on extra panes ----

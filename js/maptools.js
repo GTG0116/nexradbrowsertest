@@ -136,10 +136,14 @@ export class MapTools {
       id: 'mt-vertex', type: 'circle', source: 'mt-shapes',
       filter: ['==', ['geometry-type'], 'Point'],
       paint: {
-        'circle-radius': ['case', ['==', ['get', 'role'], 'storm-pos'], 6, 4],
+        'circle-radius': ['case',
+          ['==', ['get', 'role'], 'storm-pos'], 6,
+          ['==', ['get', 'role'], 'town'], 3,
+          4],
         'circle-color': ['get', 'color'],
+        'circle-opacity': ['case', ['==', ['get', 'role'], 'town'], 0.85, 1],
         'circle-stroke-color': '#06101f',
-        'circle-stroke-width': 1.5,
+        'circle-stroke-width': ['case', ['==', ['get', 'role'], 'town'], 1, 1.5],
       },
     });
     this._refresh();
@@ -213,6 +217,7 @@ export class MapTools {
     if (tool) this.map.doubleClickZoom.disable();
     else this.map.doubleClickZoom.enable();
     if (tool === 'storm') this._startStorm();
+    else this._clearStormBriefing();
     return this.tool;
   }
 
@@ -221,7 +226,14 @@ export class MapTools {
     for (const m of this.labelMarkers) m.remove();
     this.labelMarkers = [];
     this._cancelDraft();
+    this._clearStormBriefing();
     this._emit();
+  }
+
+  // Drop the current storm briefing and tell the app to hide its side list.
+  _clearStormBriefing() {
+    this._stormBriefing = null;
+    if (this.onTowns) this.onTowns(null);
   }
 
   _cancelDraft() {
@@ -419,6 +431,7 @@ export class MapTools {
   // ---- Storm track ----
   _startStorm() {
     this._storm = { a: null, b: null };
+    this._clearStormBriefing();
     this._showStormPanel('Click the storm’s current location.');
   }
 
@@ -499,15 +512,48 @@ export class MapTools {
     }
     scored.sort((x, y) => x.tMin - y.tMin);
     const shown = scored.slice(0, Math.max(1, this.stormMaxTowns | 0));
-    for (const tn of shown) {
-      const eta = new Date(now + tn.tMin * 60000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-      const text = `${tn.name}\n+${Math.round(tn.tMin)}m · ${eta}`;
-      this.labelMarkers.push(this._label([tn.lon, tn.lat], text, 'storm'));
-    }
+    // Instead of stamping the time + name over every town on the map (which got
+    // unreadable fast), each town is a small unlabelled dot on the track and the
+    // full name+ETA list is shown in the side briefing panel (see onTowns).
+    const list = shown.map((tn) => {
+      const etaDate = new Date(now + tn.tMin * 60000);
+      this.shapes.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [tn.lon, tn.lat] },
+        properties: { kind: 'storm', color: bgColor.storm, role: 'town' },
+      });
+      return {
+        name: tn.name,
+        tMin: Math.round(tn.tMin),
+        eta: etaDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+        lon: tn.lon,
+        lat: tn.lat,
+      };
+    });
+    this._emit();
     const note = scored.length > shown.length
       ? `${shown.length} of ${scored.length} towns in cone (raise max to show more)`
       : `${shown.length} town${shown.length === 1 ? '' : 's'} in cone`;
     this._showStormPanel(`Track · ${compass(brng)} at ${speedMph} mph — ${note}.`, true);
+
+    // Hand the ordered town list to the app so it can populate the side briefing
+    // and reproduce it on exported screenshots.
+    this._stormBriefing = {
+      heading: compass(brng),
+      bearing: brng,
+      speed: speedMph,
+      minutes,
+      total: scored.length,
+      shownCount: shown.length,
+      towns: list,
+    };
+    if (this.onTowns) this.onTowns(this._stormBriefing);
+  }
+
+  // The last computed storm briefing (town list + motion), or null. Used by the
+  // export path to reproduce the list as an alert-style briefing panel.
+  stormBriefing() {
+    return this.tool === 'storm' ? this._stormBriefing || null : null;
   }
 
   _cleanupStormDraft() {
