@@ -44,10 +44,22 @@ const WIN = 5;
 // 2·Nyquist offset and paint the rest of that radial as a 100+ mph beam.
 const MIN_REF_GATES = 3;
 
-// Radar velocities around 100 mph (≈45 m/s) can be real in compact couplets, but
-// a long, one-radial-wide run at that magnitude is usually an unfolding spoke.
+// A long, one-radial-wide run of high velocity is usually an unfolding spoke —
+// but a genuine tropical-cyclone eyewall also carries very high radial velocities
+// (a super typhoon like Bavi runs 70+ m/s), and those are *azimuthally coherent*:
+// the neighbouring radials carry the same strong, same-sign flow. So the guard
+// below only reverts a high-velocity run when its azimuth neighbours DON'T
+// corroborate it (a true isolated spoke). Reverting a corroborated run was the
+// bug that folded Bavi's 155 kt eyewall back down to a 20-30 mph aliased smear.
 const HIGH_VELOCITY_MPS = 44;
 const MIN_SPOKE_GATES = 18;
+// A neighbour radial "corroborates" a high-velocity gate when it too carries a
+// same-sign velocity of at least this magnitude at the same range — the signature
+// of a real feature that spans azimuth rather than a lone folded beam.
+const CORROBORATE_MPS = 22;
+// Keep a high-velocity run when at least this fraction of its gates are
+// corroborated by an azimuth neighbour.
+const CORROBORATE_FRAC = 0.35;
 
 // Azimuthal de-spoke passes. A continuity unfold walks each radial outward in
 // isolation, so a single ambiguous gate can flip a whole radial onto the wrong
@@ -90,22 +102,59 @@ function windowMedian(buf, n, scratch) {
 }
 
 
-function suppressHighVelocitySpokes(vals, nativeVals, folds) {
-  let start = -1;
-  for (let g = 0; g <= vals.length; g++) {
-    const suspect = g < vals.length
-      && folds[g] !== 0
-      && Math.abs(vals[g]) >= HIGH_VELOCITY_MPS;
-    if (suspect && start < 0) start = g;
-    if ((!suspect || g === vals.length) && start >= 0) {
-      const end = g;
-      if (end - start >= MIN_SPOKE_GATES) {
-        for (let i = start; i < end; i++) {
-          vals[i] = nativeVals[i];
-          folds[i] = 0;
+// Fraction of a high-velocity run [start,end) that an azimuth neighbour backs up
+// with a same-sign, high-magnitude velocity at the same range. A real eyewall (or
+// any feature that spans several radials) scores high; a lone folded beam, whose
+// good neighbours read near-zero clear-air or the opposite sign, scores ~0.
+function corroboratedFraction(vals, prev, next, start, end) {
+  let agree = 0, tested = 0;
+  for (let g = start; g < end; g++) {
+    const v = vals[g];
+    const sign = v < 0 ? -1 : 1;
+    let ok = false;
+    for (const nb of (prev === next ? [prev] : [prev, next])) {
+      if (!nb || g >= nb.vals.length) continue;
+      const nv = nb.vals[g];
+      if (!Number.isFinite(nv)) continue;
+      if ((nv < 0 ? -1 : 1) === sign && Math.abs(nv) >= CORROBORATE_MPS) { ok = true; break; }
+    }
+    tested++;
+    if (ok) agree++;
+  }
+  return tested ? agree / tested : 0;
+}
+
+// Revert long, one-radial-wide high-velocity runs back to their native (still
+// folded) value — but ONLY when the run is not corroborated by either azimuth
+// neighbour, i.e. a true isolated unfolding spoke. Runs shared by the neighbours
+// (a tropical-cyclone eyewall, a strong gust front) are left unfolded so extreme
+// but real winds survive. Runs in `infos` are azimuth-sorted and wrap 359°→0°.
+function suppressHighVelocitySpokes(infos) {
+  const n = infos.length;
+  if (!n) return;
+  for (let i = 0; i < n; i++) {
+    const cur = infos[i];
+    if (!cur.canUnfold) continue;
+    const { vals, nativeVals, folds } = cur;
+    const prev = n >= 3 ? infos[(i - 1 + n) % n] : cur;
+    const next = n >= 3 ? infos[(i + 1) % n] : cur;
+    let start = -1;
+    for (let g = 0; g <= vals.length; g++) {
+      const suspect = g < vals.length
+        && folds[g] !== 0
+        && Math.abs(vals[g]) >= HIGH_VELOCITY_MPS;
+      if (suspect && start < 0) start = g;
+      if ((!suspect || g === vals.length) && start >= 0) {
+        const end = g;
+        if (end - start >= MIN_SPOKE_GATES
+            && corroboratedFraction(vals, prev, next, start, end) < CORROBORATE_FRAC) {
+          for (let k = start; k < end; k++) {
+            vals[k] = nativeVals[k];
+            folds[k] = 0;
+          }
         }
+        start = -1;
       }
-      start = -1;
     }
   }
 }
@@ -331,14 +380,20 @@ function computeDealias(sweep) {
       vals[g] = v;
     }
 
-    suppressHighVelocitySpokes(vals, nativeVals, folds);
     infos.push({ r, m, vals, nativeVals, folds, twoVN, canUnfold });
     prevVals = vals; // seed the next (adjacent-azimuth) beam from this one
   }
 
-  // Phase 2 — pull any remaining mis-folded beams back into azimuthal continuity.
+  // Phase 2 — pull any remaining mis-folded beams back into azimuthal continuity,
+  // then revert only the high-velocity runs the neighbours don't corroborate. The
+  // despoke passes run first so a spoke that *can* be snapped back to its
+  // neighbours' co-interval is fixed (keeping its data) before the suppressor —
+  // which only fires on genuinely isolated spokes — considers reverting it. Doing
+  // the suppression azimuth-aware here (rather than per-radial during phase 1) is
+  // what lets a real eyewall's extreme winds through.
   despokeAzimuthal(infos);
   despokeAzimuthalMedian(infos);
+  suppressHighVelocitySpokes(infos);
 
   // Phase 3 — re-encode each rebuilt VEL block from the corrected values.
   const rebuilt = new Map();

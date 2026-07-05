@@ -39,6 +39,19 @@ vec4 texelAt(float col, float row) {
   return vec4(c.rgb * c.a, c.a);   // premultiply so the blend is colour-correct
 }
 
+// Mitchell–Netravali cubic weight for a sample |x| ∈ [0,2] away, parameterised by
+// (B,C). It's the standard high-quality image-resampling kernel: unlike a wide
+// Gaussian it interpolates (stays sharp, no mush) yet is C1-smooth (no blocks).
+// B/C pick the look — (0,0.5) Catmull-Rom is crisp, (1/3,1/3) Mitchell is
+// balanced, (1,0) the cubic B-spline is softest with no ringing.
+float mnCubic(float x, float B, float C) {
+  x = abs(x);
+  float x2 = x * x, x3 = x2 * x;
+  if (x < 1.0) return ((12.0 - 9.0*B - 6.0*C)*x3 + (-18.0 + 12.0*B + 6.0*C)*x2 + (6.0 - 2.0*B)) / 6.0;
+  if (x < 2.0) return ((-B - 6.0*C)*x3 + (6.0*B + 30.0*C)*x2 + (-12.0*B - 48.0*C)*x + (8.0*B + 24.0*C)) / 6.0;
+  return 0.0;
+}
+
 void main() {
   // web-mercator [0,1] -> lon/lat (radians)
   float lon = (v_merc.x * 360.0 - 180.0) * PI / 180.0;
@@ -91,41 +104,40 @@ void main() {
     rgb = c.rgb;
     alpha = c.a;
   } else {
-    // Gaussian low-pass over a 7x7 pixel neighbourhood — sigma grows with the
-    // level (low/medium/high) so even coarse ABI pixels dissolve into a smooth
-    // field instead of staying visible as blocks. The texels are premultiplied,
-    // so blending colour and alpha with the Gaussian weights is colour-correct;
-    // off-disk neighbours (alpha 0) just soften the disk edge.
-    //
-    // Crucially the taps sit at CONTINUOUS positions (col+n, row+m), not at the
-    // integer texel centres (floor(col)+n). With the texture sampled bilinearly
-    // (LINEAR filtering is switched on for the smoothed pass in render()) each tap
-    // interpolates between the four surrounding ABI pixels, so the result is a
-    // genuinely smooth high-resolution wash. The old code snapped every tap to a
-    // texel centre, which just box-averaged whole pixels and left the imagery
-    // looking blocky/low-quality even with smoothing on.
-    float sigma = u_smooth < 1.5 ? 0.6 : (u_smooth < 2.5 ? 1.1 : 1.8);
-    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    // High-quality 4x4 bicubic (Mitchell–Netravali) resample. A wide Gaussian
+    // blur — what this used to be — smears the coarse ABI/AHI pixels into mush
+    // when you zoom in (the "smoothing looks low quality" complaint); bicubic
+    // instead reconstructs a smooth, block-free image that stays sharp, the same
+    // filter high-end viewers upsample satellite imagery with. The level picks the
+    // look: crisp Catmull-Rom → balanced Mitchell → soft B-spline. Taps sit at the
+    // 16 surrounding texel CENTRES (integer positions), point-sampling the exact
+    // ABI values, so the cubic — not the hardware bilinear — shapes the result.
+    float B = u_smooth < 1.5 ? 0.0 : (u_smooth < 2.5 ? (1.0 / 3.0) : 1.0);
+    float C = u_smooth < 1.5 ? 0.5 : (u_smooth < 2.5 ? (1.0 / 3.0) : 0.0);
+    float cb = floor(col), rb = floor(row);
+    float fx = col - cb, fy = row - rb;
+    // Per-axis cubic weights for the four taps at offsets -1,0,1,2.
+    float wx0 = mnCubic(fx + 1.0, B, C), wx1 = mnCubic(fx, B, C);
+    float wx2 = mnCubic(fx - 1.0, B, C), wx3 = mnCubic(fx - 2.0, B, C);
+    float wy0 = mnCubic(fy + 1.0, B, C), wy1 = mnCubic(fy, B, C);
+    float wy2 = mnCubic(fy - 1.0, B, C), wy3 = mnCubic(fy - 2.0, B, C);
     vec4 sum = vec4(0.0);
-    float wsum = 0.0;               // total Gaussian weight (incl. off-disk taps)
-    for (int m = -3; m <= 3; m++) {
-      for (int n = -3; n <= 3; n++) {
-        float ci = col + float(n), rj = row + float(m);
-        float w = exp(-(float(n) * float(n) + float(m) * float(m)) * inv2s2);
-        sum += texelAt(ci, rj) * w;
-        wsum += w;
+    for (int m = 0; m < 4; m++) {
+      float rj = rb + float(m) - 1.0;
+      float wy = m == 0 ? wy0 : (m == 1 ? wy1 : (m == 2 ? wy2 : wy3));
+      for (int n = 0; n < 4; n++) {
+        float ci = cb + float(n) - 1.0;
+        float wx = n == 0 ? wx0 : (n == 1 ? wx1 : (n == 2 ? wx2 : wx3));
+        sum += texelAt(ci, rj) * (wx * wy);
       }
     }
-    if (sum.a < 1e-4 || wsum < 1e-6) discard;
-    // sum is premultiplied. The colour divides by the covered weight (sum.a) to
-    // recover straight-alpha colour, but the coverage must divide by the TOTAL
-    // weight (wsum) so it stays in [0,1]. The old code set alpha = sum.a — the raw
-    // Gaussian weight-sum, which for the medium/high kernels is much greater than
-    // 1 — so the premultiplied rgb*a blew past white: the "blinding light" that
-    // wiped out the colour tables. Normalising by wsum keeps the enhancement
-    // intact and only softens alpha at the disk edge (where some taps are off-disk).
-    rgb = sum.rgb / sum.a;
-    alpha = sum.a / wsum;
+    // sum is premultiplied; the cubic weights sum to 1, so sum.a is the covered
+    // coverage directly. Recover straight-alpha colour by the covered weight and
+    // clamp away any cubic overshoot (ringing) so the enhancement can't blow past
+    // its colour table. Off-disk taps just soften alpha at the disk edge.
+    if (sum.a < 1e-4) discard;
+    rgb = clamp(sum.rgb / sum.a, 0.0, 1.0);
+    alpha = clamp(sum.a, 0.0, 1.0);
   }
 
   float a = alpha * u_opacity;
@@ -267,12 +279,11 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.uniform1i(this.u.u_tex, 0);
-      // Crisp NEAREST at level 0 keeps each ABI pixel exact; the smoothed pass
-      // wants bilinear so its continuous-position taps interpolate between pixels
-      // for a smooth, high-quality wash instead of box-averaged blocks.
-      const filt = this.smooth > 0 ? gl.LINEAR : gl.NEAREST;
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+      // NEAREST in both modes: level 0 keeps each ABI pixel exact, and the smoothed
+      // pass does its own bicubic reconstruction from point-sampled texel centres,
+      // so hardware bilinear would only double-filter (softening the cubic result).
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
       const U = this.uni;
       gl.uniform1f(this.u.u_W, U.W);
