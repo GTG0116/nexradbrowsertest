@@ -67,8 +67,13 @@ const REF_STOPS = [
   s(75, [253, 253, 253]),
 ];
 
-// Velocity (m/s) — green inbound, red outbound, grey near zero.
+// Velocity (m/s) — green inbound, red outbound, grey near zero. The scale runs
+// out to ±70 m/s (≈136 kt) so that once the dealiaser unfolds a super typhoon's
+// eyewall, the extreme winds beyond the ordinary ±40 m/s range read as distinct
+// bright colours instead of all clamping to a single top swatch.
 const VEL_STOPS = [
+  s(-70, [200, 255, 200]),
+  s(-55, [90, 255, 90]),
   s(-40, [0, 224, 0]),
   s(-30, [0, 160, 0]),
   s(-20, [0, 96, 0]),
@@ -80,6 +85,8 @@ const VEL_STOPS = [
   s(20, [160, 0, 0]),
   s(30, [128, 0, 0]),
   s(40, [255, 160, 0]),
+  s(55, [255, 220, 0]),
+  s(70, [255, 255, 210]),
 ];
 
 // Storm-relative velocity (m/s native, shown in kt) — green inbound, red

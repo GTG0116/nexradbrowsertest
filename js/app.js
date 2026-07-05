@@ -5733,16 +5733,23 @@ const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
 // stays bounded no matter how long the run is. Phones keep a tighter window to fit
 // a smaller memory budget. Prefetch is kept below the cap so prefetching and
 // eviction don't fight over the same slots.
-const MODEL_PLAYBACK_MAX_CACHED = 48;
+// Desktop keeps a smaller resident window than before because each frame is now
+// held at (near) full resolution — see MODEL_PLAYBACK_TARGET_DIM, so a frame is
+// several times heavier. A window of 24 with a 12-frame prefetch still plays and
+// scrubs smoothly while keeping the full-res frames' memory bounded; the streaming
+// engine re-decodes anything evicted as the playhead moves back over it.
+const MODEL_PLAYBACK_MAX_CACHED = 24;
 const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 8;
 const MODEL_PLAYBACK_PREFETCH = 12;
 const MODEL_PLAYBACK_PREFETCH_MOBILE = 3;
-// Each *playback* frame's grid is down-pooled to a modest resolution (the live
-// single-frame view still renders full-res). Pooling shrinks BOTH the GPU texture
-// and the readout-values array, cutting per-frame memory ~4× at factor 2. Targets
-// are the max grid dimension after pooling; phones pool harder to fit a tighter
-// memory budget.
-const MODEL_PLAYBACK_TARGET_DIM = 900;
+// Playback frames are down-pooled only when a grid is larger than this target
+// dimension. It used to be 900, which halved a 1799-wide HRRR grid to a visibly
+// coarser 900 for every loop frame while the live single-frame view stayed
+// full-res — the "loops lower the resolution" complaint. Raising the desktop
+// target to 1800 keeps the common models (HRRR ~1799, GFS 1440, the hurricane
+// nests) at their native resolution during playback, so a loop looks identical to
+// the single frame. Phones still pool hard to fit a much tighter memory budget.
+const MODEL_PLAYBACK_TARGET_DIM = 1800;
 const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 420;
 const FRAME_WARM_START_DELAY = 1800;
 const FRAME_WARM_IDLE_TIMEOUT = 3000;

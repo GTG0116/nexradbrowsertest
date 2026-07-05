@@ -380,14 +380,23 @@ function resampleHsd(hdr, grid, out) {
   const { dv, hdrLen, cols, lines, errCnt, outCnt, calibrate } = hdr;
   const rC = hdr.CFAC / grid.CFAC, rL = hdr.LFAC / grid.LFAC; // native px per common px
   const segTop = hdr.firstLine - 1;
+  // The native column for each output column depends only on the column, not the
+  // row, so precompute it once (−1 marks off-grid) instead of recomputing the same
+  // Math.round for every pixel of every row — the resample's dominant cost on a
+  // 5500-wide full disk. The native row is likewise hoisted to the outer loop.
+  const colMap = new Int32Array(grid.W);
+  for (let cc = 0; cc < grid.W; cc++) {
+    const nc = Math.round(hdr.COFF + (cc + 1 - grid.COFF) * rC) - 1;
+    colMap[cc] = (nc < 0 || nc >= cols) ? -1 : nc;
+  }
   for (let cr = 0; cr < grid.H; cr++) {
     const nr = Math.round(hdr.LOFF + (cr + 1 - grid.LOFF) * rL) - 1 - segTop;
     if (nr < 0 || nr >= lines) continue;
     const rowBase = hdrLen + nr * cols * 2;
     const outBase = cr * grid.W;
     for (let cc = 0; cc < grid.W; cc++) {
-      const nc = Math.round(hdr.COFF + (cc + 1 - grid.COFF) * rC) - 1;
-      if (nc < 0 || nc >= cols) continue;
+      const nc = colMap[cc];
+      if (nc < 0) continue;
       const dn = dv.getUint16(rowBase + nc * 2, true);
       if (dn !== errCnt && dn !== outCnt) out[outBase + cc] = calibrate(dn);
     }

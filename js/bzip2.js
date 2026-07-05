@@ -19,28 +19,50 @@ class BitReader {
   constructor(bytes) {
     this.bytes = bytes;
     this.pos = 0;
-    // We keep the accumulator as a plain Number (53-bit safe) and use integer
-    // division instead of `<<` so reads wider than 31 bits never overflow.
+    // A 32-bit-integer accumulator holding up to ~30 not-yet-consumed bits, MSB
+    // first. The Huffman symbol decode reads one bit at a time and dominates the
+    // whole decompress, so this path must be cheap: plain shifts/masks, no
+    // Math.pow or floating-point division (the previous accumulator did both on
+    // *every* bit and was the bottleneck).
     this.buf = 0;
     this.count = 0;
   }
 
   bits(n) {
-    while (this.count < n) {
-      const b = this.pos < this.bytes.length ? this.bytes[this.pos] : 0;
-      this.pos++;
-      this.buf = this.buf * 256 + b;
-      this.count += 8;
+    // Wide reads (block/stream CRCs, ≤32 bits) split into two ≤16-bit halves and
+    // return a Number, so the fast integer path below only ever handles n ≤ 24 —
+    // well within a signed 32-bit accumulator. CRCs aren't validated, so the
+    // float result of the multiply is fine.
+    if (n > 24) {
+      const hi = this.bits(n - 16);
+      return hi * 65536 + this.bits(16);
     }
-    this.count -= n;
-    const div = Math.pow(2, this.count);
-    const r = Math.floor(this.buf / div);
-    this.buf -= r * div;
-    return r;
+    let count = this.count;
+    let buf = this.buf;
+    const bytes = this.bytes;
+    while (count < n) {
+      buf = (buf << 8) | (this.pos < bytes.length ? bytes[this.pos] : 0);
+      this.pos++;
+      count += 8;
+    }
+    count -= n;
+    this.count = count;
+    this.buf = buf & ((1 << count) - 1); // retain only the still-unconsumed bits
+    return (buf >>> count) & ((1 << n) - 1);
   }
 
   bit() {
-    return this.bits(1);
+    let count = this.count;
+    if (count === 0) {
+      this.buf = this.pos < this.bytes.length ? this.bytes[this.pos] : 0;
+      this.pos++;
+      count = 8;
+    }
+    count -= 1;
+    this.count = count;
+    const r = (this.buf >>> count) & 1;
+    this.buf &= (1 << count) - 1;
+    return r;
   }
 
   // Discard buffered bits up to the next byte boundary in the underlying stream.
@@ -222,17 +244,23 @@ function decodeBlock(br, blockSize, out) {
   }
 
   // --- Final RLE1 decode straight into the output ---------------------------
+  // Write directly into the sink's buffer. The plain (non-run) output is at most
+  // `nblock` bytes; each run expansion adds up to 255 more, topped up on demand.
   let tPos = tt[origPtr];
   let prev = -1;
   let same = 0;
   let i = 0;
+  out.ensure(nblock + 256);
+  let data = out.data;
+  let len = out.len;
   while (i < nblock) {
     const b = bwt[tPos];
     tPos = tt[tPos];
     i++;
     if (same === 4) {
       // `b` is a count of additional copies of `prev`.
-      for (let k = 0; k < b; k++) out.push(prev);
+      if (len + b > data.length) { out.len = len; out.ensure(b); data = out.data; }
+      for (let k = 0; k < b; k++) data[len++] = prev;
       same = 0;
       prev = -1;
       continue;
@@ -243,22 +271,32 @@ function decodeBlock(br, blockSize, out) {
       same = 1;
       prev = b;
     }
-    out.push(b);
+    if (len === data.length) { out.len = len; out.ensure(1); data = out.data; }
+    data[len++] = b;
   }
+  out.len = len;
 }
 
-// A small growable byte buffer (push() amortized O(1)).
+// A growable byte buffer. `ensure(n)` guarantees room for n more bytes so the
+// RLE1 decode can write straight into `.data`/`.len` in a tight loop with no
+// per-byte call/branch overhead (the previous push()-per-byte was a hot spot).
 class ByteSink {
   constructor() {
     this.data = new Uint8Array(1 << 20);
     this.len = 0;
   }
-  push(b) {
-    if (this.len === this.data.length) {
-      const next = new Uint8Array(this.data.length * 2);
-      next.set(this.data);
+  ensure(extra) {
+    const need = this.len + extra;
+    if (need > this.data.length) {
+      let cap = this.data.length;
+      while (cap < need) cap *= 2;
+      const next = new Uint8Array(cap);
+      next.set(this.data.subarray(0, this.len));
       this.data = next;
     }
+  }
+  push(b) {
+    if (this.len === this.data.length) this.ensure(1);
     this.data[this.len++] = b;
   }
   toUint8Array() {
