@@ -551,8 +551,8 @@ function drawAlertCard(ctx, alert, mapX, mapY, mapW, mapH, u, mobile, theme) {
 }
 
 // Full alert briefing: reproduce the on-screen detail panel — a dark side panel
-// over the scope with a colour-coded header, the hazard boxes, what to do and
-// the safety guidance. Unlike the live panel it does NOT include the official
+// over the scope with a colour-coded header, the hazard boxes, the safety
+// guidance and what to do. Unlike the live panel it does NOT include the official
 // alert text: a shared image can't scroll, so the space goes to the parts a
 // viewer can act on (threats, instructions, safety tips). The panel runs the
 // full height of the map region and its content is clipped to that box. On
@@ -703,20 +703,21 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
     gap(0.5);
   }
 
-  // What to do (NWS instruction) — the actionable part comes before anything
-  // descriptive so it survives even when a long briefing clips at the panel.
-  if (b.instruction) {
-    sectionLabel('What to do');
-    paragraph(b.instruction, { size: 0.9 });
-    gap();
-  }
-
-  // Safety guidance: lead paragraph + bullet points.
+  // Safety guidance: lead paragraph + bullet points. Placed above "What to do"
+  // so the actionable safety tips lead the panel and survive even when a long
+  // briefing clips at the panel bottom.
   if (b.guidance) {
     sectionLabel('Safety guidance');
     paragraph(b.guidance.lead, { color: theme.text, size: 0.95 });
     gap(0.3);
     for (const pt of b.guidance.points || []) bullet(pt);
+    gap();
+  }
+
+  // What to do (NWS instruction).
+  if (b.instruction) {
+    sectionLabel('What to do');
+    paragraph(b.instruction, { size: 0.9 });
     gap();
   }
 
