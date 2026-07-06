@@ -564,16 +564,30 @@ export function drawHodograph(canvas, profile) {
   const R = Math.min(w, h) / 2 - 14;
   const sc = R / ring; // px per kt
 
+  // Every annotation size scales with the plot radius. The old fixed sizes
+  // (7 px km dots, 3 px trace) were tuned for a desktop-sized canvas; on the
+  // small mobile hodograph the dots overlapped and buried the trace entirely.
+  const kmR = Math.max(3, Math.min(7, R * 0.05));        // km-marker dot radius
+  const smRad = Math.max(2.5, Math.min(5, R * 0.036));   // storm-motion dot radius
+  const kmFont = Math.max(6.5, Math.min(9, kmR * 1.3));
+  const ringFont = Math.max(7, Math.min(9, R * 0.065));
+  const smFont = Math.max(7.5, Math.min(10, R * 0.072));
+  const traceW = Math.max(1.6, Math.min(3, R * 0.022));
+
   const px = (u) => cx + u * MS2KT * sc;
   const py = (v) => cy - v * MS2KT * sc;
 
-  // Range rings + labels.
+  // Range rings + labels. On a small canvas (or a fast profile) 10 kt rings sit
+  // a few pixels apart and their labels shingle into an unreadable smear, so
+  // widen the step until adjacent rings are at least ~14 px apart.
+  let ringStep = 10;
+  while (ringStep * sc < 14 && ringStep < ring) ringStep += 10;
   ctx.strokeStyle = 'rgba(163,148,127,0.35)';
   ctx.fillStyle = '#8a7f72';
-  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.font = `${ringFont}px "JetBrains Mono", monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  for (let r = 10; r <= ring; r += 10) {
+  for (let r = ringStep; r <= ring; r += ringStep) {
     ctx.beginPath(); ctx.arc(cx, cy, r * sc, 0, 7); ctx.stroke();
     ctx.fillText(String(r), cx + r * sc + 8, cy - 4);
   }
@@ -612,7 +626,7 @@ export function drawHodograph(canvas, profile) {
   ctx.setLineDash([]);
 
   // Hodograph curve, coloured by height band.
-  ctx.lineWidth = 3;
+  ctx.lineWidth = traceW;
   ctx.lineJoin = 'round';
   for (let i = 1; i < L.length; i++) {
     const a = L[i - 1], b = L[i];
@@ -625,18 +639,22 @@ export function drawHodograph(canvas, profile) {
   }
 
   // Height markers: a numbered dot at each whole kilometre AGL along the trace,
-  // like the labelled rings in a reference hodograph.
+  // like the labelled rings in a reference hodograph. On a small canvas the
+  // markers thin out to the reference heights (1/2/3/6/9/12 km) so they don't
+  // shingle over each other where the trace bunches up.
   const topKm = Math.min(12, Math.floor(L[L.length - 1].zAGL / 1000));
-  ctx.font = '700 9px "JetBrains Mono", monospace';
+  const sparse = R < 110;
+  ctx.font = `700 ${kmFont}px "JetBrains Mono", monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (let km = 1; km <= topKm; km++) {
+    if (sparse && !(km <= 3 || km === 6 || km === 9 || km === 12)) continue;
     const [u, v] = windAtAGL(L, km * 1000);
     if (Math.hypot(u, v) * MS2KT > ring) continue; // outside the plotted rings
     const x = px(u), y = py(v);
-    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7);
+    ctx.beginPath(); ctx.arc(x, y, kmR, 0, 7);
     ctx.fillStyle = 'rgba(12,16,24,0.92)'; ctx.fill();
-    ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(230,236,247,0.85)'; ctx.stroke();
+    ctx.lineWidth = Math.min(1.2, kmR * 0.18); ctx.strokeStyle = 'rgba(230,236,247,0.85)'; ctx.stroke();
     ctx.fillStyle = '#e6ecf7';
     ctx.fillText(String(km), x, y + 0.5);
   }
@@ -644,21 +662,21 @@ export function drawHodograph(canvas, profile) {
   // Storm motion markers.
   const drawSM = (vec, label, fill) => {
     const x = px(vec[0]), y = py(vec[1]);
-    ctx.beginPath(); ctx.arc(x, y, 5, 0, 7);
+    ctx.beginPath(); ctx.arc(x, y, smRad, 0, 7);
     ctx.fillStyle = fill; ctx.fill();
-    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fffdf8'; ctx.stroke();
+    ctx.lineWidth = Math.min(1.5, smRad * 0.3); ctx.strokeStyle = '#fffdf8'; ctx.stroke();
     ctx.fillStyle = '#2a2520';
-    ctx.font = '700 10px "Manrope", sans-serif';
-    ctx.fillText(label, x + 12, y);
+    ctx.font = `700 ${smFont}px "Manrope", sans-serif`;
+    ctx.fillText(label, x + smRad + 7, y);
   };
   // 0–6 km mean wind (hollow, labelled MW), then both movers.
   const mx = px(sm.mean[0]), my = py(sm.mean[1]);
-  ctx.beginPath(); ctx.arc(mx, my, 4, 0, 7);
-  ctx.strokeStyle = '#6b6155'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.beginPath(); ctx.arc(mx, my, smRad * 0.8, 0, 7);
+  ctx.strokeStyle = '#6b6155'; ctx.lineWidth = Math.min(1.5, smRad * 0.3); ctx.stroke();
   ctx.fillStyle = '#2a2520';
-  ctx.font = '700 10px "Manrope", sans-serif';
+  ctx.font = `700 ${smFont}px "Manrope", sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('MW', mx + 14, my);
+  ctx.fillText('MW', mx + smRad + 9, my);
   drawSM(sm.lm, 'LM', '#6aa9ff');
   drawSM(sm.rm, 'RM', '#ff6f61');
 }
