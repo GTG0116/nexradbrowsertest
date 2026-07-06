@@ -39,19 +39,6 @@ vec4 texelAt(float col, float row) {
   return vec4(c.rgb * c.a, c.a);   // premultiply so the blend is colour-correct
 }
 
-// Mitchell–Netravali cubic weight for a sample |x| ∈ [0,2] away, parameterised by
-// (B,C). It's the standard high-quality image-resampling kernel: unlike a wide
-// Gaussian it interpolates (stays sharp, no mush) yet is C1-smooth (no blocks).
-// B/C pick the look — (0,0.5) Catmull-Rom is crisp, (1/3,1/3) Mitchell is
-// balanced, (1,0) the cubic B-spline is softest with no ringing.
-float mnCubic(float x, float B, float C) {
-  x = abs(x);
-  float x2 = x * x, x3 = x2 * x;
-  if (x < 1.0) return ((12.0 - 9.0*B - 6.0*C)*x3 + (-18.0 + 12.0*B + 6.0*C)*x2 + (6.0 - 2.0*B)) / 6.0;
-  if (x < 2.0) return ((-B - 6.0*C)*x3 + (6.0*B + 30.0*C)*x2 + (-12.0*B - 48.0*C)*x + (8.0*B + 24.0*C)) / 6.0;
-  return 0.0;
-}
-
 void main() {
   // web-mercator [0,1] -> lon/lat (radians)
   float lon = (v_merc.x * 360.0 - 180.0) * PI / 180.0;
@@ -104,40 +91,37 @@ void main() {
     rgb = c.rgb;
     alpha = c.a;
   } else {
-    // High-quality 4x4 bicubic (Mitchell–Netravali) resample. A wide Gaussian
-    // blur — what this used to be — smears the coarse ABI/AHI pixels into mush
-    // when you zoom in (the "smoothing looks low quality" complaint); bicubic
-    // instead reconstructs a smooth, block-free image that stays sharp, the same
-    // filter high-end viewers upsample satellite imagery with. The level picks the
-    // look: crisp Catmull-Rom → balanced Mitchell → soft B-spline. Taps sit at the
-    // 16 surrounding texel CENTRES (integer positions), point-sampling the exact
-    // ABI values, so the cubic — not the hardware bilinear — shapes the result.
-    float B = u_smooth < 1.5 ? 0.0 : (u_smooth < 2.5 ? (1.0 / 3.0) : 1.0);
-    float C = u_smooth < 1.5 ? 0.5 : (u_smooth < 2.5 ? (1.0 / 3.0) : 0.0);
-    float cb = floor(col), rb = floor(row);
-    float fx = col - cb, fy = row - rb;
-    // Per-axis cubic weights for the four taps at offsets -1,0,1,2.
-    float wx0 = mnCubic(fx + 1.0, B, C), wx1 = mnCubic(fx, B, C);
-    float wx2 = mnCubic(fx - 1.0, B, C), wx3 = mnCubic(fx - 2.0, B, C);
-    float wy0 = mnCubic(fy + 1.0, B, C), wy1 = mnCubic(fy, B, C);
-    float wy2 = mnCubic(fy - 1.0, B, C), wy3 = mnCubic(fy - 2.0, B, C);
+    // Gaussian low-pass over the surrounding ABI cells — the same smoothing the
+    // radar and model layers use, with the level picking the sigma (in cell
+    // widths): Low gently softens the pixel grid, High visibly dissolves it.
+    // (This used to be a bicubic Mitchell–Netravali resample, which only
+    // *interpolates* — Low looked identical to None — and its negative lobes
+    // rang around sharp cloud edges, the "smoothing looks funny" complaint.)
+    // Each tap point-samples a texel CENTRE and is weighted by its continuous
+    // distance from the sample point, so the result is smooth everywhere with
+    // no blocks and no ringing. Off-disk / missing texels carry alpha 0 and
+    // drop out of the colour blend, so the disk edge fades cleanly.
+    float sigma = u_smooth < 1.5 ? 0.6 : (u_smooth < 2.5 ? 1.1 : 1.8);
+    float pc = col - 0.5, pr = row - 0.5;   // texel-centre index space
+    float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
     vec4 sum = vec4(0.0);
-    for (int m = 0; m < 4; m++) {
-      float rj = rb + float(m) - 1.0;
-      float wy = m == 0 ? wy0 : (m == 1 ? wy1 : (m == 2 ? wy2 : wy3));
-      for (int n = 0; n < 4; n++) {
-        float ci = cb + float(n) - 1.0;
-        float wx = n == 0 ? wx0 : (n == 1 ? wx1 : (n == 2 ? wx2 : wx3));
-        sum += texelAt(ci, rj) * (wx * wy);
+    float wsum = 0.0;
+    for (int m = -3; m <= 3; m++) {
+      for (int n = -3; n <= 3; n++) {
+        float ci = cn + float(n), rj = rn + float(m);
+        float dx = ci - pc, dy = rj - pr;
+        float w = exp(-(dx * dx + dy * dy) * inv2s2);
+        sum += texelAt(ci, rj) * w;
+        wsum += w;
       }
     }
-    // sum is premultiplied; the cubic weights sum to 1, so sum.a is the covered
-    // coverage directly. Recover straight-alpha colour by the covered weight and
-    // clamp away any cubic overshoot (ringing) so the enhancement can't blow past
-    // its colour table. Off-disk taps just soften alpha at the disk edge.
-    if (sum.a < 1e-4) discard;
+    // sum is premultiplied: recover straight-alpha colour by the covered weight,
+    // and normalise alpha by the full kernel weight so partially covered pixels
+    // (the disk edge) fade out instead of ballooning.
+    if (sum.a < 1e-4 * wsum) discard;
     rgb = clamp(sum.rgb / sum.a, 0.0, 1.0);
-    alpha = clamp(sum.a, 0.0, 1.0);
+    alpha = clamp(sum.a / wsum, 0.0, 1.0);
   }
 
   float a = alpha * u_opacity;

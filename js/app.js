@@ -10,7 +10,7 @@ import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep, stormRelativeSweep } from './dealias.js';
 import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
 import { CyclonesController } from './cyclones.js';
-import { applyMapStyle, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
+import { applyMapStyle, liftBoundaryLayers, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
@@ -335,7 +335,38 @@ function cigHatchImage(level, ratio = 2) {
 // (Re)create all overlay sources and layers in the correct order. Called on
 // every style load — including after a basemap switch, which wipes custom
 // layers — and then repopulated with whatever data we currently hold.
+// Alert paint values, shared by the initial addLayer in setupOverlays and the
+// live "Alert opacity" slider. Per-kind fill opacity rides on the feature (and
+// an isolated alert selected in the open briefing is brightened on top of it);
+// the user's global alert-opacity multiplier scales the whole expression.
+function alertFillOpacityExpr(mult = state.alertOpacity) {
+  return ['*', mult, [
+    'case',
+    ['boolean', ['get', 'selected'], false], 0.34,
+    ['coalesce', ['get', 'fillOpacity'], 0.18],
+  ]];
+}
+function alertLineOpacity(mult = state.alertOpacity) {
+  return 0.95 * mult;
+}
+
+// Push the current global alert opacity to every live map (main + split panes).
+function applyAlertOpacity() {
+  const maps = [state.map, ...(state.splitView ? state.splitView.paneMaps() : [])];
+  for (const m of maps) {
+    if (!m || !m.getLayer) continue;
+    try {
+      if (m.getLayer('alerts-fill')) m.setPaintProperty('alerts-fill', 'fill-opacity', alertFillOpacityExpr());
+      if (m.getLayer('alerts-line')) m.setPaintProperty('alerts-line', 'line-opacity', alertLineOpacity());
+    } catch (_) { /* pane mid style-reload */ }
+  }
+}
+
 function setupOverlays(map) {
+  // Normalise the style first: some providers draw admin boundaries beneath the
+  // roads, where the data layers would cover them — lift them above the data
+  // before the anchors below are computed from the layer order.
+  liftBoundaryLayers(map);
   // Label anchor → annotations + our borders (above roads, below town labels).
   // Data anchor → radar/alert-fill (below the basemap roads, over the terrain).
   const anchor = firstLabelLayerId(map);
@@ -405,13 +436,7 @@ function setupOverlays(map) {
       source: 'alerts',
       paint: {
         'fill-color': ['get', 'color'],
-        // Per-kind fill opacity rides on the feature; an isolated alert (selected
-        // in the open briefing) is brightened on top of that.
-        'fill-opacity': [
-          'case',
-          ['boolean', ['get', 'selected'], false], 0.34,
-          ['coalesce', ['get', 'fillOpacity'], 0.18],
-        ],
+        'fill-opacity': alertFillOpacityExpr(),
       },
     },
     dataAnchor
@@ -431,7 +456,7 @@ function setupOverlays(map) {
           ['boolean', ['get', 'selected'], false], 4.5,
           ['coalesce', ['get', 'outlineWidth'], 2.5],
         ],
-        'line-opacity': 0.95,
+        'line-opacity': alertLineOpacity(),
       },
     },
     anchor
@@ -729,6 +754,9 @@ const state = {
   // Per-alert-kind appearance overrides, keyed by display name:
   // { color, fillOpacity, outlineColor, outlineWidth }. Empty = stock colours.
   alertStyle: {},
+  // Global multiplier (0.1–1) on every alert's fill AND outline opacity, on top
+  // of the per-kind overrides above — one slider to fade the whole alert layer.
+  alertOpacity: 1,
   showRings: true,
   siteMarkerStyle: 'dot',
   // Persist the map view, last product and settings between visits (toggleable).
@@ -926,6 +954,8 @@ function cacheEls() {
   el.cyclonePreview = $('#cyclonePreview');
   el.cyclonePreviewCard = $('#cyclonePreviewCard');
   el.mapStyleControls = $('#mapStyleControls');
+  el.alertOpacity = $('#alertOpacity');
+  el.alertOpacityVal = $('#alertOpacityVal');
   el.alertStyleControls = $('#alertStyleControls');
   el.drawStyleControls = $('#drawStyleControls');
   el.drawToolPopup = $('#drawToolPopup');
@@ -1229,8 +1259,16 @@ function setMapProvider(provider) {
   }
   state.mapProvider = next;
   MAPBOX_TOKEN = token;
+  // The GL library resolves mapbox:// style/tile URLs against the *global*
+  // access token at request time, which still holds the old provider's key —
+  // so switching (say) MapTiler → Mapbox 401'd every request until a full page
+  // reload re-ran init with the right token. Swap the global token (and the
+  // split-view context, whose panes are constructed with their own copy)
+  // before restyling, and the switch takes effect immediately.
+  mapboxgl.accessToken = token;
   try { localStorage.setItem(MAP_PROVIDER_KEY, next); } catch (_) {}
   if (el.mapProviderSelect) el.mapProviderSelect.value = next;
+  if (state.splitView) state.splitView.setAccessToken(token);
   if (state.map) {
     state.styleReady = false;
     const url = basemapStyleUrl();
@@ -5737,20 +5775,22 @@ const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
 // held at (near) full resolution — see MODEL_PLAYBACK_TARGET_DIM, so a frame is
 // several times heavier. A window of 24 with a 12-frame prefetch still plays and
 // scrubs smoothly while keeping the full-res frames' memory bounded; the streaming
-// engine re-decodes anything evicted as the playhead moves back over it.
+// engine re-decodes anything evicted as the playhead moves back over it. Phones
+// now keep frames at native resolution too (see the target dims below), so their
+// resident window shrinks to compensate.
 const MODEL_PLAYBACK_MAX_CACHED = 24;
-const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 8;
+const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 6;
 const MODEL_PLAYBACK_PREFETCH = 12;
 const MODEL_PLAYBACK_PREFETCH_MOBILE = 3;
 // Playback frames are down-pooled only when a grid is larger than this target
-// dimension. It used to be 900, which halved a 1799-wide HRRR grid to a visibly
-// coarser 900 for every loop frame while the live single-frame view stayed
-// full-res — the "loops lower the resolution" complaint. Raising the desktop
-// target to 1800 keeps the common models (HRRR ~1799, GFS 1440, the hurricane
-// nests) at their native resolution during playback, so a loop looks identical to
-// the single frame. Phones still pool hard to fit a much tighter memory budget.
-const MODEL_PLAYBACK_TARGET_DIM = 1800;
-const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 420;
+// dimension. 3600 matches gridLayer's MAX_DIM texture cap — the point past which
+// pooling can no longer cost any *displayed* resolution — so on every device a
+// loop frame now draws exactly like the live single-frame view. (Phones used to
+// pool to 420, which made every loop dramatically coarser than the still frame —
+// the "loops lower the resolution" complaint; the memory this costs is paid for
+// by the smaller mobile resident window above.)
+const MODEL_PLAYBACK_TARGET_DIM = 3600;
+const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 3600;
 const FRAME_WARM_START_DELAY = 1800;
 const FRAME_WARM_IDLE_TIMEOUT = 3000;
 const FRAME_WARM_FRAME_PAUSE = 220;
@@ -8285,6 +8325,7 @@ function saveSettings() {
         uiTheme: state.uiTheme,
         mapStyle: state.mapStyle,
         alertStyle: state.alertStyle,
+        alertOpacity: state.alertOpacity,
         showRings: state.showRings,
         siteMarkerStyle: state.siteMarkerStyle,
         tzLocal: state.tzLocal,
@@ -8371,6 +8412,7 @@ function applyStoredSettings(s) {
   if (s.uiTheme === 'dark' || s.uiTheme === 'light') state.uiTheme = s.uiTheme;
   if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
   if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
+  if (typeof s.alertOpacity === 'number') state.alertOpacity = Math.max(0.1, Math.min(1, s.alertOpacity));
   if (typeof s.showRings === 'boolean') state.showRings = s.showRings;
   if (s.siteMarkerStyle === 'dot' || s.siteMarkerStyle === 'pill') state.siteMarkerStyle = s.siteMarkerStyle;
   if (typeof s.tzLocal === 'boolean') state.tzLocal = s.tzLocal;
@@ -8514,6 +8556,10 @@ function reflectStoredControls() {
   setToggleBtn(el.ringsToggle, state.showRings);
   setToggleBtn(el.dealiasToggle, state.dealias);
   if (el.smooth) { el.smooth.value = String(state.smooth); el.smoothVal.textContent = SMOOTH_LABELS[state.smooth]; }
+  if (el.alertOpacity) {
+    el.alertOpacity.value = String(Math.round(state.alertOpacity * 100));
+    el.alertOpacityVal.textContent = el.alertOpacity.value + '%';
+  }
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
   setToggleBtn(el.metarsToggle, state._metarsOn);
   setToggleBtn(el.modelCityValuesToggle, state.modelCityValues);
@@ -8773,6 +8819,17 @@ function init() {
       el.playFramesVal.textContent = state.playbackFrames;
       cancelFrameWarm();
       scheduleFrameWarm();
+      saveSettings();
+    });
+  }
+
+  // Global alert opacity — one slider that fades every alert's fill and
+  // outline together (multiplied on top of the per-kind overrides).
+  if (el.alertOpacity) {
+    el.alertOpacity.addEventListener('input', () => {
+      state.alertOpacity = Math.max(0.1, Math.min(1, Number(el.alertOpacity.value) / 100));
+      el.alertOpacityVal.textContent = Math.round(state.alertOpacity * 100) + '%';
+      applyAlertOpacity();
       saveSettings();
     });
   }

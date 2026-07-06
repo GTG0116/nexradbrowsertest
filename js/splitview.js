@@ -16,7 +16,7 @@ import { OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
 import { sceneBBox } from './goes.js';
 import { ensureBandsAsync } from './satClient.js';
-import { applyMapStyle } from './mapStyle.js';
+import { applyMapStyle, liftBoundaryLayers } from './mapStyle.js';
 import { prepareModelOverlayData, showPreparedModelOverlays, clearModelOverlays } from './modelOverlays.js';
 
 const p2 = (n) => String(n).padStart(2, '0');
@@ -118,6 +118,12 @@ export class SplitView {
 
   _allMaps() {
     return this._paneNums().map((n) => this._mapForPane(n)).filter(Boolean);
+  }
+
+  // The extra pane maps (everything but the app's main map), for callers in
+  // app.js that need to mirror a paint change onto every live pane.
+  paneMaps() {
+    return this._extraPaneNums().map((n) => this._mapForPane(n)).filter(Boolean);
   }
 
   enable(paneCount = 2) {
@@ -289,6 +295,9 @@ export class SplitView {
     const map = this._mapForPane(pane);
     if (!map) return;
 
+    // Same style normalisation as the main map: lift boundary lines above the
+    // data before anchors are derived from the layer order (see mapStyle.js).
+    liftBoundaryLayers(map);
     const mapStyle = this.ctx.state && this.ctx.state.mapStyle;
     applyMapStyle(map, mapStyle, firstLabelLayerId(map), { fresh: true });
 
@@ -326,6 +335,10 @@ export class SplitView {
         firstLabelLayerId(map)
       );
     }
+    // Same paint as the main map's alert layers, including the user's global
+    // alert-opacity multiplier (kept live afterwards via applyAlertOpacity).
+    const alertMult = this.ctx.state && typeof this.ctx.state.alertOpacity === 'number'
+      ? this.ctx.state.alertOpacity : 1;
     if (!map.getLayer('alerts-fill')) {
       map.addLayer(
         {
@@ -334,11 +347,11 @@ export class SplitView {
           source: 'alerts',
           paint: {
             'fill-color': ['get', 'color'],
-            'fill-opacity': [
+            'fill-opacity': ['*', alertMult, [
               'case',
               ['boolean', ['get', 'selected'], false], 0.34,
               ['coalesce', ['get', 'fillOpacity'], 0.18],
-            ],
+            ]],
           },
         },
         dataLayerAnchor(map)
@@ -357,7 +370,7 @@ export class SplitView {
               ['boolean', ['get', 'selected'], false], 4.5,
               ['coalesce', ['get', 'outlineWidth'], 2.5],
             ],
-            'line-opacity': 0.95,
+            'line-opacity': 0.95 * alertMult,
           },
         },
         firstLabelLayerId(map)
@@ -443,6 +456,21 @@ export class SplitView {
     for (const n of this._extraPaneNums()) {
       const map = this._mapForPane(n);
       if (map && map.getStyle) applyMapStyle(map, opts, firstLabelLayerId(map), { fresh: false });
+    }
+  }
+
+  // A map-provider switch hands every map a new key. Panes created from now on
+  // read it from ctx at construction; already-live panes copied the old token
+  // into their RequestManager when they were built, so patch that in place too
+  // (private API, but the only alternative is tearing each pane down) — must
+  // run before the setBasemap() restyle triggers new tile/style requests.
+  setAccessToken(token) {
+    this.ctx.MAPBOX_TOKEN = token;
+    for (const n of this._extraPaneNums()) {
+      const map = this._mapForPane(n);
+      if (map && map._requestManager) {
+        try { map._requestManager._customAccessToken = token; } catch (_) { /* private API drifted */ }
+      }
     }
   }
 

@@ -57,6 +57,7 @@ void main() {
   if (fi < 0.0 || fi >= u_ni || fj < 0.0 || fj >= u_nj) discard;
 
   float t;
+  float fade = 1.0;   // edge feather from the smoothing blend (1 = fully inside)
   if (u_smooth < 0.5) {
     vec2 cv = cellValue(floor(fi), floor(fj));   // NEAREST: crisp cell
     if (cv.y < 0.5) discard;                      // missing
@@ -64,23 +65,17 @@ void main() {
   } else {
     // Gaussian low-pass over a 7x7 cell neighbourhood. Cell centres sit at
     // integer indices in (fi-0.5, fj-0.5) space; each tap is weighted by a
-    // Gaussian of its distance from the sample point AND by the cell's validity,
-    // then renormalised so missing cells neither leak nor darken the result.
+    // Gaussian of its continuous distance from the sample point.
     //
-    // Two failure modes to avoid at once:
-    //  - Ballooning: a lone valid cell must not spread its value across every
-    //    missing neighbour, or sparse MRMS echoes swell into huge blobs.
-    //  - Hole-punching: a single sub-threshold cell in the middle of a solid
-    //    echo (a model storm's reflectivity, a dropped MRMS cell) must not stay
-    //    transparent, or the smoothed field looks pocked with missing pixels even
-    //    though the eye expects continuous precip there.
-    // coverage (fraction of the in-bounds neighbourhood that holds data) tells
-    // the two apart: an enclosed hole is surrounded by data (high coverage) while
-    // a lone cell's empty neighbours are not (low coverage). Draw where the cell
-    // under the sample point is valid (native footprint, never eroded) OR where a
-    // hole is well enclosed, so interior gaps fill without the echo blooming
-    // outward into genuinely empty cells.
-    bool centreValid = cellValue(floor(fi), floor(fj)).y > 0.5;
+    // Missing cells are NOT renormalised away: they blend in as a value a bit
+    // below the colour floor (MISS). That makes the smoothed field a single
+    // continuous surface that ramps DOWN through the low end of the scale as
+    // an echo edge approaches, then sinks below the floor and alpha-fades out
+    // — so edges read as "lower values leading up to" the echo instead of
+    // stopping in a hard, blocky wall at the last valid cell (and a lone valid
+    // cell becomes a small soft blob rather than a raw square). Sub-threshold
+    // holes inside a solid echo are pulled back up by their valid neighbours,
+    // so interior gaps still fill smoothly.
     float sigma = smoothSigma(u_smooth);
     float pc = fi - 0.5, pr = fj - 0.5;
     float cn = floor(pc + 0.5), rn = floor(pr + 0.5);
@@ -98,15 +93,20 @@ void main() {
       }
     }
     if (sw < 1e-4) discard;                       // no valid cell nearby
-    float coverage = sw / max(wfull, 1e-4);
-    if (!centreValid && coverage < 0.5) discard;
-    t = st / sw;
+    // Blend in-bounds missing cells at MISS; out-of-grid taps are excluded (the
+    // domain edge stays sharp). tRaw < 0 means the point sits past the echo
+    // edge: fade it out smoothly over the below-floor range.
+    const float MISS = -0.6;
+    float tRaw = (st + MISS * (wfull - sw)) / max(wfull, 1e-4);
+    fade = smoothstep(MISS, 0.0, tRaw);
+    if (fade <= 0.004) discard;
+    t = clamp(tRaw, 0.0, 1.0);
   }
 
   float li = clamp(floor(t * (u_steps - 1.0) + 0.5), 0.0, u_steps - 1.0);
   vec4 col = texture2D(u_lut, vec2((li + 0.5) / u_steps, 0.5));
   if (col.a == 0.0) discard;
-  float a = col.a * u_opacity;
+  float a = col.a * u_opacity * fade;
   gl_FragColor = vec4(col.rgb * a, a);
 }`;
 

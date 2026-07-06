@@ -186,6 +186,27 @@ function isBoundaryLayer(ly) {
   return /^(admin|boundary|administrative)$/i.test(sl) || /admin|boundary|border/i.test(ly.id);
 }
 
+// Some styles (several MapTiler/OpenMapTiles ones) draw their admin boundaries
+// beneath the road network. The app's data layers (radar / satellite / model /
+// MRMS fills) are inserted just beneath the style's first road layer, which on
+// those styles buried the country and state borders under the data — the
+// "country borders don't show on many products" bug. Lift every boundary line
+// that sits below the label block to just beneath the style's first symbol
+// layer (preserving their relative order) so borders read above the data on
+// every provider. Must run on each style load BEFORE the insertion anchors are
+// computed, so the anchors see the corrected order.
+export function liftBoundaryLayers(map) {
+  if (!map || !map.getStyle) return;
+  const layers = (map.getStyle() && map.getStyle().layers) || [];
+  const symbolIdx = layers.findIndex((l) => l.type === 'symbol');
+  if (symbolIdx === -1) return;
+  for (let i = 0; i < symbolIdx; i++) {
+    const ly = layers[i];
+    if (!isBoundaryLayer(ly)) continue;
+    try { map.moveLayer(ly.id, layers[symbolIdx].id); } catch (_) { /* stale id */ }
+  }
+}
+
 // Recolour/resize the basemap's own country/state borders (and add county lines
 // from the same admin source). See the long note in app.js: the native admin
 // lines already sit above the radar/roads and below the labels, so restyling
