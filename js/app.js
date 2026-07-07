@@ -637,7 +637,9 @@ function setupOverlays(map) {
   refreshSiteDots();
 
   // Repaint the active source's layer into its place between fill and line.
-  if (state.mode === 'radar' && state.shownSweep && state.shownSite)
+  // (When the layer stack owns the display the renderLayerStack call below
+  // repaints everything; the main radar sweep stays hidden.)
+  if (state.mode === 'radar' && state.shownSweep && state.shownSite && !mainSourceSuppressed())
     setRadarSource(map, state.shownSweep, radarProduct(state.productId), state.shownSite);
   else if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
   else if (state.mode === 'mrms' && state.mrms.grid) renderMrms();
@@ -809,7 +811,10 @@ const state = {
   opacity: 0.85,
   // Smoothing level for the plotted data (radar / satellite / grid sources):
   // 0 none (crisp native pixels), 1 low, 2 medium, 3 high. Opt-in; defaults off.
+  // `smooth` is the ACTIVE mode's level; `smoothByMode` remembers each source's
+  // own setting so smoothing chosen on (say) models doesn't follow you to obs.
   smooth: 0,
+  smoothByMode: { radar: 0, satellite: 0, mrms: 0, models: 0, observations: 0, outlooks: 0 },
   // Unfold aliased velocities by default: without this, gates beyond the Nyquist
   // co-interval fold back to small/wrong-signed values, so VEL reads much lower
   // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
@@ -2408,6 +2413,18 @@ function displaySweep(sweep, site) {
     return;
   }
 
+  // While the layer stack owns the display, the main radar sweep doesn't draw —
+  // its stand-in lives in the stack (see mainSourceSuppressed).
+  if (state.mode === 'radar' && mainSourceSuppressed()) {
+    clearRadarSource(map);
+    drawRings(null, 0);
+    updateInspect();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
+
   // In satellite / MRMS / model modes the single-site radar only draws when the
   // overlay toggle is on; otherwise keep it (and its range rings) hidden.
   if (state.mode !== 'radar' && !state.radarOverlay) {
@@ -2523,6 +2540,8 @@ function setMode(mode) {
   const prevMode = state.mode;
   if (prevMode === 'outlooks' && mode !== 'outlooks') leaveOutlookSourceMode();
   state.mode = mode;
+  // Each source keeps its own smoothing level — restore this mode's.
+  applySmooth(state.smoothByMode[mode] ?? 0);
   if (mode !== 'satellite') clearSatellite();
   if (mode !== 'mrms') clearMrms();
   if (mode !== 'models') clearModels();
@@ -2953,6 +2972,13 @@ function clearSatellite() {
 function renderSatellite() {
   const map = state.map;
   if (!map || !state.styleReady) return;
+  if (mainSourceSuppressed()) {
+    clearSatellite();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
   const scene = state.sat.scene;
   if (!scene) { clearSatellite(); return; }
   const payload = buildSatPayload(scene);
@@ -3177,6 +3203,14 @@ function clearMrms() {
 function renderMrms() {
   const map = state.map;
   if (!map || !state.styleReady) return;
+  if (mainSourceSuppressed()) {
+    clearMrms();
+    clearModelCityValues();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
   const grid = state.mrms.grid;
   if (!grid) { clearMrms(); return; }
   setMrmsSource(map);
@@ -3355,6 +3389,13 @@ function observationGridForReadouts() {
 function renderObservations() {
   const map = state.map;
   if (!map || !state.styleReady) return;
+  if (mainSourceSuppressed()) {
+    clearObservations();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
   const grid = state.observations.grid;
   if (!grid) { clearObservations(); return; }
   state.observations.displayGrid = grid;
@@ -4233,6 +4274,7 @@ function addUserLayer() {
   state.layers.enabled = true;
   buildLayerControls();
   renderLayerStack();
+  rerenderMainSource(); // first item may hand the main display over to the stack
   saveSettings();
 }
 
@@ -4244,6 +4286,7 @@ function removeUserLayer() {
   state.layers.activeId = state.layers.items[Math.min(i, state.layers.items.length - 1)]?.id || null;
   buildLayerControls();
   renderLayerStack();
+  rerenderMainSource(); // removing the last layer gives the screen back to the main product
   saveSettings();
 }
 
@@ -4580,6 +4623,27 @@ async function renderLayerStack() {
   }
 }
 
+// While the layer stack is on, the stack IS the display: the main source's own
+// fill hides so the layer list accounts for everything on screen. (Enabling
+// layers used to leave the previous product drawn underneath as an unlisted
+// "extra layer" — the seeded first layer duplicates it, so handing the screen
+// to the stack keeps the view identical while making the list truthful.)
+// A running playback loop still owns the screen.
+function mainSourceSuppressed() {
+  return !!(state.layers.enabled && state.layers.items.length) &&
+    !(state.playback && state.playback.active);
+}
+
+// Redraw the active mode's main display — used when the layer stack toggles
+// (the main product hides behind the stack, or comes back out of it).
+function rerenderMainSource() {
+  if (state.mode === 'radar') renderRadar();
+  else if (state.mode === 'satellite') renderSatellite();
+  else if (state.mode === 'mrms') renderMrms();
+  else if (state.mode === 'models') renderModels();
+  else if (state.mode === 'observations') renderObservations();
+}
+
 function setupLayerControls() {
   buildLayerControls();
   if (el.layeringToggle) {
@@ -4591,6 +4655,9 @@ function setupLayerControls() {
         renderLayerStack();
         saveSettings();
       }
+      // The main product hands the screen to the stack (or takes it back) —
+      // see mainSourceSuppressed.
+      rerenderMainSource();
       // Swap the product controls for the layer editor (or back) on the sidebar.
       applyModePanels();
       setStatus(state.layers.enabled ? 'layers on' : 'layers off');
@@ -4687,6 +4754,14 @@ function setupLayerControls() {
 function renderModels() {
   const map = state.map;
   if (!map || !state.styleReady) return;
+  if (mainSourceSuppressed()) {
+    clearModels();
+    clearModelCityValues();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
   const grid = state.models.grid;
   if (!grid) { clearModels(); return; }
   state.models.displayGrid = grid;
@@ -4703,14 +4778,56 @@ function renderModels() {
   updateDock();
 }
 
+// Total GeoJSON features an overlay bundle carries — the memory driver when a
+// loop keeps overlays per frame.
+function countOverlayFeatures(data) {
+  if (!data) return 0;
+  let n = 0;
+  for (const k of ['hgt', 'windBarbs', 'mslp', 'pressureCenters', 'windContours']) {
+    if (data[k] && data[k].features) n += data[k].features.length;
+  }
+  return n;
+}
+
+// Reconstruct a readout-grade grid from a packed playback payload's 16-bit fill
+// codes (value = product lo + code/65534 × span; code 0 = missing). Loop frames
+// carry no Float32 values array, so the inspect readout, city values and
+// extrema for the displayed hour decode from the codes instead — quantized to
+// 1/65534 of the product range, plenty for a scrubbing readout. Memoised on the
+// payload so re-renders of the same frame don't re-decode; each new frame gets
+// a fresh array (never a shared scratch) because provider.idle() can promote
+// the decoded grid into state.models.grid when the loop stops.
+let packedGridMemo = { payload: null, grid: null };
+function gridFromPackedPayload(payload) {
+  if (!payload || !payload.tex || !payload.tex.packed || !payload.meta) return null;
+  if (packedGridMemo.payload === payload) return packedGridMemo.grid;
+  const { tex, meta } = payload;
+  const p = resolveGridProduct(meta.product);
+  const span = (p.hi - p.lo) || 1;
+  const n = tex.W * tex.H;
+  const codes = tex.packed;
+  const values = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = codes[i];
+    values[i] = c ? p.lo + ((c - 1) / 65534) * span : NaN;
+  }
+  const grid = {
+    ni: tex.W, nj: tex.H,
+    lon1: tex.lon1, lat1: tex.lat1, di: tex.di, dj: tex.dj,
+    values, product: meta.product, time: meta.time,
+  };
+  packedGridMemo = { payload, grid };
+  return grid;
+}
+
 // Display a pre-prepared model grid payload — used by forecast-hour playback.
-// Playback shows the colored fill only; barb/contour overlays are hidden.
 function drawModelPayload(payload) {
   const map = state.map;
   if (!map || !state.styleReady) return;
-  if (payload && payload.grid) state.models.displayGrid = payload.grid;
+  const grid = payload && (payload.grid || gridFromPackedPayload(payload));
+  if (grid) state.models.displayGrid = grid;
   setModelSource(map);
-  showPreparedModelOverlays(map, payload && (payload.overlays || prepareModelOverlayData(payload.grid)));
+  showPreparedModelOverlays(map, (payload && payload.overlays) || null);
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
@@ -5956,49 +6073,43 @@ function applyResponsiveLayout() {
 const PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 2 : 6;
 
 // A model loop spans *every* forecast hour of the run (GFS goes hourly to F120
-// then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384). Every hour
-// gets a timeline slot, but the frames are *streamed*, not all held at once: only
-// a bounded window around the playhead is decoded and kept resident (see
-// MODEL_PLAYBACK_MAX_CACHED), the loop pulls more hours in as it plays/scrubs, and
-// the engine evicts the frames farthest from the current one. Keeping every pooled
-// hour resident at once is what exhausted a phone's memory and crashed the tab —
-// the device-crash failure — since a full GFS run is ~200 global GRIBs and each
-// resident frame carries a values array, a GPU texture and up to five overlay
-// arrays. The decode itself is also paced in **chunks**: a small batch decodes,
-// the loop yields long enough for the browser to paint and reclaim the transient
-// decode buffers, then the next batch starts — steady, bounded allocation instead
-// of one big spike.
+// then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384), and every
+// frame is loaded and kept resident — no sliding window, no mid-loop re-decode
+// stalls. What makes that safe is how compact each resident frame is:
+//   • the fill is stored as packed 16-bit codes (prepareGridTexture packed
+//     mode) — no per-frame Float32 values array, no RGBA upload buffer, no raw
+//     overlay fields; the readout grid for the displayed frame is decoded from
+//     the codes on demand (gridFromPackedPayload).
+//   • each run's pooling factor is chosen from a fixed memory budget divided by
+//     the frame count (poolGridForLoop): a 48-hour HRRR loop stays at full
+//     resolution while a 200-frame global GFS run pools just enough that the
+//     whole run still fits the same budget. Phones get a smaller budget.
+// The decode itself is paced in **chunks**: a small batch decodes, the loop
+// yields long enough for the browser to paint and reclaim the transient decode
+// buffers, then the next batch starts — steady, bounded allocation instead of
+// one big spike.
 const MODEL_PLAYBACK_CHUNK = isSmallScreenNow() ? 2 : 6; // forecast hours decoded per batch
 const MODEL_PLAYBACK_CHUNK_PAUSE = isSmallScreenNow() ? 260 : 120; // ms breather between batches (GC/paint)
 // Decode concurrency within a model batch — kept modest so the transient memory of
 // several in-flight GRIB decodes can't pile up the way 10 parallel lanes did.
 const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
-// How many decoded forecast hours stay resident at once, and how many to prefetch
-// ahead of the playhead for smooth playback. The window slides with the playhead
-// (the engine evicts the frames farthest from the current one), so resident memory
-// stays bounded no matter how long the run is. Phones keep a tighter window to fit
-// a smaller memory budget. Prefetch is kept below the cap so prefetching and
-// eviction don't fight over the same slots.
-// Desktop keeps a smaller resident window than before because each frame is now
-// held at (near) full resolution — see MODEL_PLAYBACK_TARGET_DIM, so a frame is
-// several times heavier. A window of 24 with a 12-frame prefetch still plays and
-// scrubs smoothly while keeping the full-res frames' memory bounded; the streaming
-// engine re-decodes anything evicted as the playhead moves back over it. Phones
-// now keep frames at native resolution too (see the target dims below), so their
-// resident window shrinks to compensate.
-const MODEL_PLAYBACK_MAX_CACHED = 24;
-const MODEL_PLAYBACK_MAX_CACHED_MOBILE = 6;
-const MODEL_PLAYBACK_PREFETCH = 12;
-const MODEL_PLAYBACK_PREFETCH_MOBILE = 3;
-// Playback frames are down-pooled only when a grid is larger than this target
-// dimension. 3600 matches gridLayer's MAX_DIM texture cap — the point past which
-// pooling can no longer cost any *displayed* resolution — so on every device a
-// loop frame now draws exactly like the live single-frame view. (Phones used to
-// pool to 420, which made every loop dramatically coarser than the still frame —
-// the "loops lower the resolution" complaint; the memory this costs is paid for
-// by the smaller mobile resident window above.)
+// Total bytes the resident fill codes of one model loop may occupy, across all
+// of a run's frames. BYTES_PER_CELL pads the 2-byte codes for JS object/GeoJSON
+// overhead so the budget errs safe.
+const MODEL_LOOP_FILL_BUDGET = 512 * 1024 * 1024;
+const MODEL_LOOP_FILL_BUDGET_MOBILE = 64 * 1024 * 1024;
+const MODEL_LOOP_BYTES_PER_CELL = 3;
+// Barb/contour overlays ride along on loop frames only while they stay cheap:
+// a per-frame GeoJSON feature cap (global grids blow past it — a 0.6°-stride
+// global barb field is ~180k point features per frame) and a run-length cap.
+// Past either, the loop shows the colored fill only; stopping the loop restores
+// the full overlays via provider.idle().
+const MODEL_LOOP_OVERLAY_MAX_FRAMES = isSmallScreenNow() ? 12 : 64;
+const MODEL_LOOP_OVERLAY_FRAME_FEATURES = 12000;
+// Playback frames are never pooled below what the GPU texture would keep anyway:
+// 3600 matches gridLayer's MAX_DIM texture cap — the point past which pooling
+// can no longer cost any *displayed* resolution.
 const MODEL_PLAYBACK_TARGET_DIM = 3600;
-const MODEL_PLAYBACK_TARGET_DIM_MOBILE = 3600;
 const FRAME_WARM_START_DELAY = 1800;
 const FRAME_WARM_IDLE_TIMEOUT = 3000;
 const FRAME_WARM_FRAME_PAUSE = 220;
@@ -6023,9 +6134,24 @@ function waitForFrameWarmSlot() {
 // iPad/desktop tier, so phones additionally pool grids harder to fit a
 // tighter memory budget.
 const mqSmallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
-function poolGridForPlayback(grid) {
-  const factor = Math.max(1, Math.ceil(Math.max(grid.ni, grid.nj) /
-    (mqSmallScreen.matches ? MODEL_PLAYBACK_TARGET_DIM_MOBILE : MODEL_PLAYBACK_TARGET_DIM)));
+
+// Pool a model grid for an all-frames-resident loop. The factor comes from the
+// device's fill budget divided across the run's frame count, so total resident
+// memory is bounded no matter how many forecast hours the run has — short runs
+// keep native resolution, very long global runs pool a step or two coarser.
+function poolGridForLoop(grid, frameCount) {
+  const budget = mqSmallScreen.matches ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
+  const budgetCells = Math.max(
+    120 * 60, // quality floor — never pool below roughly a 3°-cell global grid
+    Math.floor(budget / Math.max(1, frameCount) / MODEL_LOOP_BYTES_PER_CELL)
+  );
+  let factor = Math.ceil(Math.sqrt((grid.ni * grid.nj) / budgetCells));
+  // Never keep more cells than the GPU texture cap would preserve anyway.
+  factor = Math.max(factor, Math.ceil(Math.max(grid.ni, grid.nj) / MODEL_PLAYBACK_TARGET_DIM));
+  return poolGridByFactor(grid, factor);
+}
+
+function poolGridByFactor(grid, factor) {
   if (factor <= 1) return grid;
   const { ni, nj, values, di, dj } = grid;
   const no = Math.ceil(ni / factor);
@@ -6162,24 +6288,16 @@ async function buildPlaybackProvider(opts = {}) {
   if (state.mode === 'models') {
     const run = currentModelRun();
     if (!run) return { frames: [] };
-    // Span the *entire* run — every forecast hour gets a timeline slot — but stream
-    // the frames rather than holding them all at once. Decoding 200+ global GRIBs
-    // and keeping every pooled frame resident is what crashed phones; instead the
-    // engine keeps only a bounded window around the playhead resident, pulling more
-    // hours in as the loop plays/scrubs and evicting the farthest ones. The decode
-    // is still paced in chunks (see createPlayback.loadInChunks) so the initial
-    // window doesn't slam every hour through the decoder at once.
+    // Span the *entire* run — every forecast hour is loaded and stays resident,
+    // so playback and scrubbing never stall on a re-decode. Each frame is kept
+    // compact (see the MODEL_LOOP_* notes above): packed 16-bit fill codes at a
+    // budget-driven resolution, no per-frame Float32 fields; the readout grid
+    // for the displayed hour is decoded from the codes on demand. The decode is
+    // paced in chunks (see createPlayback.loadInChunks) so 200+ GRIBs don't
+    // slam through the decoder at once.
     const hours = forecastHours(run);
-    const mobile = mqSmallScreen.matches;
+    const frameCount = hours.length;
     return {
-      // Stream a bounded window of forecast hours instead of the whole run: only
-      // `maxCachedFrames` stay resident (down-pooled per frame, see below), with
-      // `prefetchAhead` decoded ahead of the playhead for smooth playback. Decode a
-      // few hours at a time so several in-flight GRIB decodes can't pile their
-      // transient buffers into a memory spike.
-      streaming: true,
-      maxCachedFrames: mobile ? MODEL_PLAYBACK_MAX_CACHED_MOBILE : MODEL_PLAYBACK_MAX_CACHED,
-      prefetchAhead: mobile ? MODEL_PLAYBACK_PREFETCH_MOBILE : MODEL_PLAYBACK_PREFETCH,
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
@@ -6194,14 +6312,21 @@ async function buildPlaybackProvider(opts = {}) {
       })),
       async load(f) {
         const grid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
-        // Down-pool for playback so the resident window of frames fits in memory;
-        // the pooled grid is what both the GPU fill and the scrubbed-hour readout use.
-        // The full-res `grid` here is transient and GC'd after this returns.
-        const pooled = poolGridForPlayback(grid);
-        const payload = prepareGridTexture(pooled, resolveGridProduct(grid.product));
-        payload.grid = pooled;
-        payload.overlays = prepareModelOverlayData(pooled);
-        pooled._overlayData = payload.overlays;
+        // Down-pool per the run-length budget; the full-res `grid` here is
+        // transient and GC'd after this returns.
+        const pooled = poolGridForLoop(grid, frameCount);
+        const payload = prepareGridTexture(pooled, resolveGridProduct(grid.product), { packed: true });
+        payload.meta = { product: pooled.product, time: pooled.time, fhour: f.fhour };
+        // Barb/contour overlays only when the whole run can afford them: bounded
+        // frame count AND a per-frame GeoJSON budget (grid geometry makes the
+        // count identical for every frame of a run, so the whole loop uniformly
+        // has overlays or uniformly doesn't — no mid-loop flicker).
+        if (pooled.overlays && frameCount <= MODEL_LOOP_OVERLAY_MAX_FRAMES) {
+          const overlays = prepareModelOverlayData(pooled);
+          if (overlays && countOverlayFeatures(overlays) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
+            payload.overlays = overlays;
+          }
+        }
         return payload;
       },
       render(payload) { drawModelPayload(payload); },
@@ -8529,6 +8654,7 @@ function saveSettings() {
         productId: state.productId,
         opacity: state.opacity,
         smooth: state.smooth,
+        smoothByMode: state.smoothByMode,
         basemap: state.basemap,
         uiTheme: state.uiTheme,
         mapStyle: state.mapStyle,
@@ -8617,6 +8743,17 @@ function applyStoredSettings(s) {
   // Migrate the old boolean smooth toggle (true ≈ medium) to the 0–3 level.
   if (typeof s.smooth === 'number') state.smooth = Math.max(0, Math.min(3, s.smooth | 0));
   else if (typeof s.smooth === 'boolean') state.smooth = s.smooth ? 2 : 0;
+  if (s.smoothByMode && typeof s.smoothByMode === 'object') {
+    for (const key of Object.keys(state.smoothByMode)) {
+      if (typeof s.smoothByMode[key] === 'number')
+        state.smoothByMode[key] = Math.max(0, Math.min(3, s.smoothByMode[key] | 0));
+    }
+  } else {
+    // Older blobs stored one global level — seed every mode with it.
+    for (const key of Object.keys(state.smoothByMode)) state.smoothByMode[key] = state.smooth;
+  }
+  // The active value follows the (restored) mode's own setting.
+  state.smooth = state.smoothByMode[state.mode] ?? state.smooth;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
   if (s.uiTheme === 'dark' || s.uiTheme === 'light') state.uiTheme = s.uiTheme;
   if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
@@ -8750,8 +8887,11 @@ function refreshIcons() {
 const SMOOTH_LABELS = ['None', 'Low', 'Medium', 'High'];
 
 // Apply a smoothing level (0–3) to every live data layer + the slider label.
+// The level is remembered per source mode (see state.smoothByMode); setMode
+// re-applies the target mode's own level on every switch.
 function applySmooth(level) {
   state.smooth = Math.max(0, Math.min(3, level | 0));
+  state.smoothByMode[state.mode] = state.smooth;
   if (el.smooth) el.smooth.value = String(state.smooth);
   if (el.smoothVal) el.smoothVal.textContent = SMOOTH_LABELS[state.smooth];
   if (state.radarLayer) state.radarLayer.setSmooth(state.smooth);

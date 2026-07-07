@@ -126,12 +126,18 @@ function mercY(lat) {
 }
 
 // Max-pool the grid down and encode each surviving cell as a 16-bit code.
-function buildTexture(grid, product) {
+// `packed: true` stores the codes as a bare Uint16Array (2 bytes/cell) instead
+// of the RGBA upload buffer (4 bytes/cell) — used by model playback, which
+// keeps every forecast hour of a run resident, so halving each frame matters.
+// Packed textures are expanded into a shared scratch RGBA buffer at upload time
+// (see expandPackedTexture), costing one transient copy per displayed frame.
+function buildTexture(grid, product, packed = false) {
   const { ni, nj, values, lon1, lat1, di, dj } = grid;
   const factor = Math.max(1, Math.ceil(Math.max(ni, nj) / MAX_DIM));
   const W = Math.ceil(ni / factor);
   const H = Math.ceil(nj / factor);
-  const data = new Uint8Array(W * H * 4);
+  const codes = packed ? new Uint16Array(W * H) : null;
+  const data = packed ? null : new Uint8Array(W * H * 4);
   const { lo, hi, floor } = product;
   const span = hi - lo || 1;
 
@@ -149,32 +155,57 @@ function buildTexture(grid, product) {
           if (v > best) best = v;
         }
       }
-      const o = (oy * W + ox) * 4;
       if (!(best >= floor) || Number.isNaN(best)) continue; // leave code 0 (missing)
       let t = (best - lo) / span;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
       const code = 1 + Math.round(t * 65534);
-      data[o] = code & 255;
-      data[o + 1] = (code >> 8) & 255;
+      if (packed) {
+        codes[oy * W + ox] = code;
+      } else {
+        const o = (oy * W + ox) * 4;
+        data[o] = code & 255;
+        data[o + 1] = (code >> 8) & 255;
+      }
     }
   }
   // A pooled cell aggregates `factor` source cells, so its center sits half the
   // extra span east/south of the source origin — shift lon1/lat1 to match, or
   // pooling drags the raster toward the north-west.
   return {
-    data, W, H,
+    data, packed: codes, W, H,
     lon1: lon1 + ((factor - 1) / 2) * di,
     lat1: lat1 - ((factor - 1) / 2) * dj,
     di: di * factor, dj: dj * factor,
   };
 }
 
+// Shared scratch for expanding packed 16-bit codes into the RGBA layout
+// texImage2D wants. One buffer serves every grid layer: expansion happens
+// synchronously inside _upload and the GL driver copies the pixels out before
+// returning, so reuse is safe.
+let expandScratch = null;
+function expandPackedTexture(tex) {
+  const n = tex.W * tex.H;
+  if (!expandScratch || expandScratch.length < n * 4) expandScratch = new Uint8Array(n * 4);
+  const out = expandScratch;
+  const codes = tex.packed;
+  out.fill(0, 0, n * 4);
+  for (let i = 0; i < n; i++) {
+    const c = codes[i];
+    if (!c) continue;
+    const o = i * 4;
+    out[o] = c & 255;
+    out[o + 1] = (c >> 8) & 255;
+  }
+  return out.subarray(0, n * 4);
+}
+
 // Build the GPU-ready payload for a grid (max-pooled texture + quad geometry +
 // color LUT) without touching any GL context. Pulling this out of the layer lets
 // playback precompute and cache the lightweight payload per frame — crucial
 // because a raw MRMS grid is ~100 MB, far too big to hold many of.
-export function prepareGridTexture(grid, product) {
-  const tex = buildTexture(grid, product);
+export function prepareGridTexture(grid, product, { packed = false } = {}) {
+  const tex = buildTexture(grid, product, packed);
   const sc = product.scale;
   // The quad must cover the cell *footprints*: (lon1, lat1) is the center of
   // cell (0,0), so extend half a cell beyond the first/last centers.
@@ -249,7 +280,8 @@ export function createGridLayer(id = 'mrms') {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, tex.data);
+      const pixels = tex.packed ? expandPackedTexture(tex) : tex.data;
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.W, tex.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 
       gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
