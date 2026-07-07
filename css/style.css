@@ -260,6 +260,44 @@ body.theme-dark .brand-mark {
   color: var(--ink-faint);
   font-family: 'JetBrains Mono', monospace;
 }
+
+/* ---- Collapsible sidebar sections ----
+   Section headers fold their panel body away (chevron mirrors .panel-details).
+   Rarely-used panels start collapsed so the sidebar reads as a short list of
+   headings instead of a wall of controls. */
+.panel-title.collapsible {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.panel-title.collapsible:hover { color: var(--ink-dim); }
+.panel-title.collapsible::before {
+  content: '';
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--ink-faint);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  margin-right: 7px;
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+.panel.collapsed > .panel-title.collapsible::before { transform: rotate(0deg); }
+/* Header-embedded toggles (Alerts ON/OFF etc.): keep the chevron + text left,
+   push the control to the right edge. */
+.panel-title.collapsible.alerts-title,
+.panel-title.collapsible.spc-title { justify-content: flex-start; }
+.panel-title.collapsible.alerts-title .alerts-toggle,
+.panel-title.collapsible.spc-title .alerts-toggle { margin-left: auto; }
+.panel.collapsed > *:not(.panel-title) { display: none !important; }
+.panel.collapsed > .panel-title { margin-bottom: 0; }
+.panel.grow.collapsed { flex: 0 0 auto; min-height: 0; }
+
+/* Light separators between sidebar sections give the stack visual grouping
+   without the boxed-in look of bordered panels. */
+.sidebar > .panel { border-top: 1px solid var(--panel-edge); padding-top: 14px; }
+.sidebar > .panel:first-of-type { border-top: none; padding-top: 0; }
 .mobile-sheet .panel-title {
   border-bottom: 1px solid var(--panel-edge);
   padding-bottom: 8px;
@@ -446,6 +484,10 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Keep layout/paint work inside the list: selecting a scan restyles rows
+     hundreds of entries deep, and containment stops that from invalidating the
+     rest of the page (part of the frame-stepping jank fix). */
+  contain: content;
 }
 .vol-group-label {
   font: 600 10px/1 'JetBrains Mono', monospace;
@@ -1191,6 +1233,7 @@ input[type='range']::-moz-range-thumb {
   flex-wrap: wrap;
   gap: 6px;
   max-height: 130px;
+  contain: content; /* keep tilt/fhour re-highlighting from reflowing the page */
 }
 .tilt-btn {
   background: var(--panel-soft);
@@ -1342,6 +1385,7 @@ input[type='range']::-moz-range-thumb {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  contain: content; /* alert refreshes re-render many rows — keep it local */
 }
 .alert-row {
   --ac: #6f8aa8;

@@ -51,11 +51,25 @@ export function normalizeMapStyle(s) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-function adminSource(map) {
-  const layers = map.getStyle().layers || [];
+// Locate the vector source (and its source-layer name) carrying the admin
+// boundary geometry. Normally discovered through an existing admin layer, but
+// some styles (satellite variants in particular) ship the streets tiles without
+// drawing any boundary layer from them — probe the style's vector sources by
+// name so borders can still be synthesised on those.
+function adminSourceInfo(map) {
+  const style = map.getStyle();
+  const layers = (style && style.layers) || [];
   const admin = layers.find((l) =>
     (l['source-layer'] === 'admin' || l['source-layer'] === 'boundary') && l.source);
-  return admin && admin.source;
+  if (admin) return { source: admin.source, sourceLayer: admin['source-layer'] };
+  const sources = (style && style.sources) || {};
+  for (const [id, s] of Object.entries(sources)) {
+    if (!s || s.type !== 'vector') continue;
+    const url = s.url || '';
+    if (id === 'composite' || /mapbox\.mapbox-streets/.test(url)) return { source: id, sourceLayer: 'admin' };
+    if (/openmaptiles/i.test(id) || /openmaptiles|maptiler/i.test(url)) return { source: id, sourceLayer: 'boundary' };
+  }
+  return null;
 }
 
 // Classify the style's native line layers so the right user control drives each.
@@ -178,10 +192,15 @@ const MAPBOX_ADMIN_LAYERS = new Set([
   'admin-1-boundary-bg', 'admin-1-boundary',
 ]);
 
+// Our own synthesised border layers (added when a style ships no admin lines of
+// its own) — excluded from the "native boundary" checks below so they aren't
+// mistaken for the style's own layers once added.
+const APP_BORDER_LAYERS = ['app-country-border-bg', 'app-country-border', 'app-state-border'];
+
 // Is this a country/state administrative *line* layer (any provider)? Catches
 // Mapbox's `admin-*` ids and OpenMapTiles' `boundary` source-layer (MapTiler).
 function isBoundaryLayer(ly) {
-  if (ly.type !== 'line' || ly.id === 'county-outline') return false;
+  if (ly.type !== 'line' || ly.id === 'county-outline' || APP_BORDER_LAYERS.includes(ly.id)) return false;
   const sl = ly['source-layer'] || '';
   return /^(admin|boundary|administrative)$/i.test(sl) || /admin|boundary|border/i.test(ly.id);
 }
@@ -198,12 +217,30 @@ function isBoundaryLayer(ly) {
 export function liftBoundaryLayers(map) {
   if (!map || !map.getStyle) return;
   const layers = (map.getStyle() && map.getStyle().layers) || [];
-  const symbolIdx = layers.findIndex((l) => l.type === 'symbol');
-  if (symbolIdx === -1) return;
-  for (let i = 0; i < symbolIdx; i++) {
+  // The data layers are inserted just beneath the style's first road layer
+  // (see dataLayerAnchor in app.js) — so the invariant we need is "no boundary
+  // line below the first road layer". The old check used the first *symbol*
+  // layer as the threshold, which broke on styles that put a few symbol layers
+  // (country labels, oneway arrows) below the boundaries — satellite-streets
+  // orders its stack that way, which left the borders buried under the data.
+  const roadIdx = layers.findIndex((l) =>
+    (l.type === 'line' || l.type === 'symbol') &&
+    (l['source-layer'] === 'road' || l['source-layer'] === 'transportation'));
+  if (roadIdx <= 0) return; // no roads, or nothing below them — data anchor already safe
+  // Lift buried boundaries to the base of the label stack: the first non-road
+  // symbol above the road block (or the top of the stack if none).
+  let target;
+  for (let i = roadIdx + 1; i < layers.length; i++) {
+    const l = layers[i];
+    if (l.type === 'symbol' && l['source-layer'] !== 'road' && l['source-layer'] !== 'transportation') {
+      target = l.id;
+      break;
+    }
+  }
+  for (let i = 0; i < roadIdx; i++) {
     const ly = layers[i];
     if (!isBoundaryLayer(ly)) continue;
-    try { map.moveLayer(ly.id, layers[symbolIdx].id); } catch (_) { /* stale id */ }
+    try { map.moveLayer(ly.id, target); } catch (_) { /* stale id */ }
   }
 }
 
@@ -271,20 +308,26 @@ function styleBoundaries(map, anchor, o) {
     map.setLayoutProperty(id, 'visibility', 'visible');
   }
 
+  // Fallback country/state borders: some styles carry the streets/boundary
+  // tiles but draw no admin line layers from them at all (the "country borders
+  // don't show on the satellite basemap" bug). When neither the Mapbox admin-*
+  // repaints nor the generic pass above found a native boundary line, draw our
+  // own from the style's admin source so borders exist on every basemap.
+  const info = adminSourceInfo(map);
+  const hasNativeBoundary = (map.getStyle().layers || []).some(isBoundaryLayer);
+  if (!hasNativeBoundary && info) ensureFallbackBorders(map, anchor, info, col, w);
+
   // County (admin_level 2) lines aren't drawn by the stock styles; add our own
   // once, then keep its paint in sync on later calls.
   if (map.getLayer('county-outline')) {
     map.setPaintProperty('county-outline', 'line-color', withAlpha(col, 0.35));
     map.setPaintProperty('county-outline', 'line-width', w(5, 0.3, 8, 0.7, 11, 1.1));
   } else {
-    const source = adminSource(map);
-    if (!source) return;
-    const adminLayer = (map.getStyle().layers || []).find((l) =>
-      l.source === source && (l['source-layer'] === 'admin' || l['source-layer'] === 'boundary'));
+    if (!info) return;
     map.addLayer(
       {
-        id: 'county-outline', type: 'line', source,
-        'source-layer': adminLayer && adminLayer['source-layer'] ? adminLayer['source-layer'] : 'admin',
+        id: 'county-outline', type: 'line', source: info.source,
+        'source-layer': info.sourceLayer,
         filter: [
           'all',
           ['match', ['get', 'admin_level'], [2, '2', 6, '6'], true, false],
@@ -301,6 +344,51 @@ function styleBoundaries(map, anchor, o) {
       },
       anchor
     );
+  }
+}
+
+// Add (or restyle) the app's own country + state border lines from the style's
+// admin vector source. admin_level values differ per schema: Mapbox streets-v8
+// `admin` uses 0 = country / 1 = state, OpenMapTiles `boundary` uses 2 / 4.
+function ensureFallbackBorders(map, anchor, info, col, w) {
+  const mapboxSchema = info.sourceLayer === 'admin';
+  const countryLevel = mapboxSchema ? 0 : 2;
+  const stateLevel = mapboxSchema ? 1 : 4;
+  const levelFilter = (lvl) => [
+    'all',
+    ['match', ['get', 'admin_level'], [lvl, String(lvl)], true, false],
+    ['any', ['!', ['has', 'maritime']], ['==', ['get', 'maritime'], 'false'], ['==', ['get', 'maritime'], 0]],
+    ['any', ['!', ['has', 'disputed']], ['==', ['get', 'disputed'], 'false'], ['==', ['get', 'disputed'], 0]],
+    ['any', ['!', ['has', 'worldview']], ['match', ['get', 'worldview'], ['all', 'US'], true, false]],
+  ];
+  const defs = [
+    { id: 'app-country-border-bg', lvl: countryLevel, paint: {
+      'line-color': 'rgba(8,14,24,0.5)', 'line-opacity': 1,
+      'line-width': w(3, 2.6, 7, 3.8, 11, 4.8),
+    } },
+    { id: 'app-country-border', lvl: countryLevel, paint: {
+      'line-color': col, 'line-opacity': 1,
+      'line-width': w(3, 1.1, 7, 1.9, 11, 2.5),
+    } },
+    { id: 'app-state-border', lvl: stateLevel, paint: {
+      'line-color': col, 'line-opacity': 0.85, 'line-dasharray': [3, 2],
+      'line-width': w(3, 0.5, 7, 1, 11, 1.5),
+    } },
+  ];
+  for (const d of defs) {
+    if (map.getLayer(d.id)) {
+      for (const [k, v] of Object.entries(d.paint)) map.setPaintProperty(d.id, k, v);
+    } else {
+      map.addLayer(
+        {
+          id: d.id, type: 'line', source: info.source, 'source-layer': info.sourceLayer,
+          filter: levelFilter(d.lvl),
+          layout: { 'line-join': 'round', 'line-cap': 'round' },
+          paint: d.paint,
+        },
+        anchor
+      );
+    }
   }
 }
 
