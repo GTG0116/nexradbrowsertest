@@ -685,19 +685,20 @@ function clearRadarSource(map) {
 // hardware but capped so we don't spawn a worker per frame or hog memory.
 const DECODE_POOL_SIZE = isSmallScreenNow()
   ? 1
-  : Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+  : Math.min(6, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
 let decodeSeq = 0;
-let decodeRR = 0;
 const pending = new Map();
 const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
   const w = new Worker(new URL('./decoder.worker.js', import.meta.url), {
     type: 'module',
   });
+  w.busy = 0; // outstanding decode jobs on this worker
   w.onmessage = (e) => {
     const { id, ok, result, error } = e.data;
     const job = pending.get(id);
     if (!job) return;
     pending.delete(id);
+    w.busy = Math.max(0, w.busy - 1);
     if (ok) job.resolve(result);
     else job.reject(new Error(error));
   };
@@ -705,13 +706,92 @@ const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
 });
 function decodeVolume(bytes) {
   const id = ++decodeSeq;
-  // Round-robin across the pool; jobs are keyed by a global id so replies route
-  // back correctly regardless of which worker answers first.
-  const w = decodeWorkers[decodeRR++ % decodeWorkers.length];
+  // Hand the job to the least-loaded worker (round-robin used to stack several
+  // decodes on one worker while others sat idle when job durations varied); jobs
+  // are keyed by a global id so replies route back correctly regardless of which
+  // worker answers first.
+  let w = decodeWorkers[0];
+  for (const cand of decodeWorkers) if (cand.busy < w.busy) w = cand;
+  w.busy++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     w.postMessage({ id, bytes }, [bytes.buffer]); // zero-copy transfer
   });
+}
+
+// ---------------------------------------------------------------------------
+// Decoded-frame caches — the key to instant arrow-key frame stepping.
+//
+// Stepping through scans used to re-download and re-decode the volume on every
+// keypress. Now each decoded Level II volume (and Level III frame) is kept in a
+// small LRU, and after a scan displays its neighbours are prefetched in the
+// background, so stepping to an adjacent frame is a synchronous cache hit.
+// Caches are bounded by count (decoded volumes are multi-MB) and keyed by the
+// globally-unique S3 object key, so stale entries from another site/day simply
+// age out; small screens keep far fewer frames to avoid memory pressure.
+// ---------------------------------------------------------------------------
+const VOLUME_CACHE_MAX = isSmallScreenNow() ? 3 : 8;
+const L3_CACHE_MAX = isSmallScreenNow() ? 6 : 16;
+const volumeCache = new Map(); // L2 key -> decoded volume (Map order = LRU)
+const l3Cache = new Map(); // `${productId}|${key}` -> decoded L3 frame
+const volumeInflight = new Map(); // key -> in-flight Promise (dedupes prefetch vs. click)
+
+function lruGet(cache, key) {
+  const v = cache.get(key);
+  if (v !== undefined) { cache.delete(key); cache.set(key, v); } // refresh recency
+  return v;
+}
+function lruPut(cache, key, value, max) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > max) cache.delete(cache.keys().next().value);
+}
+
+// Synchronous lookup: the LRU first, then a frame the background playback warm
+// already decoded (radar playback payloads *are* decoded volumes, keyed by the
+// same S3 key).
+function peekDecodedVolume(key) {
+  const hit = lruGet(volumeCache, key);
+  if (hit) return hit;
+  const pb = state.playback;
+  if (pb && pb.cache) {
+    const warm = pb.cache.get(key);
+    if (warm && warm.sweeps) {
+      lruPut(volumeCache, key, warm, VOLUME_CACHE_MAX);
+      return warm;
+    }
+  }
+  return null;
+}
+
+function getDecodedVolume(key, onProgress) {
+  const hit = peekDecodedVolume(key);
+  if (hit) return Promise.resolve(hit);
+  const inflight = volumeInflight.get(key);
+  if (inflight) return inflight;
+  const job = (async () => {
+    const bytes = await fetchVolume(key, onProgress);
+    const volume = await decodeVolume(bytes);
+    lruPut(volumeCache, key, volume, VOLUME_CACHE_MAX);
+    return volume;
+  })();
+  volumeInflight.set(key, job);
+  job.finally(() => volumeInflight.delete(key)).catch(() => {});
+  return job;
+}
+
+// Warm the scans adjacent to the one just shown so the next arrow-key step hits
+// the cache. Runs quietly in the background on the decode pool; skipped on small
+// screens (memory) and never re-requests anything cached or already in flight.
+function prefetchAdjacentVolumes(key) {
+  if (mqSmallScreen.matches || isL3Product(state.productId)) return;
+  const i = state.volumes.findIndex((v) => v.key === key);
+  if (i < 0) return;
+  for (const j of [i - 1, i + 1, i - 2]) {
+    const v = state.volumes[j];
+    if (!v || volumeCache.has(v.key) || volumeInflight.has(v.key)) continue;
+    getDecodedVolume(v.key).catch(() => {});
+  }
 }
 
 const state = {
@@ -792,6 +872,9 @@ const state = {
   _outlookSourcePrevOn: null,
   shownSweep: null,
   shownSite: null,
+  // Per-panel collapsed state for the sidebar sections (persisted). Rarely-used
+  // panels default collapsed so the sidebar isn't a wall of controls.
+  panelCollapsed: {},
   inspect: false,
   // Last-loaded HRRR sounding profile (sounding.js), re-rendered on resize.
   soundingProfile: null,
@@ -1616,14 +1699,33 @@ function buildVolumeList() {
     el.volumeList.innerHTML = '<div class="empty">No scans found for this day.</div>';
     return;
   }
+  const frag = document.createDocumentFragment();
   [...state.volumes].reverse().forEach((v) => {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
+    btn.dataset.key = v.key;
     if (v.key === state.volumeKey) btn.classList.add('active');
     btn.innerHTML = `<span class="dot"></span>${v.label}`;
     btn.addEventListener('click', () => loadVolume(v.key));
-    el.volumeList.appendChild(btn);
+    frag.appendChild(btn);
   });
+  el.volumeList.appendChild(frag);
+}
+
+// Move the active highlight in the scan/scene list without rebuilding it.
+// Rebuilding hundreds of buttons on every frame selection was a visible hitch
+// when stepping frames with the arrow keys.
+function markActiveVolume(key, rebuild = buildVolumeList) {
+  if (!el.volumeList) return;
+  let found = false;
+  for (const b of el.volumeList.querySelectorAll('button.vol-btn')) {
+    const active = b.dataset.key === key;
+    b.classList.toggle('active', active);
+    if (active) found = true;
+  }
+  // Key not in the rendered list (list stale or built for another day) — fall
+  // back to a full rebuild so the UI can't silently show no selection.
+  if (!found && key != null) rebuild();
 }
 
 function buildLegend() {
@@ -2113,18 +2215,49 @@ async function loadL3List() {
   }
 }
 
-// Download + decode one Level III frame and draw it as a single-tilt sweep.
+// Download + decode one Level III frame (through the small L3 LRU) and draw it
+// as a single-tilt sweep. Frames are small, so neighbours are prefetched too —
+// arrow-key stepping through L3 products stays instant like L2.
+function getDecodedL3(key, onProgress) {
+  const ck = `${state.productId}|${key}`;
+  const hit = lruGet(l3Cache, ck);
+  if (hit) return Promise.resolve(hit);
+  const inflight = volumeInflight.get(ck);
+  if (inflight) return inflight;
+  const job = loadLevel3(state.site, state.productId, key, onProgress).then(({ decoded }) => {
+    lruPut(l3Cache, ck, decoded, L3_CACHE_MAX);
+    return decoded;
+  });
+  volumeInflight.set(ck, job);
+  job.finally(() => volumeInflight.delete(ck)).catch(() => {});
+  return job;
+}
+
+function prefetchAdjacentL3(key) {
+  if (mqSmallScreen.matches) return;
+  const i = state.volumes.findIndex((v) => v.key === key);
+  if (i < 0) return;
+  for (const j of [i - 1, i + 1]) {
+    const v = state.volumes[j];
+    if (!v || l3Cache.has(`${state.productId}|${v.key}`)) continue;
+    getDecodedL3(v.key).catch(() => {});
+  }
+}
+
 async function loadL3Frame(key) {
   state.volumeKey = key;
-  buildVolumeList();
+  markActiveVolume(key);
   const seq = ++volumeLoadSeq;
-  setStatus('downloading…', true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
-  el.decoding.classList.remove('show');
+  const cached = l3Cache.has(`${state.productId}|${key}`);
+  if (!cached) {
+    setStatus('downloading…', true);
+    el.progress.style.width = '0%';
+    el.progress.classList.add('show');
+    el.decoding.classList.remove('show');
+  }
   try {
-    const { decoded } = await loadLevel3(state.site, state.productId, key, (p) => {
-      el.progress.style.width = Math.round(p * 100) + '%';
+    const decoded = await getDecodedL3(key, (p) => {
+      if (seq === volumeLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
     });
     if (seq !== volumeLoadSeq) return;
     state.l3.decoded = decoded;
@@ -2137,6 +2270,7 @@ async function loadL3Frame(key) {
     updateMeta();
     displaySweep(decoded.sweep, site);
     setStatus(`loaded · ${decoded.sweep.radials.length} radials`);
+    prefetchAdjacentL3(key);
   } catch (e) {
     if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
     console.error(e);
@@ -2152,21 +2286,25 @@ let volumeLoadSeq = 0;
 async function loadVolume(key) {
   if (isL3Product(state.productId)) return loadL3Frame(key);
   state.volumeKey = key;
-  buildVolumeList();
+  markActiveVolume(key);
   const seq = ++volumeLoadSeq;
-  setStatus('downloading volume…', true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
-  el.decoding.classList.remove('show');
+  // Cache hit → skip the download/decode chrome entirely (no progress bar or
+  // status flicker), so arrow-key stepping through warmed scans is instant.
+  const cached = peekDecodedVolume(key);
+  if (!cached) {
+    setStatus('downloading volume…', true);
+    el.progress.style.width = '0%';
+    el.progress.classList.add('show');
+    el.decoding.classList.remove('show');
+  }
   try {
-    const bytes = await fetchVolume(key, (p) => {
+    const volume = cached || await getDecodedVolume(key, (p) => {
+      if (seq !== volumeLoadSeq) return;
       el.progress.style.width = Math.round(p * 100) + '%';
+      // Download finished → the decode worker owns the wait from here.
+      if (p >= 1) { setStatus('decoding…', true); el.decoding.classList.add('show'); }
     });
     if (seq !== volumeLoadSeq) return; // a newer selection superseded this one
-    setStatus('decoding…', true);
-    el.decoding.classList.add('show');
-    const volume = await decodeVolume(bytes);
-    if (seq !== volumeLoadSeq) return;
     state.volume = volume;
     state.sweeps = volume.sweeps;
 
@@ -2187,6 +2325,7 @@ async function loadVolume(key) {
     updateMeta();
     renderRadar();
     setStatus(`loaded · ${volume.radialCount} radials`);
+    prefetchAdjacentVolumes(key);
   } catch (e) {
     if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
     console.error(e);
@@ -2728,14 +2867,17 @@ function buildSatList() {
     el.volumeList.innerHTML = '<div class="empty">No scenes found.</div>';
     return;
   }
+  const frag = document.createDocumentFragment();
   [...state.sat.scenes].reverse().forEach((v) => {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
+    btn.dataset.key = v.key;
     if (v.key === state.sat.sceneKey) btn.classList.add('active');
     btn.innerHTML = `<span class="dot"></span>${v.label}`;
     btn.addEventListener('click', () => loadSatScene(v.key));
-    el.volumeList.appendChild(btn);
+    frag.appendChild(btn);
   });
+  el.volumeList.appendChild(frag);
 }
 
 async function loadSatScenes() {
@@ -2764,7 +2906,7 @@ async function loadSatScenes() {
 let satLoadSeq = 0;
 async function loadSatScene(key) {
   state.sat.sceneKey = key;
-  buildSatList();
+  markActiveVolume(key, buildSatList);
   const seq = ++satLoadSeq;
   setStatus(`downloading ${satProviderName()}…`, true);
   el.progress.style.width = '0%';
@@ -2957,14 +3099,17 @@ function buildMrmsList() {
     el.volumeList.innerHTML = '<div class="empty">No frames found for this day.</div>';
     return;
   }
+  const frag = document.createDocumentFragment();
   [...state.mrms.frames].reverse().forEach((v) => {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
+    btn.dataset.key = v.key;
     if (v.key === state.mrms.frameKey) btn.classList.add('active');
     btn.innerHTML = `<span class="dot"></span>${v.label}`;
     btn.addEventListener('click', () => loadMrmsFrame(v.key));
-    el.volumeList.appendChild(btn);
+    frag.appendChild(btn);
   });
+  el.volumeList.appendChild(frag);
 }
 
 async function loadMrmsList() {
@@ -2993,7 +3138,7 @@ async function loadMrmsList() {
 let mrmsLoadSeq = 0;
 async function loadMrmsFrame(key) {
   state.mrms.frameKey = key;
-  buildMrmsList();
+  markActiveVolume(key, buildMrmsList);
   const seq = ++mrmsLoadSeq;
   setStatus('downloading MRMS…', true);
   el.progress.style.width = '0%';
@@ -3123,14 +3268,17 @@ function buildObservationList() {
     el.volumeList.innerHTML = '<div class="empty">No RTMA frames found for this day.</div>';
     return;
   }
+  const frag = document.createDocumentFragment();
   [...state.observations.frames].reverse().forEach((v) => {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
+    btn.dataset.key = v.key;
     if (v.key === state.observations.frameKey) btn.classList.add('active');
     btn.innerHTML = `<span class="dot"></span>${v.label}`;
     btn.addEventListener('click', () => loadObservationFrame(v.key));
-    el.volumeList.appendChild(btn);
+    frag.appendChild(btn);
   });
+  el.volumeList.appendChild(frag);
 }
 
 async function loadObservationList() {
@@ -3160,7 +3308,7 @@ let observationLoadSeq = 0;
 async function loadObservationFrame(key) {
   if (!key) return;
   state.observations.frameKey = key;
-  buildObservationList();
+  markActiveVolume(key, buildObservationList);
   const seq = ++observationLoadSeq;
   const product = OBS_PRODUCTS[state.observations.productId];
   setStatus(`downloading RTMA ${product ? product.name : ''}...`, true);
@@ -3446,19 +3594,30 @@ function buildFhourList() {
   el.fhourList.innerHTML = '';
   const run = currentModelRun();
   if (!run) { el.fhourList.innerHTML = '<div class="empty">No run selected.</div>'; return; }
+  const frag = document.createDocumentFragment();
   for (const f of forecastHours(run)) {
     const btn = document.createElement('button');
     btn.className = 'tilt-btn';
+    btn.dataset.fhour = String(f);
     if (f === state.models.fhour) btn.classList.add('active');
     btn.textContent = 'F' + p2(f);
     btn.addEventListener('click', () => selectFhour(f));
-    el.fhourList.appendChild(btn);
+    frag.appendChild(btn);
   }
+  el.fhourList.appendChild(frag);
 }
 
 function selectFhour(f) {
   state.models.fhour = f;
-  buildFhourList();
+  // Re-highlight in place; rebuilding a 200-hour list per arrow-key step was a
+  // visible hitch on global runs.
+  let found = false;
+  for (const b of el.fhourList.querySelectorAll('button.tilt-btn')) {
+    const active = Number(b.dataset.fhour) === f;
+    b.classList.toggle('active', active);
+    if (active) found = true;
+  }
+  if (!found) buildFhourList();
   loadModelFrame();
 }
 
@@ -5589,6 +5748,55 @@ function setupSpcOutlook() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Collapsible sidebar panels — every section header becomes a click target that
+// folds its body away (chevron in CSS), so the sidebar reads as a short list of
+// headings instead of a wall of controls. The rarely-touched sections start
+// collapsed; each panel's state is persisted. The same DOM nodes move into the
+// mobile sheet pages, so the behaviour carries over there for free.
+// ---------------------------------------------------------------------------
+const COLLAPSIBLE_PANELS = [
+  // [panel id, collapsed by default]
+  ['sourcePanel', false],
+  ['layoutPanel', true],
+  ['layerPanel', true],
+  ['productPanel', false],
+  ['tiltPanel', false],
+  ['fhourPanel', false],
+  ['outlookDetailPanel', false],
+  ['alertsPanel', false],
+  ['cyclonesPanel', true],
+];
+
+function setupCollapsiblePanels() {
+  for (const [id, defCollapsed] of COLLAPSIBLE_PANELS) {
+    const panel = el[id] || document.getElementById(id);
+    if (!panel) continue;
+    const title = panel.querySelector('.panel-title');
+    if (!title) continue;
+    title.classList.add('collapsible');
+    const stored = state.panelCollapsed[id];
+    panel.classList.toggle('collapsed', typeof stored === 'boolean' ? stored : defCollapsed);
+    title.addEventListener('click', (e) => {
+      // Clicks on a control inside the header (ON/OFF toggles) act on the
+      // control, not the fold — but do reveal a collapsed panel's body so the
+      // result of flipping the toggle is never hidden.
+      if (e.target.closest('button')) {
+        if (panel.classList.contains('collapsed')) {
+          panel.classList.remove('collapsed');
+          state.panelCollapsed[id] = false;
+          saveSettings();
+        }
+        return;
+      }
+      const collapsed = !panel.classList.contains('collapsed');
+      panel.classList.toggle('collapsed', collapsed);
+      state.panelCollapsed[id] = collapsed;
+      saveSettings();
+    });
+  }
+}
+
 // Distribute the control panels into the mobile swipe carousel pages. Page 0 is
 // the controls for the current product; page 1 the source settings (its mode
 // switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
@@ -5918,7 +6126,7 @@ async function buildPlaybackProvider(opts = {}) {
     const frames = allFrames ? state.volumes : await buildRadarPlaybackFrames(n);
     return {
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
-      async load(f) { return await decodeVolume(await fetchVolume(f.key)); },
+      async load(f) { return await getDecodedVolume(f.key); },
       render(vol) { displaySweep(pickSweep(vol.sweeps), vol.site); },
       idle() { displaySweep(currentSweep(), state.volume && state.volume.site); },
     };
@@ -8357,6 +8565,7 @@ function saveSettings() {
             }
           : { ...state._spc, opacity: state.spcOpacity },
         playbackFrames: state.playbackFrames,
+        panelCollapsed: state.panelCollapsed,
         draw: state.draw,
         keybinds: state.keybinds,
         dockTool: state.dockTool,
@@ -8420,6 +8629,12 @@ function applyStoredSettings(s) {
   if (s.mapProvider === 'mapbox' || s.mapProvider === 'maptiler') state.mapProvider = s.mapProvider;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
+  if (s.panelCollapsed && typeof s.panelCollapsed === 'object') {
+    state.panelCollapsed = {};
+    for (const [key, val] of Object.entries(s.panelCollapsed)) {
+      if (typeof val === 'boolean') state.panelCollapsed[key] = val;
+    }
+  }
   if (typeof s.metarsOn === 'boolean') state._metarsOn = s.metarsOn;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
   if (s.cityValuesProducts && typeof s.cityValuesProducts === 'object') {
@@ -8996,6 +9211,7 @@ function init() {
 
   mqSmallScreen.addEventListener('change', applyResponsiveLayout);
   applyResponsiveLayout();
+  setupCollapsiblePanels();
 
   window.addEventListener('resize', () => {
     if (state.map) state.map.resize();
