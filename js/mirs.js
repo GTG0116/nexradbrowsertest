@@ -264,22 +264,25 @@ async function readVar(h5, name, channel) {
   return out;
 }
 
-// Rasterise a swath onto a regular lat/lon grid. Each footprint is splatted
-// into a small distance-weighted neighbourhood so the gaps between neighbouring
-// fields of view (up to ~60 km at the scan edge) close without smearing.
+// Rasterise a swath onto a regular lat/lon grid. The ATMS footprint spacing is
+// very non-uniform across the scan — ~16 km at nadir but ~67 km at the swath
+// edges (where the slant view spreads the fields of view apart) — so a fixed
+// splat radius either blurs the nadir or leaves wide empty stripes at the edges
+// (the "streaks" through the imagery). Instead every footprint is splatted with
+// a radius sized to its *own* neighbour spacing, so the disks always overlap
+// their neighbours no matter where in the scan they sit, and a Gaussian weight
+// blends the overlaps smoothly.
 const GRID_STEP = 0.1; // degrees ≈ 11 km, finer than the ~16 km nadir footprint
 const MERC_LAT = 85.05;
 
-function swathToGrid(lats, lons, vals) {
+function swathToGrid(lats, lons, vals, S, F) {
   // Latitude range of the valid samples (longitude always spans the full circle
   // — a 33-minute segment of a polar orbit crosses most longitudes).
   let latMin = Infinity, latMax = -Infinity;
   for (let i = 0; i < vals.length; i++) {
-    if (Number.isNaN(vals[i])) continue;
-    const la = lats[i];
-    if (Number.isNaN(la)) continue;
-    if (la < latMin) latMin = la;
-    if (la > latMax) latMax = la;
+    if (Number.isNaN(vals[i]) || Number.isNaN(lats[i])) continue;
+    if (lats[i] < latMin) latMin = lats[i];
+    if (lats[i] > latMax) latMax = lats[i];
   }
   // Some retrievals (e.g. snowfall rate) can be missing across a whole granule;
   // draw nothing rather than erroring the scene.
@@ -296,36 +299,71 @@ function swathToGrid(lats, lons, vals) {
   const nj = Math.max(1, Math.ceil((latMax - latMin) / GRID_STEP));
   const lat1 = latMax;
   const lon1 = -180;
-  const wsum = new Float32Array(ni * nj);
-  const vsum = new Float32Array(ni * nj);
+  const wsum = new Float64Array(ni * nj);
+  const vsum = new Float64Array(ni * nj);
 
-  const R = 2; // splat radius in cells
-  for (let s = 0; s < vals.length; s++) {
-    const v = vals[s];
-    if (Number.isNaN(v)) continue;
-    const la = lats[s], lo = lons[s];
-    if (Number.isNaN(la) || Number.isNaN(lo)) continue;
-    const cj = (lat1 - la) / GRID_STEP;
-    const ci = (((lo - lon1) % 360) + 360) % 360 / GRID_STEP;
-    const j0 = Math.round(cj), i0 = Math.round(ci);
-    for (let dj = -R; dj <= R; dj++) {
-      const j = j0 + dj;
-      if (j < 0 || j >= nj) continue;
-      for (let di = -R; di <= R; di++) {
-        const i = (i0 + di + ni) % ni; // longitude wraps
-        const dd = (cj - j) * (cj - j) + (ci - i0 - di) * (ci - i0 - di);
-        const w = 1 / (0.35 + dd);
-        const o = j * ni + i;
-        wsum[o] += w;
-        vsum[o] += v * w;
+  // Neighbour spacing in grid cells between two swath samples, longitude scaled
+  // by latitude so a degree of longitude counts for what it's physically worth.
+  const cellGap = (idxA, idxB) => {
+    const dLat = (lats[idxA] - lats[idxB]) / GRID_STEP;
+    let dLon = lons[idxA] - lons[idxB];
+    if (dLon > 180) dLon -= 360; else if (dLon < -180) dLon += 360;
+    dLon = (dLon * Math.cos(lats[idxA] * Math.PI / 180)) / GRID_STEP;
+    return Math.hypot(dLat, dLon);
+  };
+
+  for (let s = 0; s < S; s++) {
+    for (let f = 0; f < F; f++) {
+      const idx = s * F + f;
+      const v = vals[idx];
+      if (Number.isNaN(v)) continue;
+      const la = lats[idx], lo = lons[idx];
+      if (Number.isNaN(la) || Number.isNaN(lo)) continue;
+
+      // Radius = a bit over half the larger neighbour gap, so each footprint's
+      // disk reaches its across- and along-track neighbours and the union has no
+      // holes (clamped so a lone/edge sample still paints, and capped so a bad
+      // geolocation can't splat a huge blob).
+      const across = f + 1 < F ? cellGap(idx, idx + 1) : cellGap(idx, idx - 1);
+      const along = s + 1 < S ? cellGap(idx, idx + F) : cellGap(idx, idx - F);
+      // `rad` is a *physical* radius in cells (cellGap already scaled longitude
+      // by cos lat). The disk is a circle on the ground, so in grid space it is
+      // an ellipse — stretched in longitude by 1/cos(lat), since a longitude
+      // cell shrinks toward the poles. Splatting in raw grid cells instead left
+      // the footprints as disconnected dots at high latitude (the "streaks").
+      let rad = 0.72 * Math.max(across, along);
+      if (!(rad >= 1)) rad = 1;
+      if (rad > 9) rad = 9;
+      const rad2 = rad * rad;
+      const cosLat = Math.max(0.05, Math.cos(la * Math.PI / 180));
+      const Rj = Math.ceil(rad);
+      const Ri = Math.min(ni >> 1, Math.ceil(rad / cosLat)); // wider longitude reach near poles
+
+      const cj = (lat1 - la) / GRID_STEP;
+      const ci = ((((lo - lon1) % 360) + 360) % 360) / GRID_STEP;
+      const j0 = Math.round(cj), i0 = Math.round(ci);
+      for (let dj = -Rj; dj <= Rj; dj++) {
+        const j = j0 + dj;
+        if (j < 0 || j >= nj) continue;
+        const ddj = cj - j;
+        for (let di = -Ri; di <= Ri; di++) {
+          const ddi = (ci - (i0 + di)) * cosLat; // longitude distance in physical cells
+          const d2 = ddi * ddi + ddj * ddj;
+          if (d2 > rad2) continue; // outside this footprint's disk
+          const i = (i0 + di + ni) % ni; // longitude wraps
+          const w = Math.exp(-2.3 * d2 / rad2); // ~0.1 at the disk edge
+          const o = j * ni + i;
+          wsum[o] += w;
+          vsum[o] += v * w;
+        }
       }
     }
   }
 
   const values = new Float32Array(ni * nj);
-  // Footprints two cells apart contribute ~w=0.2 at the midpoint; anything
-  // fainter than that is extrapolation past the swath edge — leave it empty.
-  const MIN_W = 0.35;
+  // A cell needs a real footprint contribution to draw; the threshold keeps the
+  // fill from bleeding more than a fraction of a footprint past the swath edge.
+  const MIN_W = 0.10;
   for (let o = 0; o < values.length; o++)
     values[o] = wsum[o] >= MIN_W ? vsum[o] / wsum[o] : NaN;
   return { proj: 'latlon', ni, nj, lon1, lat1, di: GRID_STEP, dj: GRID_STEP, scanMode: 0, values };
@@ -348,8 +386,17 @@ async function openGranule(source, key, onProgress) {
     fileCache.set(ck, (async () => {
       const bytes = await fetchGranule(source.bucket, key, onProgress);
       const h5 = new HDF5File(bytes);
-      const [lats, lons] = await Promise.all([readVar(h5, 'Latitude'), readVar(h5, 'Longitude')]);
-      return { h5, lats, lons };
+      // Keep the swath shape (scanlines × fields of view) — the rasteriser needs
+      // it to size each footprint's splat from its neighbours' spacing.
+      const latVar = await h5.readVariable('Latitude');
+      const lonVar = await h5.readVariable('Longitude');
+      const toPhys = (v) => {
+        const fill = v.fill != null ? Number(v.fill) : -999;
+        const out = new Float32Array(v.data.length);
+        for (let i = 0; i < out.length; i++) out[i] = v.data[i] <= -999 || v.data[i] === fill ? NaN : v.data[i];
+        return out;
+      };
+      return { h5, lats: toPhys(latVar), lons: toPhys(lonVar), S: latVar.dims[0], F: latVar.dims[1] };
     })());
     lruTrim(fileCache, FILE_CACHE_MAX);
   }
@@ -370,9 +417,9 @@ export async function loadMirsGrid(satKey, key, productId, onProgress) {
   if (!source) throw new Error('unknown MIRS source');
   const ck = `${source.bucket}/${key}#${product.id}`;
   if (gridCache.has(ck)) return gridCache.get(ck);
-  const { h5, lats, lons } = await openGranule(source, key, onProgress);
+  const { h5, lats, lons, S, F } = await openGranule(source, key, onProgress);
   const vals = await readVar(h5, product.varName, product.channel);
-  const grid = swathToGrid(lats, lons, vals);
+  const grid = swathToGrid(lats, lons, vals, S, F);
   grid.product = product;
   grid.time = granuleTime(key);
   grid.key = key;
