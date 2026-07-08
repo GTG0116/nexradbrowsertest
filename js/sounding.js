@@ -39,8 +39,6 @@ const SOUNDING_SOURCE = {
   hgefs:     { label: 'Hybrid GEFS Mean', unavailable: true },
   ecmwfens:  { label: 'ECMWF ENS Mean',   unavailable: true },
   aifsens:   { label: 'AIFS ENS Mean',    unavailable: true },
-  href:      { label: 'HREF Mean',        unavailable: true },
-  refs:      { label: 'REFS Mean',        unavailable: true },
   hfsa:       { label: 'HAFS-A (nest)',  native: true },
   hfsaparent: { label: 'HAFS-A Parent',  native: true },
   hfsb:       { label: 'HAFS-B (nest)',  native: true },

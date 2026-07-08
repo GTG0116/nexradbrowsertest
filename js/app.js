@@ -3562,8 +3562,8 @@ function initModelSelects() {
   // A saved product may not exist on the (saved) model — fall back if so.
   if (!modelSupports(state.models.modelKey, state.models.productId))
     state.models.productId = defaultProductFor(state.models.modelKey);
-  // The CORS-restricted models (HREF/REFS on hosts without CORS headers) only
-  // work through a user-supplied proxy; wire it up before anything probes them.
+  // Wire up the optional model-data CORS proxy (localStorage `modelDataProxy`)
+  // before anything probes a source that opts into it via `corsRestricted`.
   setModelProxy(localStorage.getItem('modelDataProxy') || '');
   el.modelSelect.innerHTML = '';
   // Group the long model list: deterministic first, then ensembles, then the
@@ -3852,7 +3852,10 @@ function selectModelRun(key) {
   buildModelList();
   buildStormList();
   buildFhourList();
-  loadModelFrame();
+  // If a loop is running, switch it over to the newly-selected run's frames
+  // immediately (rather than leaving the old run playing until playback closes).
+  if (state.playback && state.playback.active) state.playback.restart();
+  else loadModelFrame();
 }
 
 // Load the currently-selected run + forecast hour.
@@ -6638,6 +6641,35 @@ function createPlayback() {
       el.dockTime.textContent = this.frames[0].label;
       setStatus('loading playback…', true);
 
+      this.loadInChunks();
+    },
+
+    // Rebuild the loop in place for a changed context — e.g. the user picked a
+    // different model run (19z → 18z) while a loop is running. Swap in the new
+    // provider's frames and start loading them without tearing down the playback
+    // chrome, so the loop switches straight over to the newly-selected run
+    // instead of waiting for the user to close playback first. Falls back to a
+    // fresh start() if a loop isn't actually active.
+    async restart() {
+      if (!this.active) return this.start();
+      this.warmSeq++;
+      this.loadSeq++; // cancel any in-flight loader from the old context
+      this.pause();
+      const provider = await buildPlaybackProvider();
+      if (!provider.frames || !provider.frames.length) { this.stop(); return; }
+      this.provider = provider;
+      const ctx = playbackContextKey();
+      if (ctx !== this.cacheCtx) { this.cache.clear(); this.cacheCtx = ctx; }
+      this.frames = provider.frames.map((f) => ({ ...f, payload: null, loaded: false }));
+      this.idx = 0;
+      this.loadedCount = 0;
+      this.loadingIdx.clear();
+      this.buildProgress();
+      el.playScrub.max = String(Math.max(0, this.frames.length - 1));
+      el.playScrub.value = '0';
+      el.playLabel.textContent = `loading 0/${this.frames.length}…`;
+      el.dockTime.textContent = this.frames[0].label;
+      setStatus('loading playback…', true);
       this.loadInChunks();
     },
 
