@@ -14,12 +14,11 @@
 import { decodeGrib2 } from './grib2.js';
 import { makeScale } from './products.js';
 
-// The fetch URL for a bucket key. Almost every model here is backed by a
-// CORS-enabled bucket, so requests go straight to the source. The exceptions
-// (HREF on NOMADS, REFS on the non-CORS noaa-rrfs-pds bucket) are flagged
-// `corsRestricted`; their requests route through an optional user-configured
-// CORS proxy when one is set (localStorage `modelDataProxy` — see app.js),
-// and go direct otherwise, which works the moment NOAA enables CORS upstream.
+// The fetch URL for a bucket key. Every model here is backed by a CORS-enabled
+// bucket, so requests go straight to the source. A model may still opt into an
+// optional user-configured CORS proxy (localStorage `modelDataProxy` — see
+// app.js) by setting `corsRestricted`, for any future source on a host that
+// doesn't send CORS headers; none of the shipped models need it today.
 let modelProxy = '';
 export function setModelProxy(p) {
   modelProxy = p || '';
@@ -298,49 +297,11 @@ export const MODELS = {
       return steppedList(0, 360, 6);
     },
   },
-  // ---- CONUS convection-allowing ensembles (HREF / REFS) ----
-  // HREF publishes only to NOMADS — the one deliberate exception to the "no
-  // NOMADS in the browser" rule (see s3.js): each frame costs one tiny .idx
-  // read plus one ranged GET, far below the bulk Level-II volume downloads the
-  // rule exists for. NOMADS (and the REFS bucket) do not send CORS headers yet,
-  // so these two models need the optional `modelDataProxy` (or an upstream CORS
-  // change) before a stock browser can actually fetch them.
-  href: {
-    id: 'href',
-    label: 'HREF Ens Mean (3 km, needs proxy)',
-    group: 'ensemble',
-    bucket: 'https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod',
-    corsRestricted: true,
-    corsNote: 'HREF lives on NOMADS, which does not send CORS headers — set localStorage.modelDataProxy to a CORS proxy URL to enable it.',
-    cycleStep: 6,
-    latencyMin: 170,
-    keysFor(dayStr, cycle, fhour, file) {
-      const kind = file === 'pmmn' ? 'pmmn' : 'mean';
-      const grib = `href.${dayStr}/ensprod/href.t${pad(cycle)}z.conus.${kind}.f${pad(fhour)}.grib2`;
-      return { grib, idx: grib + '.idx' };
-    },
-    forecastHoursList() {
-      return steppedList(1, 48, 1).slice(1); // F01–F48 (no F00 analysis)
-    },
-  },
-  refs: {
-    id: 'refs',
-    label: 'REFS Ens Mean (3 km, needs proxy)',
-    group: 'ensemble',
-    bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
-    corsRestricted: true,
-    corsNote: 'The REFS bucket (noaa-rrfs-pds) does not send CORS headers yet — set localStorage.modelDataProxy to a CORS proxy URL to enable it.',
-    cycleStep: 6,
-    latencyMin: 150,
-    keysFor(dayStr, cycle, fhour, file) {
-      const kind = file === 'pmmn' ? 'pmmn' : 'mean';
-      const grib = `rrfs_a/refs.${dayStr}/${pad(cycle)}/enspost/refs.t${pad(cycle)}z.${kind}.f${pad(fhour)}.conus.grib2`;
-      return { grib, idx: grib + '.idx' };
-    },
-    forecastHoursList() {
-      return steppedList(1, 60, 1).slice(1); // F01–F60
-    },
-  },
+  // NOTE: the HREF and REFS convection-allowing ensembles used to live here, but
+  // their hosts (NOMADS for HREF, the noaa-rrfs-pds bucket for REFS) send no CORS
+  // headers, so a stock browser can never fetch them without a range-capable
+  // proxy. Rather than ship two models that only ever list as empty, they've been
+  // removed. If NOAA enables CORS on those hosts they can be restored from git.
 
   // ---- Hurricane models (HAFS-A / HAFS-B) ----
   // On the CORS-enabled NODD bucket, keyed as
@@ -1087,23 +1048,6 @@ const MODEL_PRODUCT_SUPPORT = {
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
   ],
-  // HREF/REFS ensemble products: reflectivity from the probability-matched-mean
-  // file, surface staples + CAPE/CIN/SRH from the mean file, upper air at
-  // 925/850/700/500 mb (no 200/300 mb level in the ensemble output).
-  // HREF's mean file has 10 m wind speed only (no components), so no
-  // wind-chill side of FEELS; REFS carries the components and supports it.
-  href: [
-    'REFC', 'TMP', 'WIND', 'DPT', 'TCDC', 'QPF1',
-    'W500', 'W700', 'W850', 'W925',
-    'TMP925', 'TMP850', 'TMP700', 'TMP500',
-    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'SRH3',
-  ],
-  refs: [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'DPT', 'TCDC', 'QPF1',
-    'W500', 'W700', 'W850', 'W925',
-    'TMP925', 'TMP850', 'TMP700', 'TMP500',
-    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'SRH3',
-  ],
   // HAFS packs surface + full pressure levels in one atm file. It carries the
   // surface staples, upper-air winds/temps/vorticity, and surface-parcel CAPE/CIN
   // + 0-3 km SRH — but no layer-parcel CAPE (no ML/MU parcels or composites), no
@@ -1151,19 +1095,6 @@ MODELS.gefsens.productFix = {
   MLCAPE: { level: '180-0 mb above ground' },
   MLCIN: { sources: () => [sfc('CIN', '180-0 mb above ground')] },
 };
-
-// HREF/REFS ensemble products: reflectivity lives in the probability-matched
-// mean file; 10 m wind is published as a speed (no components); dewpoint is
-// direct; the deepest-layer CAPE/CIN is 180 mb, not 255 mb.
-const CONUS_ENS_FIX = {
-  REFC: { file: 'pmmn' },
-  WIND: { combine: null, sources: null, varName: 'WIND', level: '10 m above ground' },
-  DPT: DIRECT_DPT,
-  FEELS: FEELS_FROM_DEWPOINT,
-  MUCAPE: { level: '180-0 mb above ground' },
-};
-MODELS.href.productFix = CONUS_ENS_FIX;
-MODELS.refs.productFix = CONUS_ENS_FIX;
 
 // Does a model offer a given product?
 export function modelSupports(modelKey, productId) {
@@ -1515,15 +1446,40 @@ function ecmwfQuery(model, src) {
   return q ? { levtype: 'sfc', ...q } : null;
 }
 
-// Parse an ECMWF `.index` (one JSON object per line) into the byte ranges of
-// every entry matching the query — one for a deterministic stream, one per
-// member for an ensemble file (the caller averages multi-range results).
-function rangesFromEcmwfIndex(text, q) {
+// Parse an ECMWF `.index` (one JSON object per line) into structured entries
+// once, then memoise them in the per-run idxCache. A product routinely reads
+// several fields from the same file (u/v/height for a wind chart) and an
+// ensemble mean averages every member entry — re-splitting the text and
+// re-JSON.parsing every line for each of those queries was thousands of parses
+// per forecast hour on the 50-member enfo/pf indices. Parsing once and querying
+// the structured array collapses that to a single pass per file.
+async function ecmwfEntriesFor(model, grib, idx, idxCache) {
+  const key = grib + '#ecmwf-entries';
+  if (!idxCache.has(key)) {
+    idxCache.set(key, (async () => {
+      const text = await idxTextFor(model, grib, idx, idxCache);
+      const entries = [];
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        try { entries.push(JSON.parse(line)); } catch (_) { /* skip malformed line */ }
+      }
+      return entries;
+    })());
+  }
+  try {
+    return await idxCache.get(key);
+  } catch (e) {
+    idxCache.delete(key);
+    throw e;
+  }
+}
+
+// The byte ranges of every parsed index entry matching the query — one for a
+// deterministic stream, one per member for an ensemble file (the caller averages
+// multi-range results).
+function rangesFromEcmwfIndex(entries, q) {
   const out = [];
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
-    let e;
-    try { e = JSON.parse(line); } catch (_) { continue; }
+  for (const e of entries) {
     if (e.param !== q.param) continue;
     if (q.levelist != null ? String(e.levelist) !== String(q.levelist) : e.levelist != null) continue;
     out.push({ start: e._offset, end: e._offset + e._length - 1, sub: 0 });
@@ -1807,8 +1763,8 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
   if (model.idxFormat === 'ecmwf') {
     const q = ecmwfQuery(model, src);
     if (!q) throw new Error(`field ${src.varName}/${src.level} not available from ${model.label}`);
-    const idxText = await idxTextFor(model, grib, idx, idxCache);
-    const ranges = rangesFromEcmwfIndex(idxText, q);
+    const entries = await ecmwfEntriesFor(model, grib, idx, idxCache);
+    const ranges = rangesFromEcmwfIndex(entries, q);
     let done = 0;
     const grids = await mapConcurrent(ranges, ENS_CONCURRENCY, async (range) => {
       const bytes = await fetchRange(modelUrl(model, grib), range,

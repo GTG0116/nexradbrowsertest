@@ -308,14 +308,23 @@ function styleBoundaries(map, anchor, o) {
     map.setLayoutProperty(id, 'visibility', 'visible');
   }
 
-  // Fallback country/state borders: some styles carry the streets/boundary
-  // tiles but draw no admin line layers from them at all (the "country borders
-  // don't show on the satellite basemap" bug). When neither the Mapbox admin-*
-  // repaints nor the generic pass above found a native boundary line, draw our
-  // own from the style's admin source so borders exist on every basemap.
+  // Fallback country/state borders. The Mapbox satellite basemap
+  // (satellite-streets-v12) ships the streets/boundary tiles but draws no
+  // *country* admin line from them — only the faint state line (and the dark
+  // casing) — so the hand-tuned `admin-0-boundary` repaint above is a silent
+  // no-op and the map ends up with no country border at all (the long-standing
+  // "country borders are non-existent on the satellite basemap" bug). Detect a
+  // genuinely-present native country line; when there isn't one, synthesise our
+  // own country (and, if missing, state) borders from the style's admin source
+  // so borders exist on every basemap. MapTiler/OpenMapTiles carry every level
+  // in one `boundary` layer, already handled by the generic pass above.
   const info = adminSourceInfo(map);
-  const hasNativeBoundary = (map.getStyle().layers || []).some(isBoundaryLayer);
-  if (!hasNativeBoundary && info) ensureFallbackBorders(map, anchor, info, col, w);
+  const hasMapboxCountry = !!map.getLayer('admin-0-boundary');
+  const hasGenericBoundary = (map.getStyle().layers || []).some(
+    (ly) => isBoundaryLayer(ly) && !MAPBOX_ADMIN_LAYERS.has(ly.id));
+  const hasNativeState = !!map.getLayer('admin-1-boundary') || hasGenericBoundary;
+  if (!hasMapboxCountry && !hasGenericBoundary && info)
+    ensureFallbackBorders(map, anchor, info, col, w, { skipState: hasNativeState });
 
   // County (admin_level 2) lines aren't drawn by the stock styles; add our own
   // once, then keep its paint in sync on later calls.
@@ -350,7 +359,7 @@ function styleBoundaries(map, anchor, o) {
 // Add (or restyle) the app's own country + state border lines from the style's
 // admin vector source. admin_level values differ per schema: Mapbox streets-v8
 // `admin` uses 0 = country / 1 = state, OpenMapTiles `boundary` uses 2 / 4.
-function ensureFallbackBorders(map, anchor, info, col, w) {
+function ensureFallbackBorders(map, anchor, info, col, w, { skipState = false } = {}) {
   const mapboxSchema = info.sourceLayer === 'admin';
   const countryLevel = mapboxSchema ? 0 : 2;
   const stateLevel = mapboxSchema ? 1 : 4;
@@ -370,11 +379,15 @@ function ensureFallbackBorders(map, anchor, info, col, w) {
       'line-color': col, 'line-opacity': 1,
       'line-width': w(3, 1.1, 7, 1.9, 11, 2.5),
     } },
-    { id: 'app-state-border', lvl: stateLevel, paint: {
+    // Only synthesise state lines when the style draws none of its own — the
+    // satellite basemap already has a native state line, just no country one.
+    ...(skipState ? [] : [{ id: 'app-state-border', lvl: stateLevel, paint: {
       'line-color': col, 'line-opacity': 0.85, 'line-dasharray': [3, 2],
       'line-width': w(3, 0.5, 7, 1, 11, 1.5),
-    } },
+    } }]),
   ];
+  // If we skipped the state line but added it on a previous style pass, drop it.
+  if (skipState && map.getLayer('app-state-border')) map.removeLayer('app-state-border');
   for (const d of defs) {
     if (map.getLayer(d.id)) {
       for (const [k, v] of Object.entries(d.paint)) map.setPaintProperty(d.id, k, v);
