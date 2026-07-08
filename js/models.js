@@ -307,7 +307,7 @@ export const MODELS = {
   // change) before a stock browser can actually fetch them.
   href: {
     id: 'href',
-    label: 'HREF Ens Mean (3 km CONUS)',
+    label: 'HREF Ens Mean (3 km, needs proxy)',
     group: 'ensemble',
     bucket: 'https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod',
     corsRestricted: true,
@@ -325,7 +325,7 @@ export const MODELS = {
   },
   refs: {
     id: 'refs',
-    label: 'REFS Ens Mean (3 km CONUS)',
+    label: 'REFS Ens Mean (3 km, needs proxy)',
     group: 'ensemble',
     bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
     corsRestricted: true,
@@ -1211,8 +1211,16 @@ async function headOrTinyGet(url) {
       // Some buckets/proxies do not support or expose HEAD; a tiny ranged GET is
       // the real browser path anyway, so fall through to that probe.
     }
-    const res = await fetch(url, { headers: { Range: 'bytes=0-255' }, signal: ctrl.signal });
-    return res.ok || res.status === 206;
+    try {
+      const res = await fetch(url, { headers: { Range: 'bytes=0-255' }, signal: ctrl.signal });
+      return res.ok || res.status === 206;
+    } catch (_) {
+      // A network/CORS rejection means we can't confirm the file — treat it as
+      // "not available" rather than letting it reject the whole run listing.
+      // This is what makes the CORS-blocked HREF/REFS sources list cleanly as
+      // empty (so the app can show their proxy note) instead of erroring out.
+      return false;
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -1539,8 +1547,11 @@ async function mapConcurrent(items, limit, fn) {
   return out;
 }
 
-// How many member fields an ensemble mean fetches at once.
-const ENS_CONCURRENCY = 6;
+// How many member fields an ensemble mean fetches at once. Ensemble means are
+// dominated by fetch latency (30–50 small member reads), not CPU, so a wide
+// lane count shortens them a lot; kept below the point where the browser's
+// per-host connection cap would just queue them anyway.
+const ENS_CONCURRENCY = 12;
 
 // Cell-by-cell mean of grids sharing one geometry (ensemble members). A cell is
 // the mean of the members that have data there; all-missing stays NaN.
@@ -2073,15 +2084,23 @@ export async function loadModel(modelKey, productId, run, fhour, onProgress) {
     grid = emptyGrid();
   } else {
     const sources = sourcesFor(product, fhour);
-    const grids = [];
-    for (let s = 0; s < sources.length; s++) {
-      grid = await loadSource(model, run, fhour, sources[s], idxCache,
-        onProgress && ((p) => onProgress((s + p) / sources.length)));
-      grids.push(grid);
-    }
+    // Fetch every source field in parallel (they share the memoised idxCache, so
+    // one index read still serves them all), and kick the overlay fetch off at
+    // the same time — the overlay fields are independent of the main field, and
+    // for the global feeds each field is a separate ~330 ms request, so running
+    // them concurrently instead of one-after-another is the difference between a
+    // wind chart taking ~2 s and ~0.5 s. Progress is reported by completion count.
+    let done = 0;
+    const bump = onProgress && (() => onProgress(++done / (sources.length + (product.overlays ? 1 : 0))));
+    const gridsP = Promise.all(sources.map((src) =>
+      loadSource(model, run, fhour, src, idxCache).then((g) => { if (bump) bump(); return g; })));
+    const overlaysP = product.overlays
+      ? loadOverlays(model, run, fhour, product.overlays, idxCache).then((o) => { if (bump) bump(); return o; })
+      : Promise.resolve(null);
+    const [grids, overlays] = await Promise.all([gridsP, overlaysP]);
     grid = combineGrids(grids, product.combine);
     if (product.overlays) {
-      grid.overlays = await loadOverlays(model, run, fhour, product.overlays, idxCache);
+      grid.overlays = overlays;
       if (product.overlays.windContours) {
         grid.overlays = {
           ...(grid.overlays || {}),

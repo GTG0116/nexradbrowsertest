@@ -172,9 +172,14 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   scattering makes deep convection pop at 89 GHz), rain rate, TPW, cloud liquid
   water, ice water path, snowfall rate, snow water equivalent, sea-ice
   concentration and skin temperature. A polar swath has per-pixel lat/lon rather
-  than a fixed disk, so each granule is rasterised onto a 0.1° lat/lon grid with
-  a distance-weighted footprint splat and drawn through the shared GPU grid
-  layer — legend, inspect readout and granule-by-granule playback included.
+  than a fixed disk, so each granule is rasterised onto a 0.1° lat/lon grid and
+  drawn through the shared GPU grid layer — legend, inspect readout and
+  granule-by-granule playback included. The ATMS footprint spacing is very
+  uneven (≈16 km at nadir but ≈67 km at the swath edges), so each footprint is
+  splatted with a radius sized to its *own* neighbour spacing — and stretched in
+  longitude by 1/cos(lat) so the disk stays circular on the ground toward the
+  poles — which fills the swath edges cleanly instead of leaving the streaks a
+  fixed-radius splat left behind.
 
 ### MRMS (`noaa-mrms-pds`)
 
@@ -258,14 +263,18 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     access pattern here (one tiny `.idx` + one ranged GET per frame) is far
     below the bulk Level-II downloads the rule was written for. Reflectivity
     comes from the probability-matched-mean (`pmmn`) file, everything else from
-    `mean`. **Caveat:** NOMADS still sends no CORS headers, so a stock browser
-    can't fetch it until NOAA enables CORS — or you set
-    `localStorage.modelDataProxy` to a CORS-proxy prefix (the target URL is
-    appended URL-encoded, the same convention as the radar `setProxy`).
+    `mean`. **Caveat:** NOMADS sends no CORS headers, so a stock browser can't
+    fetch it. Both HREF and REFS are labelled *"needs proxy"* in the picker and
+    list cleanly as empty (with an explanatory status line) until you set
+    `localStorage.modelDataProxy` to a proxy prefix — which must forward HTTP
+    **Range** requests, since each field is a byte-range read from a multi-MB
+    GRIB file. The common free CORS proxies ignore Range (they'd return the
+    whole 30–100 MB file per field), so these two realistically need a
+    self-hosted proxy (e.g. a small Cloudflare Worker) or an upstream CORS
+    change at NOAA. Every other model here is fetched directly, no proxy.
   - **REFS Ens Mean** (3 km CONUS) — the RRFS-based Rapid Refresh ensemble
     (`rrfs_a/refs.*` on `noaa-rrfs-pds`), hourly F01–F60, same product routing
-    as HREF. That bucket doesn't send CORS headers yet either, so it shares the
-    `modelDataProxy` caveat.
+    and same proxy caveat as HREF (that bucket has no CORS configuration at all).
 - **Full-quality loops**: playback keeps every forecast hour resident as packed
   16-bit codes; the pooling that used to fit long runs into the memory budget
   no longer costs visible quality on desktop — a pooled cell is never allowed

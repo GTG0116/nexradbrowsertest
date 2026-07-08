@@ -239,25 +239,35 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
     for (let j = 0; j <= i; j++) { seTable[2 * k] = i; seTable[2 * k + 1] = ms; k++; }
   }
 
+  // MSB-first bit reader over a byte accumulator: `acc` holds `accBits` unread
+  // bits (the next bit to emit is the high one). Refilling a whole byte at a
+  // time — instead of recomputing a byte index and shift for every single bit —
+  // is what makes a 50-member ensemble decode in seconds rather than minutes.
   const buf = dataSection;
-  let bitp = 0; // absolute bit position
+  const len = buf.length;
+  let pos = 0, acc = 0, accBits = 0;
   const readBits = (n) => {
-    let v = 0;
-    for (let k = 0; k < n; k++) {
-      v = v * 2 + ((buf[bitp >> 3] >> (7 - (bitp & 7))) & 1);
-      bitp++;
-    }
-    return v >>> 0;
+    if (n === 0) return 0;
+    while (accBits < n) { acc = ((acc << 8) | (pos < len ? buf[pos++] : 0)) >>> 0; accBits += 8; }
+    accBits -= n;
+    return (acc >>> accBits) & (n >= 32 ? 0xffffffff : (1 << n) - 1);
   };
   // Fundamental sequence (unary): count zeros up to the terminating 1.
   const readFS = () => {
     let fs = 0;
     for (;;) {
-      if (bitp >> 3 >= buf.length) throw new Error('AEC: truncated stream');
-      if ((buf[bitp >> 3] >> (7 - (bitp & 7))) & 1) { bitp++; return fs; }
-      fs++; bitp++;
+      if (accBits === 0) {
+        if (pos >= len) throw new Error('AEC: truncated stream');
+        acc = buf[pos++]; accBits = 8;
+      }
+      accBits--;
+      if ((acc >>> accBits) & 1) return fs;
+      fs++;
     }
   };
+  // Byte-align the reader (used before each padded RSI): discard the fractional
+  // bits so the next read starts on a byte boundary.
+  const alignByte = () => { accBits -= accBits & 7; };
 
   const out = new Uint32Array(npts);
   const rsiSize = rsi * blockSize;
@@ -267,7 +277,7 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
     // ---- one reference sample interval ----
     const rsiStart = n;
     const rsiEnd = Math.min(npts, rsiStart + rsiSize);
-    if (padRsi && rsiStart > 0) bitp = (bitp + 7) & ~7;
+    if (padRsi && rsiStart > 0) alignByte();
     let firstBlock = true;
     while (n < rsiEnd) {
       const ref = pp && firstBlock ? 1 : 0;
@@ -307,9 +317,10 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
         if (ref) out[n++] = readBits(bits);
         const base = n;
         const cnt = Math.min(encLen, npts - n);
+        const pk = k < 31 ? (1 << k) : Math.pow(2, k); // hoisted out of the sample loop
         for (let i = 0; i < encLen; i++) {
           const fs = readFS();
-          if (i < cnt) out[base + i] = fs * Math.pow(2, k);
+          if (i < cnt) out[base + i] = fs * pk;
         }
         if (k) for (let i = 0; i < encLen; i++) {
           const r = readBits(k);
