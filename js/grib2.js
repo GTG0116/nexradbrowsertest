@@ -8,8 +8,9 @@
 // (DRT 5.0) fallback is included for the products that aren't PNG-packed.
 //
 // Model grids broaden the packing we have to read: HRRR/NAM/GFS use complex
-// packing (DRT 5.2/5.3), while RAP is JPEG2000-packed (DRT 5.40), decoded by
-// jpx.js.
+// packing (DRT 5.2/5.3), RAP is JPEG2000-packed (DRT 5.40, decoded by jpx.js),
+// and ECMWF open data (IFS/AIFS) is CCSDS/AEC-packed (DRT 5.42) — decoded by
+// the pure-JS adaptive-entropy decoder below (unpackAEC).
 
 import { decodeJ2K } from './jpx.js';
 
@@ -209,6 +210,138 @@ function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values
   for (let n = 0; n < npts; n++) values[n] = (R + X[n] * scaleE) / scaleD;
 }
 
+// ---------------------------------------------------------------------------
+// CCSDS 121.0-B adaptive entropy (Rice) decoding — GRIB2 DRT 5.42, the packing
+// ECMWF's open-data GRIB2 uses. The compressed stream is a sequence of coded
+// data sets (CDS), each covering one block of samples; every reference-sample
+// interval (RSI) restarts the unit-delay preprocessor with a raw sample.
+// Follows the CCSDS spec, cross-checked against libaec's decoder semantics.
+//   flags: bit0 signed, bit1 3-byte, bit2 MSB, bit3 preprocess, bit4 restricted
+// GRIB fields are unsigned, so only the unsigned preprocessor restore is
+// implemented (signed data throws).
+function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
+  if (flags & 1) throw new Error('AEC: signed data not supported');
+  const pp = !!(flags & 8);
+  const padRsi = !!(flags & 32);
+  // Option-ID field length by sample resolution (libaec aec_decode_init).
+  let idLen;
+  if (bits > 16) idLen = 5;
+  else if (bits > 8) idLen = 4;
+  else if (flags & 16) idLen = bits <= 2 ? 1 : 2; // restricted low-resolution modes
+  else idLen = 3;
+  const uncompId = (1 << idLen) - 1;
+  const xmax = bits >= 31 ? 0xffffffff >>> (32 - bits) : (1 << bits) - 1;
+
+  // Second-extension lookup: gamma → (fs level i, cumulative start ms).
+  const seTable = new Int32Array(2 * 92);
+  for (let i = 0, k = 0; i < 13; i++) {
+    const ms = k;
+    for (let j = 0; j <= i; j++) { seTable[2 * k] = i; seTable[2 * k + 1] = ms; k++; }
+  }
+
+  const buf = dataSection;
+  let bitp = 0; // absolute bit position
+  const readBits = (n) => {
+    let v = 0;
+    for (let k = 0; k < n; k++) {
+      v = v * 2 + ((buf[bitp >> 3] >> (7 - (bitp & 7))) & 1);
+      bitp++;
+    }
+    return v >>> 0;
+  };
+  // Fundamental sequence (unary): count zeros up to the terminating 1.
+  const readFS = () => {
+    let fs = 0;
+    for (;;) {
+      if (bitp >> 3 >= buf.length) throw new Error('AEC: truncated stream');
+      if ((buf[bitp >> 3] >> (7 - (bitp & 7))) & 1) { bitp++; return fs; }
+      fs++; bitp++;
+    }
+  };
+
+  const out = new Uint32Array(npts);
+  const rsiSize = rsi * blockSize;
+  let n = 0; // samples decoded so far
+
+  while (n < npts) {
+    // ---- one reference sample interval ----
+    const rsiStart = n;
+    const rsiEnd = Math.min(npts, rsiStart + rsiSize);
+    if (padRsi && rsiStart > 0) bitp = (bitp + 7) & ~7;
+    let firstBlock = true;
+    while (n < rsiEnd) {
+      const ref = pp && firstBlock ? 1 : 0;
+      const encLen = blockSize - ref;
+      const id = readBits(idLen);
+      if (id === 0) {
+        // Low-entropy options, discriminated by one extra bit.
+        const se = readBits(1);
+        if (ref) out[n++] = readBits(bits);
+        if (se) {
+          // Second extension: FS codes decode to pairs of samples.
+          for (let i = ref; i < blockSize && n < npts; ) {
+            const m = readFS();
+            if (m > 90) throw new Error('AEC: bad second-extension code');
+            const d1 = m - seTable[2 * m + 1];
+            if ((i & 1) === 0) { out[n++] = seTable[2 * m] - d1; i++; if (n >= npts) break; }
+            out[n++] = d1; i++;
+          }
+        } else {
+          // Zero block(s): FS value = run of all-zero blocks; 5 = rest of the
+          // 64-block segment, >5 shifted down by one.
+          let zb = readFS() + 1;
+          if (zb === 5) {
+            const b = Math.floor((n - rsiStart + ref) / blockSize);
+            zb = Math.min(rsi - b, 64 - (b % 64));
+          } else if (zb > 5) {
+            zb--;
+          }
+          let zs = zb * blockSize - ref;
+          while (zs-- > 0 && n < npts) out[n++] = 0;
+        }
+      } else if (id === uncompId) {
+        for (let i = 0; i < blockSize && n < npts; i++) out[n++] = readBits(bits);
+      } else {
+        // Sample splitting: FS of the high parts, then k-bit remainders.
+        const k = id - 1;
+        if (ref) out[n++] = readBits(bits);
+        const base = n;
+        const cnt = Math.min(encLen, npts - n);
+        for (let i = 0; i < encLen; i++) {
+          const fs = readFS();
+          if (i < cnt) out[base + i] = fs * Math.pow(2, k);
+        }
+        if (k) for (let i = 0; i < encLen; i++) {
+          const r = readBits(k);
+          if (i < cnt) out[base + i] += r;
+        }
+        n = base + cnt;
+      }
+      firstBlock = false;
+    }
+
+    // ---- undo the unit-delay preprocessor over this RSI (unsigned restore) ----
+    if (pp && rsiEnd > rsiStart) {
+      const med = Math.floor(xmax / 2) + 1;
+      let data = out[rsiStart]; // reference sample passes through unmapped
+      for (let i = rsiStart + 1; i < rsiEnd; i++) {
+        const d = out[i];
+        const halfD = ((d >>> 1) + (d & 1)) >>> 0;
+        const mask = data & med ? xmax : 0;
+        // In range, the mapped delta unfolds to ±⌈d/2⌉ around the predictor;
+        // out of range it saturates against whichever bound is nearer.
+        if (halfD <= ((mask ^ data) >>> 0)) {
+          data = d & 1 ? data - ((d >>> 1) + 1) : data + (d >>> 1);
+        } else {
+          data = (mask ^ d) >>> 0;
+        }
+        out[i] = data;
+      }
+    }
+  }
+  return out;
+}
+
 // Decode a GRIB2 message (optionally gzipped) into a grid of physical values.
 // For a plain lat/lon grid (GDT 3.0) returns
 //   { proj:'latlon', ni, nj, lon1, lat1, di, dj, scanMode, values }
@@ -260,9 +393,11 @@ export async function decodeGrib2(input, sub = 0) {
         if (grid.lo1 > 180) grid.lo1 -= 360;
         if (grid.lov > 180) grid.lov -= 360;
       } else {
-        // Plain lat/lon grid (GDT 3.0) — MRMS and similar.
+        // Plain lat/lon grid (GDT 3.0) — MRMS and similar. ECMWF grids start at
+        // exactly 180°E — the same meridian as −180°, so relabelling keeps the
+        // column order intact while placing the grid on the −180…180 map.
         let lon1 = readSignMag(dv, p + 50, 4) / 1e6;
-        if (lon1 > 180) lon1 -= 360;
+        if (lon1 >= 180) lon1 -= 360;
         grid = {
           proj: 'latlon',
           ni, nj, lon1,
@@ -329,6 +464,19 @@ export async function decodeGrib2(input, sub = 0) {
     }
   } else if (drt === 2 || drt === 3) {
     unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, decoded);
+  } else if (drt === 42) {
+    // CCSDS/AEC (ECMWF open data). Template 5.42 adds the CCSDS parameters
+    // after the standard packing octets: flags, block size, reference sample
+    // interval.
+    const flags = b[p5 + 21];
+    const blockSize = b[p5 + 22];
+    const rsi = dv.getUint16(p5 + 23);
+    if (bits === 0) {
+      for (let i = 0; i < decoded.length; i++) decoded[i] = R / scaleD;
+    } else {
+      const samples = unpackAEC(dataSection, decoded.length, bits, flags, blockSize, rsi);
+      for (let i = 0; i < decoded.length; i++) decoded[i] = (R + samples[i] * scaleE) / scaleD;
+    }
   } else {
     throw new Error('unsupported GRIB2 data template ' + drt);
   }

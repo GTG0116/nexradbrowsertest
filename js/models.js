@@ -14,10 +14,19 @@
 import { decodeGrib2 } from './grib2.js';
 import { makeScale } from './products.js';
 
-// The fetch URL for a bucket key. Every model here is backed by a CORS-enabled
-// NODD bucket, so requests go straight to AWS.
+// The fetch URL for a bucket key. Almost every model here is backed by a
+// CORS-enabled bucket, so requests go straight to the source. The exceptions
+// (HREF on NOMADS, REFS on the non-CORS noaa-rrfs-pds bucket) are flagged
+// `corsRestricted`; their requests route through an optional user-configured
+// CORS proxy when one is set (localStorage `modelDataProxy` — see app.js),
+// and go direct otherwise, which works the moment NOAA enables CORS upstream.
+let modelProxy = '';
+export function setModelProxy(p) {
+  modelProxy = p || '';
+}
 function modelUrl(model, key) {
-  return `${model.bucket}/${key}`;
+  const url = `${model.bucket}/${key}`;
+  return model.corsRestricted && modelProxy ? modelProxy + encodeURIComponent(url) : url;
 }
 
 // Available models, each backed by a CORS-enabled NODD AWS bucket (listing, GET
@@ -157,6 +166,182 @@ export const MODELS = {
     },
   },
 
+  // ---- ECMWF open data (AEC-packed GRIB2 + JSON-lines `.index` sidecars) ----
+  // 00/12z runs come from the `oper` stream, 06/18z from `scda`; AIFS posts all
+  // four cycles under `aifs-single`. Field naming is MARS-style (2t/10u/gh/…),
+  // translated from the NCEP-style product descriptors by ecmwfQuery below.
+  ecmwf: {
+    id: 'ecmwf',
+    label: 'ECMWF IFS (0.25° Global)',
+    bucket: 'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
+    idxFormat: 'ecmwf',
+    cycleStep: 6,
+    // Open data posts ~7-8 h after cycle time.
+    latencyMin: 470,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `${dayStr}/${pad(cycle)}z/ifs/0p25/oper/${dayStr}${pad(cycle)}0000-${fhour}h-oper-fc.grib2`;
+      return { grib, idx: grib.replace(/\.grib2$/, '.index') };
+    },
+    // 00/12z: 3-hourly to F144, then 6-hourly to F240. 06/18z run to F144.
+    forecastHoursList(cycle) {
+      return cycle % 12 === 0 ? stepped3then6(144, 240) : stepped3then6(144, 144);
+    },
+  },
+  aifs: {
+    id: 'aifs',
+    label: 'ECMWF AIFS (0.25° Global, AI)',
+    bucket: 'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
+    idxFormat: 'ecmwf',
+    cycleStep: 6,
+    latencyMin: 420,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `${dayStr}/${pad(cycle)}z/aifs-single/0p25/oper/${dayStr}${pad(cycle)}0000-${fhour}h-oper-fc.grib2`;
+      return { grib, idx: grib.replace(/\.grib2$/, '.index') };
+    },
+    forecastHoursList() {
+      return steppedList(0, 360, 6);
+    },
+  },
+
+  // ---- Ensembles ----
+  // GEFS posts its ensemble mean as ready-made `geavg` files (0.25° select
+  // surface fields + 0.5° pressure levels). The others carry raw members only,
+  // so their mean is computed here, member by member (see fetchDecodeSource).
+  gefsens: {
+    id: 'gefsens',
+    label: 'GEFS Ens Mean (0.25° Global)',
+    group: 'ensemble',
+    bucket: 'https://noaa-gefs-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 290,
+    // Surface fields come from the 0.25° select file; pressure levels exist
+    // only in the 0.5° `pgrb2a` set.
+    keysFor(dayStr, cycle, fhour, file) {
+      const grib = file === 'prs'
+        ? `gefs.${dayStr}/${pad(cycle)}/atmos/pgrb2ap5/geavg.t${pad(cycle)}z.pgrb2a.0p50.f${pad(fhour, 3)}`
+        : `gefs.${dayStr}/${pad(cycle)}/atmos/pgrb2sp25/geavg.t${pad(cycle)}z.pgrb2s.0p25.f${pad(fhour, 3)}`;
+      return { grib, idx: grib + '.idx' };
+    },
+    // The 0.25° surface set stops at F240; keep the run there so every product
+    // spans the same hours.
+    forecastHoursList() {
+      return steppedList(0, 240, 3);
+    },
+  },
+  aigefsens: {
+    id: 'aigefsens',
+    label: 'AI GEFS Ens Mean (0.25° Global)',
+    group: 'ensemble',
+    bucket: 'https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com',
+    cycleStep: 6,
+    latencyMin: 420,
+    // 31 members (control + 30 perturbations), averaged client-side. Each
+    // member is its own file; the default member serves existence probes.
+    members: Array.from({ length: 31 }, (_, i) => `mem${String(i).padStart(3, '0')}`),
+    keysFor(dayStr, cycle, fhour, file, storm, member = 'mem000') {
+      const grib = `EAGLE_ensemble/aigefs.${dayStr}/${pad(cycle)}/${member}/model/atmos/grib2/aigefs.t${pad(cycle)}z.pres.f${pad(fhour, 3)}.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    forecastHoursList() {
+      return steppedList(0, 384, 6);
+    },
+  },
+  // The Hybrid GEFS "grand ensemble" combines the 31 physics GEFS members with
+  // the 31 AI GEFS members. With equal member counts the grand-ensemble mean is
+  // simply the average of the two means, which is what `blend` computes.
+  hgefs: {
+    id: 'hgefs',
+    label: 'Hybrid GEFS Ens Mean (GEFS + AI)',
+    group: 'ensemble',
+    blend: ['gefsens', 'aigefsens'],
+    cycleStep: 6,
+    latencyMin: 420,
+    forecastHoursList() {
+      return steppedList(0, 240, 6);
+    },
+  },
+  ecmwfens: {
+    id: 'ecmwfens',
+    label: 'ECMWF ENS Mean (0.25° Global)',
+    group: 'ensemble',
+    bucket: 'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
+    idxFormat: 'ecmwf',
+    // All 50 perturbed members live in one file; the `.index` lists a byte range
+    // per member and the mean averages every member entry it finds.
+    ensembleIndex: true,
+    cycleStep: 6,
+    latencyMin: 490,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `${dayStr}/${pad(cycle)}z/ifs/0p25/enfo/${dayStr}${pad(cycle)}0000-${fhour}h-enfo-ef.grib2`;
+      return { grib, idx: grib.replace(/\.grib2$/, '.index') };
+    },
+    forecastHoursList(cycle) {
+      return cycle % 12 === 0 ? stepped3then6(144, 360) : stepped3then6(144, 144);
+    },
+  },
+  aifsens: {
+    id: 'aifsens',
+    label: 'ECMWF AIFS ENS Mean (0.25°, AI)',
+    group: 'ensemble',
+    bucket: 'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
+    idxFormat: 'ecmwf',
+    ensembleIndex: true,
+    // AIFS-ens has no `gh`; geopotential height comes from geopotential z/g.
+    paramFix: { HGT: { param: 'z', scale: 1 / 9.80665 } },
+    cycleStep: 6,
+    latencyMin: 440,
+    keysFor(dayStr, cycle, fhour) {
+      const grib = `${dayStr}/${pad(cycle)}z/aifs-ens/0p25/enfo/${dayStr}${pad(cycle)}0000-${fhour}h-enfo-pf.grib2`;
+      return { grib, idx: grib.replace(/\.grib2$/, '.index') };
+    },
+    forecastHoursList() {
+      return steppedList(0, 360, 6);
+    },
+  },
+  // ---- CONUS convection-allowing ensembles (HREF / REFS) ----
+  // HREF publishes only to NOMADS — the one deliberate exception to the "no
+  // NOMADS in the browser" rule (see s3.js): each frame costs one tiny .idx
+  // read plus one ranged GET, far below the bulk Level-II volume downloads the
+  // rule exists for. NOMADS (and the REFS bucket) do not send CORS headers yet,
+  // so these two models need the optional `modelDataProxy` (or an upstream CORS
+  // change) before a stock browser can actually fetch them.
+  href: {
+    id: 'href',
+    label: 'HREF Ens Mean (3 km CONUS)',
+    group: 'ensemble',
+    bucket: 'https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod',
+    corsRestricted: true,
+    corsNote: 'HREF lives on NOMADS, which does not send CORS headers — set localStorage.modelDataProxy to a CORS proxy URL to enable it.',
+    cycleStep: 6,
+    latencyMin: 170,
+    keysFor(dayStr, cycle, fhour, file) {
+      const kind = file === 'pmmn' ? 'pmmn' : 'mean';
+      const grib = `href.${dayStr}/ensprod/href.t${pad(cycle)}z.conus.${kind}.f${pad(fhour)}.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    forecastHoursList() {
+      return steppedList(1, 48, 1).slice(1); // F01–F48 (no F00 analysis)
+    },
+  },
+  refs: {
+    id: 'refs',
+    label: 'REFS Ens Mean (3 km CONUS)',
+    group: 'ensemble',
+    bucket: 'https://noaa-rrfs-pds.s3.amazonaws.com',
+    corsRestricted: true,
+    corsNote: 'The REFS bucket (noaa-rrfs-pds) does not send CORS headers yet — set localStorage.modelDataProxy to a CORS proxy URL to enable it.',
+    cycleStep: 6,
+    latencyMin: 150,
+    keysFor(dayStr, cycle, fhour, file) {
+      const kind = file === 'pmmn' ? 'pmmn' : 'mean';
+      const grib = `rrfs_a/refs.${dayStr}/${pad(cycle)}/enspost/refs.t${pad(cycle)}z.${kind}.f${pad(fhour)}.conus.grib2`;
+      return { grib, idx: grib + '.idx' };
+    },
+    forecastHoursList() {
+      return steppedList(1, 60, 1).slice(1); // F01–F60
+    },
+  },
+
   // ---- Hurricane models (HAFS-A / HAFS-B) ----
   // On the CORS-enabled NODD bucket, keyed as
   //   <dir>/YYYYMMDD/HH/<storm>.<YYYYMMDDHH>.<dir>.<domain>.atm.f<NNN>.grb2 (+ .idx)
@@ -194,6 +379,14 @@ function steppedList(hourlyMax, total, step) {
   const out = [];
   for (let f = 0; f <= hourlyMax; f++) out.push(f);
   for (let f = hourlyMax + step; f <= total; f += step) out.push(f);
+  return out;
+}
+
+// ECMWF-style stepping: 3-hourly out to `max3`, then 6-hourly out to `total`.
+function stepped3then6(max3, total) {
+  const out = [];
+  for (let f = 0; f <= max3; f += 3) out.push(f);
+  for (let f = max3 + 6; f <= total; f += 6) out.push(f);
   return out;
 }
 
@@ -573,12 +766,20 @@ function heatIndexF(T, R) {
 // chill when it's cold and windy, the plain air temperature in between. Returned
 // in kelvin so it rides the same color scale as 2 m temperature. arrays = 2 m
 // temperature (K), 2 m RH (%), 10 m U and V wind (m/s).
-const feelsLike = (a, i) => {
-  const tK = a[0][i];
+const feelsLike = (a, i) => feelsCore(a[0][i], a[1][i], a[2][i], a[3][i]);
+// Same blend for models that publish 2 m dewpoint instead of RH (ECMWF, the
+// CONUS ensembles): RH is recovered from T/Td by the Magnus formula first.
+// arrays = 2 m temperature (K), 2 m dew point (K), 10 m U and V wind (m/s).
+const feelsLikeFromDewpoint = (a, i) => {
+  const tc = a[0][i] - 273.15;
+  const dc = a[1][i] - 273.15;
+  const rh = 100 * Math.exp((17.625 * dc) / (243.04 + dc) - (17.625 * tc) / (243.04 + tc));
+  return feelsCore(a[0][i], Math.min(100, rh), a[2][i], a[3][i]);
+};
+function feelsCore(tK, rh, u, v) {
   if (Number.isNaN(tK)) return NaN;
   const tF = tK * 1.8 - 459.67;
-  const rh = a[1][i];
-  const windMph = Math.hypot(a[2][i], a[3][i]) * MS_TO_MPH;
+  const windMph = Math.hypot(u, v) * MS_TO_MPH;
   let outF = tF;
   if (tF >= 80 && Number.isFinite(rh)) {
     outF = heatIndexF(tF, rh);
@@ -837,6 +1038,72 @@ const MODEL_PRODUCT_SUPPORT = {
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH1', 'SRH3', 'STORM',
   ],
+  // ECMWF open data: no reflectivity/lightning/composite-severe fields, no 2 m
+  // RH (dewpoint is direct, RH-derived products come via productFix), and only
+  // MU CAPE. Precip (tp) and snowfall (sf) are run-total accumulations, so the
+  // QPF windows and 10:1/Kuchera snow products all work.
+  ecmwf: [
+    'TMP', 'FEELS', 'WIND', 'GUST', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500', 'MUCAPE',
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
+  ],
+  // AIFS carries the same surface staples minus wind gusts and CAPE.
+  aifs: [
+    'TMP', 'FEELS', 'WIND', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
+  ],
+  ecmwfens: [
+    'TMP', 'FEELS', 'WIND', 'GUST', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500', 'MUCAPE',
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
+  ],
+  aifsens: [
+    'TMP', 'FEELS', 'WIND', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
+  ],
+  // GEFS mean: the 0.25° `pgrb2s` surface set plus 0.5° pressure levels. APCP
+  // is a 6-h bucket (not a run total), so only the fixed 6-h QPF is offered;
+  // WEASD is an instantaneous snapshot, so no snowfall products.
+  gefsens: [
+    'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6',
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'SBCIN', 'MLCIN', 'SRH3',
+  ],
+  // AI GEFS members post pressure-level fields only (like the deterministic
+  // AI GFS), so the mean covers just isotachs and upper-air temperatures —
+  // and the hybrid grand ensemble is limited to the same intersection.
+  aigefsens: [
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+  ],
+  hgefs: [
+    'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+  ],
+  // HREF/REFS ensemble products: reflectivity from the probability-matched-mean
+  // file, surface staples + CAPE/CIN/SRH from the mean file, upper air at
+  // 925/850/700/500 mb (no 200/300 mb level in the ensemble output).
+  // HREF's mean file has 10 m wind speed only (no components), so no
+  // wind-chill side of FEELS; REFS carries the components and supports it.
+  href: [
+    'REFC', 'TMP', 'WIND', 'DPT', 'TCDC', 'QPF1',
+    'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'SRH3',
+  ],
+  refs: [
+    'REFC', 'TMP', 'FEELS', 'WIND', 'DPT', 'TCDC', 'QPF1',
+    'W500', 'W700', 'W850', 'W925',
+    'TMP925', 'TMP850', 'TMP700', 'TMP500',
+    'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'SRH3',
+  ],
   // HAFS packs surface + full pressure levels in one atm file. It carries the
   // surface staples, upper-air winds/temps/vorticity, and surface-parcel CAPE/CIN
   // + 0-3 km SRH — but no layer-parcel CAPE (no ML/MU parcels or composites), no
@@ -852,6 +1119,51 @@ const MODEL_PRODUCT_SUPPORT = {
 for (const [key, model] of Object.entries(MODELS)) {
   model.products = new Set(MODEL_PRODUCT_SUPPORT[key] || MODEL_ORDER);
 }
+
+// ---- Per-model product overrides (see productForModel) ----------------------
+// Direct 2 m dewpoint, for models that publish it (the generic recipe derives
+// dewpoint from T + RH, which some models don't carry).
+const DIRECT_DPT = { combine: null, sources: null, varName: 'DPT', level: '2 m above ground' };
+// FEELS recomputed from T/Td for the same models (no 2 m RH field).
+const FEELS_FROM_DEWPOINT = {
+  combine: feelsLikeFromDewpoint,
+  sources: () => [
+    sfc('TMP', '2 m above ground'), sfc('DPT', '2 m above ground'),
+    sfc('UGRD', '10 m above ground'), sfc('VGRD', '10 m above ground'),
+  ],
+};
+const ECMWF_PRODUCT_FIX = { DPT: DIRECT_DPT, FEELS: FEELS_FROM_DEWPOINT };
+MODELS.ecmwf.productFix = ECMWF_PRODUCT_FIX;
+MODELS.aifs.productFix = ECMWF_PRODUCT_FIX;
+MODELS.ecmwfens.productFix = ECMWF_PRODUCT_FIX;
+MODELS.aifsens.productFix = ECMWF_PRODUCT_FIX;
+
+// GEFS mean: dewpoint is direct; precip is a 6-h bucket (matched by its
+// accumulation string) rather than a run total; the cloud-cover and layer-CAPE
+// fields sit at GEFS-specific levels/periods.
+MODELS.gefsens.productFix = {
+  DPT: DIRECT_DPT,
+  QPF6: {
+    combine: null, minFhour: 6,
+    sources: (fhour) => [{ varName: 'APCP', level: 'surface', acc: new RegExp(`^${fhour - 6}-${fhour} hour acc`) }],
+  },
+  TCDC: { minFhour: 3 }, // period-averaged field, absent from the analysis
+  MLCAPE: { level: '180-0 mb above ground' },
+  MLCIN: { sources: () => [sfc('CIN', '180-0 mb above ground')] },
+};
+
+// HREF/REFS ensemble products: reflectivity lives in the probability-matched
+// mean file; 10 m wind is published as a speed (no components); dewpoint is
+// direct; the deepest-layer CAPE/CIN is 180 mb, not 255 mb.
+const CONUS_ENS_FIX = {
+  REFC: { file: 'pmmn' },
+  WIND: { combine: null, sources: null, varName: 'WIND', level: '10 m above ground' },
+  DPT: DIRECT_DPT,
+  FEELS: FEELS_FROM_DEWPOINT,
+  MUCAPE: { level: '180-0 mb above ground' },
+};
+MODELS.href.productFix = CONUS_ENS_FIX;
+MODELS.refs.productFix = CONUS_ENS_FIX;
 
 // Does a model offer a given product?
 export function modelSupports(modelKey, productId) {
@@ -907,7 +1219,12 @@ async function headOrTinyGet(url) {
 }
 
 async function runExists(model, run, productId) {
-  const product = MODEL_PRODUCTS[productId] || MODEL_PRODUCTS[defaultProductFor(model.id)];
+  // A blended run exists only when every component model's run does.
+  if (model.blend) {
+    const ok = await Promise.all(model.blend.map((k) => runExists(MODELS[k], run, productId)));
+    return ok.every(Boolean);
+  }
+  const product = productForModel(model, productId) || productForModel(model, defaultProductFor(model.id));
   const fhours = forecastHours(run);
   const probeHour = fhours.includes(0) ? 0 : (fhours[0] || 0);
   const sourceHour = Math.max(probeHour, product.minFhour || 0);
@@ -1151,6 +1468,133 @@ function sourcesFor(product, fhour) {
     : [{ varName: product.varName, level: product.level, file: product.file }];
 }
 
+// A product's effective definition for one model: the shared MODEL_PRODUCTS
+// entry, overlaid with any per-model `productFix` (a different level, a direct
+// field where the generic recipe derives one, a different source file, …).
+export function productForModel(model, productId) {
+  const base = MODEL_PRODUCTS[productId];
+  const fix = model && model.productFix && model.productFix[productId];
+  return fix ? { ...base, ...fix } : base;
+}
+
+// ---- ECMWF open-data field naming --------------------------------------------
+// ECMWF indexes fields MARS-style (param/levtype/levelist) rather than by the
+// NCEP varName/level strings the product table uses; translate a source
+// descriptor into an index query. `scale` converts the decoded values into the
+// units the shared products expect (m of precip → mm, cloud fraction → %).
+const ECMWF_PL = { TMP: 't', UGRD: 'u', VGRD: 'v', HGT: 'gh', RH: 'r', SPFH: 'q' };
+const ECMWF_SFC = {
+  'TMP/2 m above ground': { param: '2t' },
+  'DPT/2 m above ground': { param: '2d' },
+  'UGRD/10 m above ground': { param: '10u' },
+  'VGRD/10 m above ground': { param: '10v' },
+  'GUST/surface': { param: '10fg' },
+  'PRMSL/mean sea level': { param: 'msl' },
+  'APCP/surface': { param: 'tp', scale: 1000 },
+  'WEASD/surface': { param: 'sf', scale: 1000 },
+  'TCDC/entire atmosphere': { param: 'tcc', scale: 100 },
+  'CAPE/0-255 mb above ground': { param: 'mucape' },
+  'PWAT/entire atmosphere': { param: 'tcwv' },
+};
+function ecmwfQuery(model, src) {
+  const fixed = model.paramFix && model.paramFix[src.varName];
+  const mb = /^(\d+) mb$/.exec(src.level);
+  if (mb) {
+    const base = fixed || (ECMWF_PL[src.varName] ? { param: ECMWF_PL[src.varName] } : null);
+    return base ? { ...base, levtype: 'pl', levelist: mb[1] } : null;
+  }
+  const q = ECMWF_SFC[`${src.varName}/${normLevel(src.level)}`];
+  return q ? { levtype: 'sfc', ...q } : null;
+}
+
+// Parse an ECMWF `.index` (one JSON object per line) into the byte ranges of
+// every entry matching the query — one for a deterministic stream, one per
+// member for an ensemble file (the caller averages multi-range results).
+function rangesFromEcmwfIndex(text, q) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let e;
+    try { e = JSON.parse(line); } catch (_) { continue; }
+    if (e.param !== q.param) continue;
+    if (q.levelist != null ? String(e.levelist) !== String(q.levelist) : e.levelist != null) continue;
+    out.push({ start: e._offset, end: e._offset + e._length - 1, sub: 0 });
+  }
+  if (!out.length) throw new Error(`field ${q.param}${q.levelist ? '/' + q.levelist + ' hPa' : ''} not in index`);
+  return out;
+}
+
+// Run `fn` over `items` with at most `limit` in flight at once.
+async function mapConcurrent(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// How many member fields an ensemble mean fetches at once.
+const ENS_CONCURRENCY = 6;
+
+// Cell-by-cell mean of grids sharing one geometry (ensemble members). A cell is
+// the mean of the members that have data there; all-missing stays NaN.
+function meanOfGrids(grids) {
+  if (grids.length === 1) return grids[0];
+  const n = grids[0].values.length;
+  const sum = new Float64Array(n);
+  const cnt = new Uint16Array(n);
+  for (const g of grids) {
+    const v = g.values;
+    for (let i = 0; i < n; i++) {
+      const x = v[i];
+      if (x === x) { sum[i] += x; cnt[i]++; }
+    }
+  }
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = cnt[i] ? sum[i] / cnt[i] : NaN;
+  return { ...grids[0], values: out };
+}
+
+// Scale decoded values in place (unit conversions for ECMWF fields).
+function scaleGridValues(grid, factor) {
+  if (!factor || factor === 1) return grid;
+  const v = grid.values;
+  for (let i = 0; i < v.length; i++) v[i] *= factor;
+  return grid;
+}
+
+// Average already-resampled lat/lon grids that may differ in resolution (the
+// Hybrid GEFS blends the 0.25° AI GEFS mean with the 0.5° GEFS mean): keep the
+// finest geometry and point-sample the others onto it. A cell is NaN unless
+// every component has data — a half-ensemble mean would be misleading.
+function blendGrids(grids) {
+  if (grids.length === 1) return grids[0];
+  let base = grids[0];
+  for (const g of grids) if (g.di < base.di) base = g;
+  const { ni, nj, lon1, lat1, di, dj } = base;
+  const out = new Float32Array(ni * nj);
+  for (let j = 0; j < nj; j++) {
+    const lat = lat1 - j * dj;
+    for (let i = 0; i < ni; i++) {
+      const lon = lon1 + i * di;
+      let sum = 0, ok = true;
+      for (const g of grids) {
+        const v = g === base ? g.values[j * ni + i] : sampleGridAt(g, lat, lon);
+        if (Number.isNaN(v)) { ok = false; break; }
+        sum += v;
+      }
+      out[j * ni + i] = ok ? sum / grids.length : NaN;
+    }
+  }
+  return { ...base, values: out };
+}
+
 // Combine the values of one or more resampled grids into one. `mode` may be a
 // built-in string — 'mag' (vector magnitude, e.g. wind from U/V) or 'diff'
 // (first minus second floored at zero, e.g. multi-hour precip) — or an
@@ -1272,36 +1716,40 @@ export function resampleLambert(grid, step = 0.025) {
         ? values[sj * ni + si] : NaN;
     }
   }
-  return { proj: 'latlon', ni: niT, nj: njT, lon1, lat1, di: step, dj: step, scanMode: 0, values: out };
+  return {
+    proj: 'latlon', ni: niT, nj: njT, lon1, lat1, di: step, dj: step, scanMode: 0,
+    // The source grid's native cell size in degrees (~dx metres of latitude).
+    // The resample target (`step`) deliberately oversamples so Lambert grids
+    // stay crisp; playback pooling may shrink an oversampled grid back down to
+    // this without losing any real model detail (see poolGridForLoop).
+    nativeDi: dx / 111320,
+    values: out,
+  };
 }
 
-// Fetch + decode a single index source into its *native* decoded grid (Lambert
-// or lat/lon), without resampling. `.idx` text is memoised per file in `idxCache`
-// so multi-field reads (overlays, derived parameters, a sounding column) read
-// each index only once.
-async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
-  const f = fhour + (src.fhourDelta || 0);
-  // Apply any per-model level-string override (e.g. NAM lightning at 'surface').
-  const fix = model.levelFix && model.levelFix[src.varName];
-  if (fix) src = { ...src, level: fix };
-  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file, run.storm);
+// Fetch a file's index text, memoised per file in `idxCache` so multi-field
+// reads (overlays, derived parameters, a sounding column) read each index only
+// once. The in-flight promise is cached so concurrent fields share one fetch,
+// but a failure drops the entry so a transient error doesn't poison the cache.
+async function idxTextFor(model, grib, idx, idxCache) {
   if (!idxCache.has(grib)) {
-    // Cache the in-flight promise so concurrent fields share one fetch, but
-    // validate the response and drop the entry on failure so a transient error
-    // doesn't poison the cache with a permanently-rejected promise.
     idxCache.set(grib, (async () => {
       const res = await fetch(modelUrl(model, idx));
       if (!res.ok) throw new Error(`index fetch failed: ${res.status}`);
       return res.text();
     })());
   }
-  let idxText;
   try {
-    idxText = await idxCache.get(grib);
+    return await idxCache.get(grib);
   } catch (e) {
     idxCache.delete(grib);
     throw e;
   }
+}
+
+// Fetch + decode one field from one GRIB file (wgrib2-style `.idx`).
+async function decodeFromFile(model, grib, idx, src, idxCache, onProgress) {
+  const idxText = await idxTextFor(model, grib, idx, idxCache);
   const range = rangeFromIdx(idxText, src);
   const bytes = await fetchRange(modelUrl(model, grib), range, onProgress);
   // decodeGrib2 is async (some packings await a PNG/JPEG2000 pass), so await it
@@ -1309,8 +1757,74 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
   return normalizeScan(await decodeGrib2(bytes, range.sub));
 }
 
+// Fetch + decode a single index source into its *native* decoded grid (Lambert
+// or lat/lon), without resampling. Handles the three file layouts here:
+//   • one field per wgrib2-indexed file (every NCEP model),
+//   • per-member files averaged into an ensemble mean (AI GEFS),
+//   • ECMWF `.index` files, where an ensemble file carries every member as a
+//     separate byte range — all matching ranges are fetched and averaged.
+async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
+  const f = fhour + (src.fhourDelta || 0);
+  // Apply any per-model level-string override (e.g. NAM/RAP lightning at 'surface').
+  const fix = model.levelFix && model.levelFix[src.varName];
+  if (fix) src = { ...src, level: fix };
+
+  // Per-member files (AI GEFS): decode every member and average. Individual
+  // member failures are tolerated — a cycle mid-upload is still usable — but a
+  // mean of less than half the ensemble would be misleading, so that throws.
+  if (model.members) {
+    let done = 0;
+    const grids = await mapConcurrent(model.members, ENS_CONCURRENCY, async (member) => {
+      const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file, run.storm, member);
+      try {
+        const g = await decodeFromFile(model, grib, idx, src, idxCache);
+        if (onProgress) onProgress(++done / model.members.length);
+        return g;
+      } catch (_) {
+        if (onProgress) onProgress(++done / model.members.length);
+        return null;
+      }
+    });
+    const ok = grids.filter(Boolean);
+    if (ok.length < Math.ceil(model.members.length / 2))
+      throw new Error(`only ${ok.length}/${model.members.length} ensemble members available`);
+    return meanOfGrids(ok);
+  }
+
+  const { grib, idx } = model.keysFor(run.dayStr, run.cycle, f, src.file, run.storm);
+
+  if (model.idxFormat === 'ecmwf') {
+    const q = ecmwfQuery(model, src);
+    if (!q) throw new Error(`field ${src.varName}/${src.level} not available from ${model.label}`);
+    const idxText = await idxTextFor(model, grib, idx, idxCache);
+    const ranges = rangesFromEcmwfIndex(idxText, q);
+    let done = 0;
+    const grids = await mapConcurrent(ranges, ENS_CONCURRENCY, async (range) => {
+      const bytes = await fetchRange(modelUrl(model, grib), range,
+        ranges.length === 1 ? onProgress : null);
+      const g = normalizeScan(await decodeGrib2(bytes, range.sub));
+      if (onProgress && ranges.length > 1) onProgress(++done / ranges.length);
+      return g;
+    });
+    return scaleGridValues(meanOfGrids(grids), q.scale);
+  }
+
+  return decodeFromFile(model, grib, idx, src, idxCache, onProgress);
+}
+
 // Fetch + decode + resample a single index source into a regular lat/lon grid.
+// Blend models (Hybrid GEFS) recurse into their component models and average
+// the resampled results onto the finest shared geometry.
 async function loadSource(model, run, fhour, src, idxCache, onProgress) {
+  if (model.blend) {
+    let done = 0;
+    const parts = await Promise.all(model.blend.map(async (key) => {
+      const g = await loadSource(MODELS[key], run, fhour, src, idxCache);
+      if (onProgress) onProgress(++done / model.blend.length);
+      return g;
+    }));
+    return blendGrids(parts);
+  }
   const decoded = await fetchDecodeSource(model, run, fhour, src, idxCache, onProgress);
   if (decoded.proj === 'lambert') return resampleLambert(decoded);
   return recenterGlobal(decoded);
@@ -1442,7 +1956,9 @@ function recenterGlobal(grid) {
   const { ni, nj, di, dj, lat1 } = grid;
 
   const span = ni * di;
-  if (Math.abs(span - 360) <= di && lon1 <= 1) { // full globe starting near 0°
+  // Only grids starting near 0° (GFS-style) need the roll; a full globe already
+  // starting at −180° (ECMWF) is in map order as-is.
+  if (Math.abs(span - 360) <= di && lon1 >= -1 && lon1 <= 1) { // full globe starting near 0°
     const half = Math.round(180 / di) % ni;
     if (half) {
       const rolled = new Float32Array(ni * nj);
@@ -1547,7 +2063,7 @@ async function loadOverlays(model, run, fhour, ov, idxCache) {
 // physical values. `run` is an entry from listModels; `fhour` an integer.
 export async function loadModel(modelKey, productId, run, fhour, onProgress) {
   const model = MODELS[modelKey];
-  const product = MODEL_PRODUCTS[productId];
+  const product = model && productForModel(model, productId);
   if (!model || !product) throw new Error('unknown model/product');
   const idxCache = new Map();
 
@@ -1582,6 +2098,9 @@ export async function loadModel(modelKey, productId, run, fhour, onProgress) {
   grid.runTime = run.time;
   // Valid time = cycle time + forecast hour.
   grid.time = new Date(run.time.getTime() + fhour * 3600 * 1000);
-  grid.key = model.keysFor(run.dayStr, run.cycle, fhour, undefined, run.storm).grib;
+  // Blend models have no files of their own — key the frame off the first
+  // component model's file.
+  const keyModel = model.blend ? MODELS[model.blend[0]] : model;
+  grid.key = `${model.id}:${keyModel.keysFor(run.dayStr, run.cycle, fhour, undefined, run.storm).grib}`;
   return grid;
 }

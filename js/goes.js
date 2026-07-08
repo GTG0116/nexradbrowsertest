@@ -15,6 +15,7 @@
 // Object keys are  PRODUCT/YYYY/DOY/HH/OR_ABI-L2-<sector>-...<start>_..._c....nc
 
 import { HDF5File } from './hdf5.js';
+import { MIRS_SOURCES } from './mirs.js';
 import { decodeBzip2 } from './bzip2.js';
 
 export const SATELLITES = {
@@ -25,6 +26,12 @@ export const SATELLITES = {
   // noaa-himawari8 bucket is the retired Himawari-8 archive and no longer
   // updates. Imagery is the L1b Full Disk product (Himawari Standard Data).
   'himawari9': { bucket: 'https://noaa-himawari9.s3.amazonaws.com', label: 'Himawari-9', lon0: 140.7, family: 'himawari' },
+  // JPSS passive-microwave imagery (MIRS ATMS granules; see mirs.js). These are
+  // polar orbiters — swath products on per-pixel lat/lon, not a fixed disk —
+  // so the app renders them through the lat/lon grid layer instead of the
+  // geostationary shader.
+  ...Object.fromEntries(Object.entries(MIRS_SOURCES).map(([key, s]) =>
+    [key, { bucket: s.bucket, label: s.label, family: 'mirs' }])),
 };
 
 // Sectors. `product` is the S3 product prefix; `match` filters the sector token
@@ -55,6 +62,9 @@ export const SECTORS = {
   target: {
     label: 'Target Sector', product: 'AHI-L1b-Target', refresh: 'every ~2.5 min', family: 'himawari',
     segments: 1, framePrefix: 'R30', region: (f) => `R30${f}`, commonCFAC: 40932549,
+  },
+  swath: {
+    label: 'Polar swaths (33-min granules)', refresh: '~2 passes/day per point', family: 'mirs',
   },
 };
 

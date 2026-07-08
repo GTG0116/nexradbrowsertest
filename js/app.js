@@ -16,9 +16,10 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, scen
 import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
+import { MIRS_PRODUCTS, MIRS_ORDER, isMirsSat, listMirsScenes, loadMirsGrid, mirsGridBBox } from './mirs.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from './mrms.js';
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, loadModel, forecastHours,
-  modelSupports, defaultProductFor } from './models.js';
+  modelSupports, defaultProductFor, setModelProxy } from './models.js';
 import { OBS_PRODUCTS, OBS_CATEGORIES, listObservations, loadObservation } from './observations.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
@@ -915,6 +916,10 @@ const state = {
     displayMeta: null,
     _bbox: null,
     layer: null,
+    // Microwave (MIRS) swath state: the rasterised grid of the shown granule
+    // and its dedicated GPU grid layer (see mirs.js).
+    mirsGrid: null,
+    mirsLayer: null,
     // Active cyclone crop: { id, name, lat, lon, bbox }. When set (via the
     // sector picker's "Active cyclones" group or a storm's "View on satellite"
     // button) the full-disk scene is cropped to the storm's bbox.
@@ -2592,7 +2597,16 @@ function refreshActive() {
 // ---------------------------------------------------------------------------
 function satProviderName() {
   const sat = SATELLITES[state.sat.satKey];
+  if (sat && sat.family === 'mirs') return 'MIRS';
   return sat && sat.family === 'himawari' ? 'Himawari' : 'GOES';
+}
+
+// The microwave (MIRS) "satellites" carry their own product set; keep
+// state.sat.productId valid for whichever family is selected.
+function normalizeSatProduct() {
+  const mirs = isMirsSat(state.sat.satKey);
+  if (mirs && !MIRS_PRODUCTS[state.sat.productId]) state.sat.productId = 'BT89';
+  if (!mirs && MIRS_PRODUCTS[state.sat.productId]) state.sat.productId = 'C13';
 }
 
 function selectedConusView() {
@@ -2789,8 +2803,13 @@ function initSatSelects() {
     const sectors = sectorsForSatellite(state.sat.satKey);
     if (!sectors[state.sat.sectorKey]) state.sat.sectorKey = Object.keys(sectors)[0];
     rebuildSectorSelect();
+    // Crossing between the geostationary imagers and the microwave sounders
+    // swaps the whole product set (and its legend).
+    normalizeSatProduct();
+    if (state.mode === 'satellite') { buildSatProductButtons(); buildSatLegend(); }
     state.sat._centered = false;
     state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
+    state.sat.mirsGrid = null;
     clearSatellite();
     loadSatScenes();
     saveSettings();
@@ -2851,6 +2870,31 @@ function initSatSelects() {
 function buildSatProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-grid';
+  normalizeSatProduct();
+  // Microwave (MIRS) products: retrieved fields + ATMS brightness temperatures.
+  if (isMirsSat(state.sat.satKey)) {
+    for (const id of MIRS_ORDER) {
+      const p = MIRS_PRODUCTS[id];
+      const btn = document.createElement('button');
+      btn.className = 'product-btn';
+      btn.dataset.id = id;
+      btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+      if (id === activeProductId()) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        if (routeProductToPane(id)) return;
+        ensureLiveForSwitch();
+        cancelFrameWarm();
+        state.sat.productId = id;
+        document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+        buildSatLegend();
+        if (state.sat.sceneKey) loadSatScene(state.sat.sceneKey); // granule cached; only the field re-rasterises
+        updateSatInfo();
+        saveSettings();
+      });
+      el.productButtons.appendChild(btn);
+    }
+    return;
+  }
   const add = (id, label, name) => {
     const btn = document.createElement('button');
     btn.className = 'product-btn';
@@ -2905,7 +2949,9 @@ async function loadSatScenes() {
   buildSatList();
   try {
     const when = state.live ? new Date() : state.date;
-    const scenes = await listScenes(state.sat.satKey, state.sat.sectorKey, when);
+    const scenes = isMirsSat(state.sat.satKey)
+      ? await listMirsScenes(state.sat.satKey, when)
+      : await listScenes(state.sat.satKey, state.sat.sectorKey, when);
     state.sat.scenes = scenes;
     buildSatList();
     setStatus(`${scenes.length} ${satProviderName()} scenes`);
@@ -2930,6 +2976,29 @@ async function loadSatScene(key) {
   setStatus(`downloading ${satProviderName()}…`, true);
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
+  // Microwave swaths take their own decode path: NetCDF granule → rasterised
+  // lat/lon grid, drawn through the shared GPU grid layer.
+  if (isMirsSat(state.sat.satKey)) {
+    try {
+      const grid = await loadMirsGrid(state.sat.satKey, key, state.sat.productId, (p) => {
+        if (seq === satLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
+      });
+      if (seq !== satLoadSeq) return;
+      state.sat.mirsGrid = grid;
+      state.sat.scene = null;
+      state.sat.displayMeta = { width: grid.ni, height: grid.nj };
+      state.sat._bbox = mirsGridBBox(grid);
+      renderSatellite();
+      updateSatInfo();
+      setStatus(`${satProviderName()} ${grid.product.name} loaded`);
+    } catch (e) {
+      if (seq === satLoadSeq) setStatus(`MIRS error: ${e.message}`);
+      console.error(e);
+    } finally {
+      if (seq === satLoadSeq) el.progress.classList.remove('show');
+    }
+    return;
+  }
   try {
     const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
@@ -2967,6 +3036,33 @@ function setSatelliteSource(map) {
 
 function clearSatellite() {
   if (state.sat.layer) state.sat.layer.clear();
+  if (state.sat.mirsLayer) state.sat.mirsLayer.clear();
+}
+
+// The microwave swath rides the same GPU grid layer family as MRMS, on its own
+// layer id so it can coexist with the geostationary satellite layer object.
+function setMirsSource(map) {
+  if (!state.sat.mirsLayer) state.sat.mirsLayer = createGridLayer('sat-mirs');
+  if (!map.getLayer('sat-mirs'))
+    map.addLayer(state.sat.mirsLayer, dataLayerAnchor(map));
+}
+
+function drawMirsGrid(grid) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  setMirsSource(map);
+  state.sat.mirsLayer.setGrid(grid, resolveGridProduct(grid.product));
+  state.sat.mirsLayer.setOpacity(state.opacity);
+  state.sat.mirsLayer.setSmooth(state.smooth);
+}
+
+function drawMirsPayload(payload) {
+  const map = state.map;
+  if (!map || !state.styleReady) return;
+  setMirsSource(map);
+  state.sat.mirsLayer.showPrepared(payload);
+  state.sat.mirsLayer.setOpacity(state.opacity);
+  state.sat.mirsLayer.setSmooth(state.smooth);
 }
 
 function renderSatellite() {
@@ -2979,6 +3075,16 @@ function renderSatellite() {
     updateDock();
     return;
   }
+  if (isMirsSat(state.sat.satKey)) {
+    if (state.sat.layer) state.sat.layer.clear(); // leaving no stale GOES frame under the swath
+    if (state.sat.mirsGrid) drawMirsGrid(state.sat.mirsGrid);
+    else if (state.sat.mirsLayer) state.sat.mirsLayer.clear();
+    renderLayerStack();
+    syncSplit();
+    updateDock();
+    return;
+  }
+  if (state.sat.mirsLayer) state.sat.mirsLayer.clear();
   const scene = state.sat.scene;
   if (!scene) { clearSatellite(); return; }
   const payload = buildSatPayload(scene);
@@ -3014,6 +3120,11 @@ function drawSatScene(meta, rgba, bbox) {
 
 function buildSatLegend() {
   const id = state.sat.productId;
+  if (isMirsSat(state.sat.satKey) && MIRS_PRODUCTS[id]) {
+    const p = resolveGridProduct(MIRS_PRODUCTS[id]);
+    el.legend.innerHTML = legendHTML(p, p.scale);
+    return;
+  }
   if (id.startsWith('C')) {
     const band = parseInt(id.slice(1), 10);
     const meta = SAT_CHANNELS[band - 1];
@@ -3047,7 +3158,7 @@ function updateSatInfo() {
   const s = state.sat;
   const sat = SATELLITES[s.satKey];
   const sec = SECTORS[s.sectorKey];
-  const t = s.scene && s.scene.time;
+  const t = (s.scene && s.scene.time) || (isMirsSat(s.satKey) && s.mirsGrid && s.mirsGrid.time);
   const grid = s.displayMeta || s.scene;
   el.satInfo.innerHTML = `
     <div class="meta-row"><span>Satellite</span><b>${sat.label}</b></div>
@@ -3451,12 +3562,28 @@ function initModelSelects() {
   // A saved product may not exist on the (saved) model — fall back if so.
   if (!modelSupports(state.models.modelKey, state.models.productId))
     state.models.productId = defaultProductFor(state.models.modelKey);
+  // The CORS-restricted models (HREF/REFS on hosts without CORS headers) only
+  // work through a user-supplied proxy; wire it up before anything probes them.
+  setModelProxy(localStorage.getItem('modelDataProxy') || '');
   el.modelSelect.innerHTML = '';
-  for (const [key, m] of Object.entries(MODELS)) {
-    const o = document.createElement('option');
-    o.value = key; o.textContent = m.label;
-    if (key === state.models.modelKey) o.selected = true;
-    el.modelSelect.appendChild(o);
+  // Group the long model list: deterministic first, then ensembles, then the
+  // storm-following hurricane models.
+  const MODEL_GROUPS = [
+    ['Deterministic', (m) => !m.group && !m.stormBased],
+    ['Ensembles', (m) => m.group === 'ensemble'],
+    ['Hurricane (storm-based)', (m) => m.stormBased],
+  ];
+  for (const [label, match] of MODEL_GROUPS) {
+    const og = document.createElement('optgroup');
+    og.label = label;
+    for (const [key, m] of Object.entries(MODELS)) {
+      if (!match(m)) continue;
+      const o = document.createElement('option');
+      o.value = key; o.textContent = m.label;
+      if (key === state.models.modelKey) o.selected = true;
+      og.appendChild(o);
+    }
+    if (og.children.length) el.modelSelect.appendChild(og);
   }
   el.modelSelect.addEventListener('change', () => {
     state.models.modelKey = el.modelSelect.value;
@@ -3672,7 +3799,13 @@ async function loadModelList() {
     state.models.runs = runs;
     buildModelList();
     setStatus(`${runs.length} model runs`);
-    if (!runs.length) return;
+    if (!runs.length) {
+      // A CORS-restricted source with no proxy configured lists nothing — say
+      // why instead of leaving a bare "0 model runs".
+      const m = MODELS[state.models.modelKey];
+      if (m && m.corsNote && !localStorage.getItem('modelDataProxy')) setStatus(m.corsNote);
+      return;
+    }
     const latest = runs[runs.length - 1].key;
     // LIVE must not trap the user on the newest cycle: a 60 s auto-refresh used
     // to force-select `latest` here, snapping back any older run the user had
@@ -4073,7 +4206,10 @@ function activeSiteIcao() {
 function ensureLayerTargets(layer) {
   if (layer.source === 'radar' && !layer.siteId) layer.siteId = activeSiteIcao();
   if (layer.source === 'satellite') {
-    if (!layer.satKey || !SATELLITES[layer.satKey]) layer.satKey = state.sat.satKey;
+    // The extra-layer stack draws geostationary scenes only — a microwave
+    // (MIRS) key here (or as the fallback) is replaced with GOES-East.
+    if (!layer.satKey || !SATELLITES[layer.satKey] || isMirsSat(layer.satKey))
+      layer.satKey = isMirsSat(state.sat.satKey) ? 'goes19' : state.sat.satKey;
     const sectors = sectorsForSatellite(layer.satKey);
     if (!layer.sectorKey || !sectors[layer.sectorKey]) {
       layer.sectorKey = sectors[state.sat.sectorKey] ? state.sat.sectorKey : Object.keys(sectors)[0];
@@ -4183,7 +4319,7 @@ function syncLayerTargetSelects(layer) {
   }
   if (layer.source === 'satellite') {
     if (el.layerSatSelect) {
-      fillSelectOnce(el.layerSatSelect, Object.entries(SATELLITES).map(([key, sat]) => [key, sat.label]));
+      fillSelectOnce(el.layerSatSelect, Object.entries(SATELLITES).filter(([, sat]) => sat.family !== 'mirs').map(([key, sat]) => [key, sat.label]));
       el.layerSatSelect.value = layer.satKey;
     }
     if (el.layerSectorSelect) {
@@ -4525,7 +4661,8 @@ async function renderRadarUserLayer(layer, seq) {
 // When the layer targets the exact satellite+sector the main view is showing, the
 // already-decoded live scene is reused instead of a second download.
 async function ensureLayerSatScene(layer, seq) {
-  const satKey = (layer.satKey && SATELLITES[layer.satKey]) ? layer.satKey : state.sat.satKey;
+  const satKey = (layer.satKey && SATELLITES[layer.satKey] && !isMirsSat(layer.satKey)) ? layer.satKey
+    : (isMirsSat(state.sat.satKey) ? 'goes19' : state.sat.satKey);
   const sectors = sectorsForSatellite(satKey);
   const sectorKey = sectors[layer.sectorKey] ? layer.sectorKey : state.sat.sectorKey;
   if (state.sat.scene && satKey === state.sat.satKey && sectorKey === state.sat.sectorKey)
@@ -5259,6 +5396,17 @@ function sampleRadarAtProduct(productId, lat, lon) {
 }
 
 function sampleSatAt(lat, lon) {
+  if (isMirsSat(state.sat.satKey)) {
+    const grid = state.sat.mirsGrid;
+    if (!grid) return null;
+    const p = resolveGridProduct(grid.product);
+    const i = Math.round((((lon - grid.lon1) % 360) + 360) % 360 / grid.di);
+    const j = Math.round((grid.lat1 - lat) / grid.dj);
+    if (i < 0 || i >= grid.ni || j < 0 || j >= grid.nj) return { out: true };
+    const v = grid.values[j * grid.ni + i];
+    if (Number.isNaN(v) || !(v >= p.floor)) return { main: 'no data', sub: p.id };
+    return { main: fmtValue(p, v), sub: p.id };
+  }
   const scene = state.sat.scene;
   if (!scene) return null;
   const id = state.sat.productId;
@@ -5313,7 +5461,10 @@ function dockInfo() {
   if (state.mode === 'satellite') {
     const id = state.sat.productId;
     let prod, name;
-    if (id.startsWith('C')) {
+    if (isMirsSat(state.sat.satKey) && MIRS_PRODUCTS[id]) {
+      prod = id;
+      name = MIRS_PRODUCTS[id].name;
+    } else if (id.startsWith('C')) {
       const band = parseInt(id.slice(1), 10);
       const ch = SAT_CHANNELS[band - 1];
       prod = id;
@@ -6140,12 +6291,23 @@ const mqSmallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
 // memory is bounded no matter how many forecast hours the run has — short runs
 // keep native resolution, very long global runs pool a step or two coarser.
 function poolGridForLoop(grid, frameCount) {
-  const budget = mqSmallScreen.matches ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
+  const small = mqSmallScreen.matches;
+  const budget = small ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
   const budgetCells = Math.max(
     120 * 60, // quality floor — never pool below roughly a 3°-cell global grid
     Math.floor(budget / Math.max(1, frameCount) / MODEL_LOOP_BYTES_PER_CELL)
   );
   let factor = Math.ceil(Math.sqrt((grid.ni * grid.nj) / budgetCells));
+  // Loops must not *look* downscaled. Lambert grids are resampled onto an
+  // oversampled lat/lon target (models.js stamps `nativeDi` with the source
+  // cell size), so pooling down to the model's native resolution is free —
+  // but pooling past it visibly coarsens the field. On desktop, clamp the
+  // budget factor so a pooled cell never grows beyond one native model cell;
+  // phones keep the unclamped budget (memory there is the harder limit).
+  if (!small) {
+    const nativeFactor = Math.max(1, Math.floor((grid.nativeDi || grid.di) / grid.di));
+    factor = Math.min(factor, nativeFactor);
+  }
   // Never keep more cells than the GPU texture cap would preserve anyway.
   factor = Math.max(factor, Math.ceil(Math.max(grid.ni, grid.nj) / MODEL_PLAYBACK_TARGET_DIM));
   return poolGridByFactor(grid, factor);
@@ -6271,6 +6433,18 @@ async function buildPlaybackProvider(opts = {}) {
   }
   if (state.mode === 'satellite') {
     const frames = allFrames ? state.sat.scenes : state.sat.scenes.slice(-n);
+    // Microwave granules loop as prepared grid payloads (like MRMS frames).
+    if (isMirsSat(state.sat.satKey)) {
+      return {
+        frames: frames.map((v) => ({ label: v.label, time: v.time, ck: `${state.sat.satKey}:${v.key}`, key: v.key })),
+        async load(f) {
+          const grid = await loadMirsGrid(state.sat.satKey, f.key, state.sat.productId);
+          return prepareGridTexture(grid, resolveGridProduct(grid.product));
+        },
+        render(payload) { drawMirsPayload(payload); },
+        idle() { renderSatellite(); },
+      };
+    }
     return {
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {

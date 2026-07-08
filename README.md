@@ -162,6 +162,19 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
 - **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
   inverts web-mercator to lon/lat and runs the geostationary fixed-grid navigation
   *backwards* per pixel, so the imagery stays crisp at any zoom.
+- **Passive microwave imagery** (`js/mirs.js`): the same Satellite picker also
+  offers **NOAA-21 / NOAA-20 / Suomi NPP Microwave (MIRS)** — the ATMS sounder's
+  MIRS retrievals from the CORS-enabled NODD JPSS buckets
+  (`noaa-nesdis-{n21,n20,snpp}-pds`, `NPR_MIRS_IMG_33min`). Each ~33-minute
+  NetCDF-4 granule decodes through the same in-house HDF5 reader (which grew a
+  general N-D chunk scatter for the (scan × fov × channel) brightness-temperature
+  stack). Products: **88.2 GHz and 183 GHz brightness temperatures** (ice
+  scattering makes deep convection pop at 89 GHz), rain rate, TPW, cloud liquid
+  water, ice water path, snowfall rate, snow water equivalent, sea-ice
+  concentration and skin temperature. A polar swath has per-pixel lat/lon rather
+  than a fixed disk, so each granule is rasterised onto a 0.1° lat/lon grid with
+  a distance-weighted footprint splat and drawn through the shared GPU grid
+  layer — legend, inspect readout and granule-by-granule playback included.
 
 ### MRMS (`noaa-mrms-pds`)
 
@@ -213,6 +226,52 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     which has no CORS mirror and the aggressive rate limits this app avoids. HAFS
     GRIB2 scans south→north, so its grids are row-flipped to the usual north→south
     order on decode (`normalizeScan` in `js/models.js`).
+  - **ECMWF IFS** and **ECMWF AIFS** (0.25° global, the CORS-enabled
+    `ecmwf-forecasts` open-data bucket) — all four cycles; IFS 3-hourly to F144
+    (00/12z continuing 6-hourly to F240), AIFS 6-hourly to F360. ECMWF's GRIB2
+    is CCSDS/AEC-packed (Data Representation Template 5.42), so `js/grib2.js`
+    grew a pure-JS CCSDS 121.0 adaptive-entropy (Rice) decoder — verified
+    bit-exact against ecCodes — and its sidecars are MARS-style JSON-lines
+    `.index` files rather than wgrib2 `.idx`, translated from the shared
+    NCEP-style product descriptors (`ecmwfQuery` in `js/models.js`). Units are
+    converted on decode (tp/sf metres → mm, cloud fraction → %), and dewpoint /
+    feels-like come from the direct 2 m dewpoint field (ECMWF posts no 2 m RH).
+- **Ensembles**, grouped separately in the Model picker:
+  - **GEFS Ens Mean** — NCEP's posted ensemble-mean (`geavg`) files: 0.25°
+    select surface fields plus 0.5° pressure levels, 3-hourly to F240.
+  - **AI GEFS Ens Mean** (Project EAGLE, `EAGLE_ensemble/` in the GraphCast
+    bucket) — no mean is published, so the app fetches the same field from all
+    31 members (control + 30 perturbations, one Range request each) and
+    averages them client-side; pressure-level products, 6-hourly to F384.
+  - **Hybrid GEFS Ens Mean** — NOAA's HGEFS "grand ensemble" combines the 31
+    physics GEFS members with the 31 AI GEFS members; with equal member counts
+    the grand mean is exactly the average of the two means, so the app blends
+    the GEFS `geavg` with the client-computed AI GEFS mean (resampling the 0.5°
+    GEFS onto the 0.25° grid).
+  - **ECMWF ENS Mean** and **AIFS ENS Mean** — the open-data `enfo` streams pack
+    all ~50 perturbed members into one file per step, indexed per member; the
+    app Range-fetches every member's field and averages. Heavier than a
+    deterministic frame (a 2 m-temperature mean is ~50 small downloads), so
+    expect a few seconds per frame.
+  - **HREF Ens Mean** (3 km CONUS) — the one deliberate exception to the "no
+    NOMADS" rule: HREF's ensemble products exist *only* on NOMADS, and the
+    access pattern here (one tiny `.idx` + one ranged GET per frame) is far
+    below the bulk Level-II downloads the rule was written for. Reflectivity
+    comes from the probability-matched-mean (`pmmn`) file, everything else from
+    `mean`. **Caveat:** NOMADS still sends no CORS headers, so a stock browser
+    can't fetch it until NOAA enables CORS — or you set
+    `localStorage.modelDataProxy` to a CORS-proxy prefix (the target URL is
+    appended URL-encoded, the same convention as the radar `setProxy`).
+  - **REFS Ens Mean** (3 km CONUS) — the RRFS-based Rapid Refresh ensemble
+    (`rrfs_a/refs.*` on `noaa-rrfs-pds`), hourly F01–F60, same product routing
+    as HREF. That bucket doesn't send CORS headers yet either, so it shares the
+    `modelDataProxy` caveat.
+- **Full-quality loops**: playback keeps every forecast hour resident as packed
+  16-bit codes; the pooling that used to fit long runs into the memory budget
+  no longer costs visible quality on desktop — a pooled cell is never allowed
+  to grow beyond one *native* model cell (`nativeDi` from the Lambert resample),
+  so oversampled CONUS grids shed only redundant pixels and native-resolution
+  global grids loop unpooled. Phones keep the stricter memory budget.
 - **Per-model product menus**: each model advertises only the fields its GRIB2
   output actually carries (`MODEL_PRODUCT_SUPPORT` in `js/models.js`), so the
   picker hides products a model can't supply — e.g. NAM drops the 90/255 mb-layer

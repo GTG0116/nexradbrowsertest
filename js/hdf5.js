@@ -450,6 +450,9 @@ export class HDF5File {
           let q = m.dp + 3 + this.offSize;
           chunkDims = [];
           for (let i = 0; i < dim; i++) { chunkDims.push(this.u32(q)); q += 4; }
+          // The layout message's dimensionality is rank+1: the last "dimension"
+          // is the element size in bytes, not a chunk extent — drop it.
+          chunkDims.pop();
         }
       } else if (m.type === 11) {
         filters = this._parseFilters(m.dp);
@@ -594,8 +597,9 @@ export class HDF5File {
       : signed ? (elsize === 1 ? (o) => view.getInt8(o) : elsize === 2 ? (o) => view.getInt16(o, true) : (o) => view.getInt32(o, true))
       : (elsize === 1 ? (o) => rawBytes[o] : elsize === 2 ? (o) => view.getUint16(o, true) : (o) => view.getUint32(o, true));
 
-    // Only 2-D arrays appear in these products; handle the general rank with a
-    // fast 2-D path.
+    // Fast path for the 2-D arrays most products use; other ranks (e.g. the
+    // (scan, fov, channel) MIRS brightness-temperature stack) take the general
+    // odometer walk below.
     if (dims.length === 2) {
       const [H, W] = dims;
       const [CH, CW] = chunkDims;
@@ -615,6 +619,25 @@ export class HDF5File {
       const c0 = offs[0];
       const cw = chunkDims[0];
       for (let c = 0; c < cw && c0 + c < dims[0]; c++) out[c0 + c] = get(c * elsize);
+      return;
+    }
+    // General N-D scatter: walk the chunk in row-major order with an odometer,
+    // mapping each in-bounds element to its flat index in the full array.
+    const rank = dims.length;
+    const idx = new Array(rank).fill(0);
+    const chunkTotal = chunkDims.reduce((a, b) => a * b, 1);
+    for (let e = 0, src = 0; e < chunkTotal; e++, src += elsize) {
+      let dst = 0, inside = true;
+      for (let d = 0; d < rank; d++) {
+        const g = offs[d] + idx[d];
+        if (g >= dims[d]) { inside = false; break; }
+        dst += g * rowStride[d];
+      }
+      if (inside) out[dst] = get(src);
+      for (let d = rank - 1; d >= 0; d--) {
+        if (++idx[d] < chunkDims[d]) break;
+        idx[d] = 0;
+      }
     }
   }
 }

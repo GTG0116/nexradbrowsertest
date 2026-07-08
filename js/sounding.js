@@ -27,6 +27,20 @@ const SOUNDING_SOURCE = {
   rap:      { label: 'RAP',      native: true },
   aigfs:    { label: 'AI GFS',   unavailable: true },
   hrrrcast: { label: 'HRRRCast', unavailable: true },
+  // ECMWF pressure levels carry T/RH/height/wind, so a native column works.
+  ecmwf:    { label: 'ECMWF',    native: true },
+  // AIFS posts specific humidity only (no per-level RH) — no usable dewpoints.
+  aifs:     { label: 'ECMWF AIFS', unavailable: true },
+  // The GEFS mean is a normal single file (geavg), so its column is cheap; the
+  // other ensemble means would re-average every member for every level —
+  // hundreds to thousands of requests for one sounding.
+  gefsens:   { label: 'GEFS Mean',        native: true },
+  aigefsens: { label: 'AI GEFS Mean',     unavailable: true },
+  hgefs:     { label: 'Hybrid GEFS Mean', unavailable: true },
+  ecmwfens:  { label: 'ECMWF ENS Mean',   unavailable: true },
+  aifsens:   { label: 'AIFS ENS Mean',    unavailable: true },
+  href:      { label: 'HREF Mean',        unavailable: true },
+  refs:      { label: 'REFS Mean',        unavailable: true },
   hfsa:       { label: 'HAFS-A (nest)',  native: true },
   hfsaparent: { label: 'HAFS-A Parent',  native: true },
   hfsb:       { label: 'HAFS-B (nest)',  native: true },
