@@ -239,15 +239,16 @@ button {
   height: 26px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 0 10px;
+  gap: 4px;
+  padding: 0 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--ink-dim);
-  font: 600 11px/1 'IBM Plex Mono', ui-monospace, monospace;
-  letter-spacing: 0.45px;
+  font: 600 10px/1 'IBM Plex Mono', ui-monospace, monospace;
+  letter-spacing: 0.3px;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .console-mode .lucide {
@@ -438,19 +439,18 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.sidebar #sourcePanel .mode-switch {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  margin-bottom: 10px;
+/* The 6-way source switch and its "Source" heading live in the top command
+   bar now (#modeSwitch is the same node the bar's nav forwards clicks to —
+   see installCommandBar in redesign-chrome.js) — the sidebar only keeps the
+   per-mode secondary pickers (radar site, satellite/sector, MRMS domain,
+   model, storm, RTMA domain), which the top bar's design has no room for. */
+.sidebar > #sourcePanel > .panel-title,
+.sidebar > #sourcePanel > .mode-switch {
+  display: none;
 }
 
-.sidebar #sourcePanel .mode-switch::before {
-  grid-column: 1 / -1;
-  content: 'Additional data';
-  color: var(--ink-faint);
-  font: 600 9px/1 'IBM Plex Mono', ui-monospace, monospace;
-  letter-spacing: 1px;
-  text-transform: uppercase;
+.sidebar > #sourcePanel {
+  padding-top: 0;
 }
 
 .mode-btn,
@@ -543,6 +543,13 @@ textarea:focus {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.sidebar .product-btn .pb-swatch {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 6px;
+}
+
 .sidebar .product-btn .pb-id {
   min-width: 35px;
   color: inherit;
@@ -607,18 +614,28 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 0 0 1px var(--accent-border), 0 0 10px var(--accent-soft);
 }
 
+/* Single row of compact chips, however many tilts the active VCP carries —
+   never wraps to a second row; scrolls horizontally if it can't all fit. */
 .tilt-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  flex-wrap: nowrap;
+  gap: 4px;
   max-height: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tilt-list::-webkit-scrollbar {
+  display: none;
 }
 
 .tilt-btn {
-  min-width: 44px;
-  min-height: 30px;
-  padding: 6px 8px;
-  font: 600 11px/1 'IBM Plex Mono', ui-monospace, monospace;
+  flex: 1 0 auto;
+  min-width: 34px;
+  min-height: 26px;
+  padding: 5px 6px;
+  font: 600 10px/1 'IBM Plex Mono', ui-monospace, monospace;
+  text-align: center;
 }
 
 .alerts-title {
@@ -654,12 +671,42 @@ input[type='range']::-moz-range-thumb {
 }
 
 .alert-row {
-  padding: 8px 9px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto;
+  padding: 9px 10px;
   color: var(--ink);
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--ac) 8%, var(--panel-2));
   border-color: var(--panel-edge);
   border-radius: 8px;
   box-shadow: none;
+}
+
+.alert-row-dot {
+  display: none;
+}
+
+.alert-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.alert-row-name {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.alert-row-area {
+  font: 500 10px/1.3 'IBM Plex Mono', ui-monospace, monospace !important;
+  color: var(--ink-dim);
+}
+
+.alert-row-time {
+  align-self: center;
+  color: var(--ink-dim);
+  font: 600 10px/1 'IBM Plex Mono', ui-monospace, monospace;
+  white-space: nowrap;
 }
 
 .settings-btn {
@@ -801,6 +848,27 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   color: #04121a;
   background: var(--accent);
   border-color: var(--accent);
+}
+
+.sounding-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 6px 10px;
+  color: var(--ink-dim);
+  background: var(--hud);
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  box-shadow: var(--glow);
+  backdrop-filter: blur(12px);
+  font: 500 10px/1 'IBM Plex Mono', ui-monospace, monospace !important;
+}
+
+.sounding-hint .lucide {
+  width: 12px;
+  height: 12px;
+  color: var(--ink-faint);
 }
 
 .legend {
@@ -951,6 +1019,29 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     border-color: var(--accent);
     border-radius: 7px;
     box-shadow: none;
+  }
+
+  .pb-speed {
+    flex: none;
+    height: 30px;
+    padding: 0 9px;
+    color: var(--ink-dim);
+    background: transparent;
+    border: 1px solid var(--panel-edge);
+    border-radius: 7px;
+    font: 600 11px/1 'IBM Plex Mono', ui-monospace, monospace;
+    cursor: pointer;
+  }
+
+  .pb-speed:hover {
+    color: var(--accent-ink);
+    border-color: var(--accent-border);
+  }
+}
+
+@media (max-width: 759.98px) {
+  .pb-speed {
+    display: none;
   }
 }
 
@@ -1121,6 +1212,47 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   letter-spacing: 1px;
 }
 
+.snd-hodo {
+  position: relative;
+}
+
+.snd-motion {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+  padding: 9px 11px;
+  background: var(--hud);
+  border: 1px solid var(--hud-border);
+  border-radius: 9px;
+  backdrop-filter: blur(10px);
+}
+
+.snd-motion-title {
+  margin-bottom: 2px;
+  color: var(--ink-faint);
+  font: 600 9px/1 'IBM Plex Mono', ui-monospace, monospace !important;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.snd-motion-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.snd-motion-row b {
+  color: var(--ink);
+  font: 700 12px/1 'IBM Plex Mono', ui-monospace, monospace;
+}
+
 .snd-params {
   gap: 8px;
 }
@@ -1204,18 +1336,6 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     padding: 10px;
   }
 
-  .snd-prow:nth-child(3n + 1) {
-    background: color-mix(in srgb, var(--live) 10%, var(--panel-2));
-  }
-
-  .snd-prow:nth-child(3n + 2) {
-    background: color-mix(in srgb, var(--warn) 10%, var(--panel-2));
-  }
-
-  .snd-prow:nth-child(3n) {
-    background: color-mix(in srgb, var(--good) 10%, var(--panel-2));
-  }
-
   .snd-plabel {
     font-size: 10px;
   }
@@ -1223,6 +1343,168 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   .snd-pval {
     font-size: 20px;
   }
+}
+
+/* ----------------------------- Settings popup ----------------------------- */
+
+/* Desktop: the popup reuses the mobile settings sheet's slide-up mechanics but
+   reads as a compact card, not a full-height drawer. */
+@media (min-width: 760px) {
+  .app:not(.mobile) .mobile-sheet {
+    width: min(440px, 94vw);
+  }
+}
+
+.quick-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 6px 2px 16px;
+}
+
+.quick-settings > .opacity-field {
+  margin: 0;
+}
+
+.quick-settings > .opacity-field > span {
+  font: 600 11px/1 'IBM Plex Mono', ui-monospace, monospace !important;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.quick-settings > .opacity-field b {
+  font-size: 13px;
+}
+
+/* Segmented smoothing control substitutes for the native range input, which
+   stays in the DOM (driving applySmooth()) but is visually hidden. */
+#smoothField input#smooth {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.seg-switch {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+}
+
+.seg-btn {
+  flex: 1;
+  text-align: center;
+  padding: 7px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 11px/1 'IBM Plex Mono', ui-monospace, monospace;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+}
+
+.seg-btn.active {
+  background: var(--accent);
+  color: #04121a;
+}
+
+/* Overlay switches (dealias / METAR / rings) as real toggle-switch rows —
+   same #dealiasToggle/#metarsToggle/#ringsToggle buttons, restyled as a
+   track + knob instead of an ON/OFF label. */
+.quick-settings .toggle-field {
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--panel-edge);
+  align-items: center;
+}
+
+.quick-settings .toggle-field:last-child {
+  border-bottom: 0;
+}
+
+.quick-settings .toggle-field > span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0;
+}
+
+.quick-settings .toggle-field .alerts-toggle {
+  position: relative;
+  width: 40px;
+  min-width: 40px;
+  height: 23px;
+  padding: 0;
+  border-radius: 12px;
+  background: var(--panel-3);
+  border-color: transparent;
+  color: transparent;
+  font-size: 0;
+  transition: background 0.15s;
+}
+
+.quick-settings .toggle-field .alerts-toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s;
+}
+
+.quick-settings .toggle-field .alerts-toggle.active {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.quick-settings .toggle-field .alerts-toggle.active::after {
+  transform: translateX(17px);
+}
+
+.more-settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px 0;
+  margin-top: 2px;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--panel-edge);
+  font: 600 10px/1 'IBM Plex Mono', ui-monospace, monospace;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.more-settings-toggle:hover {
+  color: var(--accent-ink);
+}
+
+.more-settings-toggle .lucide {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.15s;
+}
+
+.more-settings-toggle.is-collapsed .lucide {
+  transform: rotate(-90deg);
+}
+
+.more-settings.collapsed {
+  display: none;
 }
 
 /* ------------------------------ Mobile scope ----------------------------- */
@@ -1472,33 +1754,30 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 }
 
-@media (min-width: 760px) and (max-width: 1120px) {
+@media (min-width: 760px) and (max-width: 1320px) {
   .console-site {
     min-width: 180px;
   }
 
   .console-mode {
-    width: 29px;
+    width: 27px;
     justify-content: center;
     padding: 0;
     font-size: 0;
   }
 
+  .console-mode .lucide {
+    margin: 0;
+  }
+}
+
+@media (min-width: 760px) and (max-width: 1120px) {
   .sidebar {
     width: 264px;
   }
 
   .app:not(.mobile) .mobile-dock {
     left: 264px;
-  }
-}
-
-@media (min-width: 760px) {
-  .sidebar #sourcePanel .mode-btn[data-mode='radar'],
-  .sidebar #sourcePanel .mode-btn[data-mode='satellite'],
-  .sidebar #sourcePanel .mode-btn[data-mode='mrms'],
-  .sidebar #sourcePanel .mode-btn[data-mode='models'] {
-    display: none;
   }
 }
 

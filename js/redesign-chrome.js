@@ -17,6 +17,7 @@ function installCommandBar() {
   const consoleClock = document.querySelector('#consoleClock');
   const liveChip = bar.querySelector('.console-live');
   const modeButtons = [...bar.querySelectorAll('[data-console-mode]')];
+  const themeIcon = document.querySelector('#consoleThemeIcon');
 
   const syncSite = () => {
     const option = siteSelect.selectedOptions[0];
@@ -42,11 +43,23 @@ function installCommandBar() {
     if (liveChip) liveChip.classList.toggle('active', Boolean(liveButton?.classList.contains('active')));
   };
 
+  const syncTheme = () => {
+    if (!themeIcon) return;
+    const dark = document.body.classList.contains('theme-dark');
+    const want = dark ? 'moon' : 'sun';
+    if (themeIcon.dataset.icon !== want) {
+      themeIcon.dataset.icon = want;
+      themeIcon.innerHTML = `<i data-lucide="${want}" aria-hidden="true"></i>`;
+      window.lucide?.createIcons?.();
+    }
+  };
+
   const sync = () => {
     syncSite();
     syncMode();
     syncClock();
     syncLive();
+    syncTheme();
   };
 
   modeButtons.forEach((button) => {
@@ -79,7 +92,7 @@ function installCommandBar() {
   liveButton?.addEventListener('click', () => requestAnimationFrame(syncLive));
   clock && new MutationObserver(syncClock).observe(clock, { childList: true, characterData: true, subtree: true });
   new MutationObserver(syncMode).observe(modeSwitch, { attributes: true, subtree: true, attributeFilter: ['class'] });
-  new MutationObserver(syncLive).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  new MutationObserver(() => { syncLive(); syncTheme(); }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
   sync();
 }
 

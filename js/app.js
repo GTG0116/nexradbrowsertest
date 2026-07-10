@@ -1007,7 +1007,10 @@ function cacheEls() {
   el.overlayOpacityField = $('#overlayOpacityField') || (el.opacity && el.opacity.closest('.opacity-field'));
   el.smooth = $('#smooth');
   el.smoothVal = $('#smoothVal');
+  el.smoothField = $('#smoothField');
+  el.smoothSegs = $('#smoothSegs');
   el.ringsToggle = $('#ringsToggle');
+  el.ringsField = $('#ringsField') || (el.ringsToggle && el.ringsToggle.closest('.toggle-field'));
   el.persistToggle = $('#persistToggle');
   el.dealiasToggle = $('#dealiasToggle');
   el.dealiasField = $('#dealiasField');
@@ -1036,6 +1039,7 @@ function cacheEls() {
   el.layerProductSelect = $('#layerProductSelect');
   el.layerStyleSelect = $('#layerStyleSelect');
   el.metarsToggle = $('#metarsToggle');
+  el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
   el.playFrames = $('#playFrames');
@@ -1131,6 +1135,7 @@ function cacheEls() {
   el.dockToolMore = $('#dockToolMore');
   el.dockToolBtn = $('#dockToolBtn');
   el.dockToolMenu = $('#dockToolMenu');
+  el.soundingHint = $('#soundingHint');
   el.breadcrumb = $('#breadcrumb');
   el.breadcrumbText = $('#breadcrumbText');
   el.breadcrumbIcon = $('#breadcrumbIcon');
@@ -1145,6 +1150,12 @@ function cacheEls() {
   el.pageControls = $('#pageControls');
   el.pageSettings = $('#pageSettings');
   el.pageMap = $('#pageMap');
+  // Settings popup quick-access block + the collapsible "more settings" body
+  // beneath it (desktop collapses this by default; mobile keeps it expanded
+  // since it's the only home for Product/Tilt/Source/Alerts there).
+  el.quickSettings = $('#quickSettings');
+  el.moreSettingsToggle = $('#moreSettingsToggle');
+  el.moreSettingsBody = $('#moreSettingsBody');
   el.sourcePanel = $('#sourcePanel');
   el.volumePanel = $('#volumePanel');
   el.alertsPanel = $('#alertsPanel');
@@ -1158,6 +1169,7 @@ function cacheEls() {
   el.sheetPlayback = $('#sheetPlayback');
   el.playSpeed = $('#playSpeed');
   el.playSpeedVal = $('#playSpeedVal');
+  el.playSpeedBtn = $('#playSpeedBtn');
   el.crosshair = $('#crosshair');
   el.crosshairRead = $('#crosshairRead');
 
@@ -1197,6 +1209,7 @@ function cacheEls() {
   el.sndCharts = $('#sndCharts');
   el.sndSkewt = $('#sndSkewt');
   el.sndHodo = $('#sndHodo');
+  el.sndStormMotion = $('#sndStormMotion');
   el.sndParams = $('#sndParams');
 
   // These overflow panels start `hidden` in the raw markup only so they don't
@@ -1629,7 +1642,8 @@ function makeRadarProductButton(id, active) {
   const btn = document.createElement('button');
   btn.className = 'product-btn';
   btn.dataset.id = id;
-  btn.innerHTML = `<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+  const swatch = swatchGradientCss(p.scale);
+  btn.innerHTML = `${swatch ? `<span class="pb-swatch" style="background:${swatch}"></span>` : ''}<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
   if (id === active) btn.classList.add('active');
   btn.addEventListener('click', () => {
     if (routeProductToPane(id)) return;
@@ -1792,6 +1806,24 @@ function legendHTML(p, scale) {
     <div class="legend-title">${p.name} <span>(${u})</span></div>
     <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
     <div class="legend-ticks"><span>${tick(lo)}</span><span>${tick((lo + hi) / 2)}</span><span>${tick(hi)}</span></div>`;
+}
+
+// A small linear-gradient swatch sampled from a product's real color scale —
+// reused by the sidebar's product-picker rows so each row's swatch is the
+// same color scale the legend/radar layer actually draws with, not an
+// invented color.
+function swatchGradientCss(scale) {
+  if (!scale || !scale.rgba) return '';
+  const { rgba, steps } = scale;
+  const segs = 4;
+  const colors = [];
+  for (let i = 0; i <= segs; i++) {
+    let li = Math.round((i / segs) * (steps - 1));
+    if (li >= steps) li = steps - 1;
+    const o = li * 4;
+    colors.push(`rgb(${rgba[o]},${rgba[o + 1]},${rgba[o + 2]})`);
+  }
+  return `linear-gradient(135deg,${colors.join(',')})`;
 }
 
 function splitPaneProduct(id) {
@@ -2557,6 +2589,9 @@ function applyModePanels() {
   placeDesktopVolumePanel();
   document.querySelectorAll('.mode-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
+  // The right-click gesture only opens a sounding in Models mode (elsewhere it
+  // jumps to the nearest radar site instead) — only claim it there.
+  if (el.soundingHint) el.soundingHint.hidden = state.mode !== 'models';
 }
 
 function setMode(mode) {
@@ -5173,6 +5208,7 @@ async function openSounding(loc) {
     el.sndCharts.hidden = false;
     el.sndParams.hidden = false;
     renderSoundingParams(profile);
+    renderStormMotion(profile);
     // One frame later, so the now-visible charts have their final layout size
     // before the canvases size themselves to it.
     requestAnimationFrame(drawSoundingCharts);
@@ -5184,6 +5220,10 @@ async function openSounding(loc) {
   }
 }
 
+// Severe-parameter tile grid: every real row paramRows() computes (grouped by
+// SPC-style category — instability, shear/SRH, composites), flattened into
+// tinted tiles keyed off each row's own tier color (same tiering the plain
+// label:value view used), matching the mockup's tile-grid presentation.
 function renderSoundingParams(profile) {
   const groups = paramRows(profile);
   el.sndParams.innerHTML = groups.map((g) => `
@@ -5191,12 +5231,26 @@ function renderSoundingParams(profile) {
       <h3>${g.title}</h3>
       <div class="snd-pgrid">
         ${g.rows.map((r) => `
-          <div class="snd-prow">
+          <div class="snd-prow" style="--tc:${r.color};background:color-mix(in srgb, ${r.color} 13%, var(--panel-2));border-color:color-mix(in srgb, ${r.color} 30%, var(--panel-edge))">
             <span class="snd-plabel">${r.label}</span>
             <span class="snd-pval" style="color:${r.color}">${r.value}</span>
           </div>`).join('')}
       </div>
     </div>`).join('');
+}
+
+// Storm-motion readout beside the hodograph: Bunkers right/left movers and the
+// real 0–6 km mean wind, all straight from computeParams()'s bunkers() output
+// (profile.params.stormMotion) — no separately-derived numbers.
+function renderStormMotion(profile) {
+  if (!el.sndStormMotion) return;
+  const p = profile.params;
+  const fmt = (dir, spd) => `${Math.round(dir)}° / ${Math.round(spd)} kt`;
+  el.sndStormMotion.innerHTML = `
+    <div class="snd-motion-title">Storm motion</div>
+    <div class="snd-motion-row"><span>Bunkers RM</span><b>${fmt(p.rmDir, p.rmSpd)}</b></div>
+    <div class="snd-motion-row"><span>Bunkers LM</span><b>${fmt(p.lmDir, p.lmSpd)}</b></div>
+    <div class="snd-motion-row"><span>0–6 km mean wind</span><b>${fmt(p.meanDir, p.meanSpd)}</b></div>`;
 }
 
 // (Re)draw both canvases at their current on-screen size — called on open and
@@ -6153,18 +6207,33 @@ function setupCollapsiblePanels() {
   }
 }
 
+// Pull the settings popup's pinned "quick settings" fields (layer opacity,
+// smoothing, and the dealias/METAR/rings overlay switches) out of whichever
+// panel they're natively defined in (Product / Display / Map settings) and
+// into #quickSettings, which sits above the collapsible "more settings" body
+// on both mobile and desktop. Same elements, same listeners — just relocated,
+// so nothing needs to be re-wired here.
+function layoutQuickSettings() {
+  if (!el.quickSettings) return;
+  el.quickSettings.append(el.overlayOpacityField, el.smoothField, el.dealiasField, el.metarsField, el.ringsField);
+}
+
 // Distribute the control panels into the mobile swipe carousel pages. Page 0 is
 // the controls for the current product; page 1 the source settings (its mode
 // switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
 // map settings + metadata. The same DOM nodes are moved, so all wiring is intact.
 function layoutMobilePages() {
+  layoutQuickSettings();
   // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
   // "MRMS frames" / "Model runs") lives with the product controls so the frame
   // picker sits beside the product/tilt controls instead of on the source page.
-  el.pageControls.append(el.productPanel, el.layerPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.tiltPanel, el.fhourPanel, el.satOptsPanel);
+  el.pageControls.append(el.tiltPanel, el.productPanel, el.layerPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.fhourPanel, el.satOptsPanel);
   el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel, el.cyclonesPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Controls', 'Settings', 'Map');
+  // Mobile has no sidebar — this is the only home for these controls, so the
+  // "more settings" body always stays expanded there (see setMoreSettingsCollapsed).
+  setMoreSettingsCollapsed(false);
 }
 
 // Desktop: the core controls live directly in the sidebar (everything has a
@@ -6172,21 +6241,49 @@ function layoutMobilePages() {
 // browsing, display toggles, map/outlook settings, metadata) goes in the
 // settings drawer, which reuses the same sheet/page machinery as mobile.
 function layoutDesktopSidebar() {
+  layoutQuickSettings();
   // .append() moves each node to the end, in order — the settings button and
   // footer note must be included here too (last) or they'd get stranded
   // above whichever of these panels happens to already sit below them.
+  // Layout switch / layer editor / tropical cyclones live in the settings
+  // drawer's "more settings" area on desktop (layoutDesktopDrawer), not the
+  // sidebar, which only shows Source (site picker only — its mode switch and
+  // heading are hidden in favour of the top command bar), Elevation tilt,
+  // Product and Active alerts, per the redesign.
   el.sidebar.append(
-    el.sourcePanel, el.layoutPanel, el.layerPanel, el.productPanel, el.outlookDetailPanel, el.tiltPanel, el.fhourPanel, el.alertsPanel,
-    el.cyclonesPanel, el.settingsBtn, el.sidebarFoot
+    el.sourcePanel, el.tiltPanel, el.fhourPanel, el.productPanel, el.outlookDetailPanel, el.alertsPanel,
+    el.settingsBtn, el.sidebarFoot
   );
   placeDesktopVolumePanel();
 }
 function layoutDesktopDrawer() {
-  el.pageControls.append(el.volumePanel);
-  el.pageSettings.append(el.displayPanel, el.satOptsPanel);
+  layoutQuickSettings();
+  el.pageControls.append(el.volumePanel, el.layoutPanel, el.layerPanel);
+  el.pageSettings.append(el.displayPanel, el.satOptsPanel, el.cyclonesPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
   setSheetTabLabels('Scans', 'Display', 'Map');
   placeDesktopVolumePanel();
+  // The sidebar already surfaces the primary controls directly — collapse the
+  // rest behind "More settings" by default each time the drawer is (re)built.
+  setMoreSettingsCollapsed(true);
+}
+
+// Show/hide the settings popup's secondary content (everything but the pinned
+// quick-settings block). Desktop starts collapsed (the sidebar already shows
+// Elevation/Product/Alerts and the popup itself shows Opacity/Smoothing/
+// Overlays); mobile is always expanded since it has no other way to reach
+// Product/Tilt/Source/Alerts.
+function setMoreSettingsCollapsed(collapsed) {
+  if (!el.moreSettingsBody) return;
+  el.moreSettingsBody.classList.toggle('collapsed', collapsed);
+  if (el.sheetTabs) el.sheetTabs.hidden = collapsed;
+  if (el.moreSettingsToggle) {
+    // Mobile has no way to collapse it (there's nowhere else Product/Tilt/
+    // Source/Alerts would live), so hide the toggle affordance there.
+    el.moreSettingsToggle.hidden = mqSmallScreen.matches;
+    el.moreSettingsToggle.setAttribute('aria-expanded', String(!collapsed));
+    el.moreSettingsToggle.classList.toggle('is-collapsed', collapsed);
+  }
 }
 function placeDesktopVolumePanel() {
   if (!el.volumePanel || mqSmallScreen.matches) return;
@@ -9195,6 +9292,11 @@ function applySmooth(level) {
   state.smoothByMode[state.mode] = state.smooth;
   if (el.smooth) el.smooth.value = String(state.smooth);
   if (el.smoothVal) el.smoothVal.textContent = SMOOTH_LABELS[state.smooth];
+  if (el.smoothSegs) {
+    el.smoothSegs.querySelectorAll('.seg-btn').forEach((b) =>
+      b.classList.toggle('active', Number(b.dataset.level) === state.smooth)
+    );
+  }
   if (state.radarLayer) state.radarLayer.setSmooth(state.smooth);
   if (state.sat.layer) state.sat.layer.setSmooth(state.smooth);
   if (state.mrms.layer) state.mrms.layer.setSmooth(state.smooth);
@@ -9430,6 +9532,17 @@ function init() {
       saveSettings();
     });
   }
+  // Settings-popup segmented smoothing control — a friendlier face on the same
+  // #smooth range input above; driving it through a real 'input' event keeps
+  // applySmooth() as the single source of truth.
+  if (el.smoothSegs) {
+    el.smoothSegs.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      el.smooth.value = btn.dataset.level;
+      el.smooth.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
 
   // Single-site radar overlay for the satellite / MRMS / model modes.
   if (el.radarOverlayToggle) {
@@ -9597,6 +9710,11 @@ function init() {
       el.sheet.hidden ? openSheet() : closeSheet()
     );
   }
+  if (el.moreSettingsToggle) {
+    el.moreSettingsToggle.addEventListener('click', () =>
+      setMoreSettingsCollapsed(!el.moreSettingsBody.classList.contains('collapsed'))
+    );
+  }
 
   if (el.mapProviderSelect) {
     el.mapProviderSelect.value = state.mapProvider;
@@ -9644,11 +9762,24 @@ function init() {
   el.playScrub.addEventListener('input', () =>
     state.playback.seek(Number(el.playScrub.value))
   );
-  el.playSpeed.addEventListener('input', () => {
-    const f = Number(el.playSpeed.value);
+  const setPlaybackFps = (f) => {
+    f = Math.max(1, Math.min(8, f | 0));
+    el.playSpeed.value = String(f);
     el.playSpeedVal.textContent = f;
+    if (el.playSpeedBtn) el.playSpeedBtn.textContent = `${f} FPS`;
     state.playback.setFps(f);
-  });
+  };
+  el.playSpeed.addEventListener('input', () => setPlaybackFps(Number(el.playSpeed.value)));
+  // Persistent timeline bar's own speed control — cycles a few common rates
+  // through the same setFps()/#playSpeed the settings-popup slider drives.
+  if (el.playSpeedBtn) {
+    const FPS_STEPS = [1, 2, 3, 5, 8];
+    el.playSpeedBtn.addEventListener('click', () => {
+      const cur = Number(el.playSpeed.value);
+      const next = FPS_STEPS[(FPS_STEPS.findIndex((f) => f >= cur) + 1) % FPS_STEPS.length] || FPS_STEPS[0];
+      setPlaybackFps(next);
+    });
+  }
 
   mqSmallScreen.addEventListener('change', applyResponsiveLayout);
   applyResponsiveLayout();

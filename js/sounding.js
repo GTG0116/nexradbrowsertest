@@ -246,12 +246,20 @@ export function computeParams(profile) {
   const cinT = cinN >= -50 ? 1 : cinN < -200 ? 0 : (200 + cinN) / 150;
   const stp = Math.max(0, (cape / 1500) * lclT * (srh1 / 150) * shrT * cinT);
 
-  const rmDir = (Math.atan2(-rm[0], -rm[1]) * R2D + 360) % 360;
-  const rmSpd = Math.hypot(rm[0], rm[1]) * MS2KT;
+  const toDirSpd = (v) => ({
+    dir: (Math.atan2(-v[0], -v[1]) * R2D + 360) % 360,
+    spd: Math.hypot(v[0], v[1]) * MS2KT,
+  });
+  const rmDs = toDirSpd(rm);
+  const rmDir = rmDs.dir, rmSpd = rmDs.spd;
+  const meanDs = toDirSpd(sm.mean);
+  const lmDs = toDirSpd(sm.lm);
 
   return {
     stormMotion: sm,
     rmDir, rmSpd,
+    meanDir: meanDs.dir, meanSpd: meanDs.spd,
+    lmDir: lmDs.dir, lmSpd: lmDs.spd,
     srh1, srh3, shr1, shr6,
     lapse: lapse700_500(L),
     lcl, pwat: pwat(L),
