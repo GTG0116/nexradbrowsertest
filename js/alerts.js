@@ -940,11 +940,12 @@ export class AlertsController {
       const row = document.createElement('button');
       row.className = 'alert-row';
       row.style.setProperty('--ac', a.cls.color);
-      row.innerHTML = `<span class="alert-row-dot"></span><span class="alert-row-name">${esc(
+      const p = a.feature.properties || {};
+      row.innerHTML = `<span class="alert-row-dot"></span><span class="alert-row-main"><span class="alert-row-name">${esc(
         a.cls.display
       )}</span><span class="alert-row-area">${esc(
-        (a.feature.properties.areaDesc || '').split(';')[0]
-      )}</span>`;
+        (p.areaDesc || '').split(';')[0]
+      )}</span></span><span class="alert-row-time">${esc(fmtClock(p.ends || p.expires))}</span>`;
       row.addEventListener('click', () => this.openPreview(a.id));
       list.appendChild(row);
     }

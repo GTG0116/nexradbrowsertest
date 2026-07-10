@@ -100,11 +100,13 @@
           <button class="console-mode" type="button" data-console-mode="satellite"><i data-lucide="satellite" aria-hidden="true"></i>Sat</button>
           <button class="console-mode" type="button" data-console-mode="mrms"><i data-lucide="layers-3" aria-hidden="true"></i>MRMS</button>
           <button class="console-mode" type="button" data-console-mode="models"><i data-lucide="line-chart" aria-hidden="true"></i>Models</button>
+          <button class="console-mode" type="button" data-console-mode="outlooks"><i data-lucide="cloud-sun" aria-hidden="true"></i>Outlook</button>
+          <button class="console-mode" type="button" data-console-mode="observations"><i data-lucide="eye" aria-hidden="true"></i>Obs</button>
         </nav>
         <div class="console-command-spacer"></div>
-        <span class="console-live"><span></span>Live</span>
+        <span class="console-live" id="consoleLive"><span></span>Live</span>
         <span class="console-clock" id="consoleClock">--:--:-- UTC</span>
-        <button class="console-icon-button" type="button" data-console-action="theme" title="Switch appearance">◐</button>
+        <button class="console-icon-button" type="button" data-console-action="theme" title="Switch appearance"><span id="consoleThemeIcon"><i data-lucide="sun" aria-hidden="true"></i></span></button>
         <button class="console-icon-button" type="button" data-console-action="settings" title="Settings and data"><i data-lucide="settings-2" aria-hidden="true"></i></button>
       </header>
       <main class="layout">
@@ -235,18 +237,22 @@
             </div>
           </section>
 
+          <section class="panel" id="tiltPanel">
+            <h2 class="panel-title">Elevation tilt</h2>
+            <div id="tiltList" class="tilt-list scroll"></div>
+          </section>
+
           <section class="panel" id="productPanel">
             <h2 class="panel-title">Product</h2>
             <div id="productButtons" class="product-grid"></div>
+            <!-- Overlay opacity moves into the Settings popup's quick-settings
+                 block (#quickSettings) at runtime — see layoutQuickSettings()
+                 in app.js. This label is left as the field's permanent DOM
+                 home (id-stable) even though it's relocated on every layout pass. -->
             <label class="field opacity-field" id="overlayOpacityField">
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
             </label>
-          </section>
-
-          <section class="panel" id="tiltPanel">
-            <h2 class="panel-title">Elevation tilt</h2>
-            <div id="tiltList" class="tilt-list scroll"></div>
           </section>
 
           <section class="panel" id="fhourPanel" hidden>
@@ -325,6 +331,13 @@
                   <button id="timeSrcToggle" class="tz-toggle" type="button" title="Switch between the selected product's time and the live clock">Now</button>
                   <button id="tzToggle" class="tz-toggle" type="button" title="Switch between UTC and your local time zone">Local</button>
                 </div>
+                <!-- Only meaningful in Models mode, where a right-click opens a
+                     forecast sounding at that point (setupSoundingGestures in
+                     app.js) — shown/hidden per mode in applyModePanels(). -->
+                <div id="soundingHint" class="sounding-hint" hidden>
+                  <i data-lucide="mouse-pointer-click" class="lucide sm" aria-hidden="true"></i>
+                  <span>Right-click a point &rarr; forecast sounding</span>
+                </div>
               </div>
               <div id="legend" class="legend"></div>
             </div>
@@ -396,6 +409,12 @@
           <label class="field opacity-field" id="smoothField">
             <span>Smoothing <b id="smoothVal">None</b></span>
             <input type="range" id="smooth" min="0" max="3" value="0" step="1" title="Smooth the plotted radar / satellite / model data — none, low, medium or high" />
+            <div class="seg-switch" id="smoothSegs" role="group" aria-label="Smoothing level">
+              <button type="button" class="seg-btn active" data-level="0">None</button>
+              <button type="button" class="seg-btn" data-level="1">Low</button>
+              <button type="button" class="seg-btn" data-level="2">Med</button>
+              <button type="button" class="seg-btn" data-level="3">High</button>
+            </div>
           </label>
           <div class="toggle-field" id="radarOverlayField" hidden>
             <span>Radar overlay</span>
@@ -472,7 +491,7 @@
                 <option value="dark">Dark</option>
               </select>
             </label>
-            <div class="toggle-field">
+            <div class="toggle-field" id="ringsField">
               <span>Range rings</span>
               <button id="ringsToggle" class="alerts-toggle active" title="Toggle range rings">ON</button>
             </div>
@@ -559,6 +578,7 @@
           <input type="range" id="playScrub" class="pb-scrub" min="0" max="9" value="9" step="1" />
         </div>
         <span id="playLabel" class="pb-label">—</span>
+        <button id="playSpeedBtn" class="pb-speed" type="button" title="Playback speed">3 FPS</button>
         <button id="playClose" class="pb-close" title="Exit playback">✕</button>
       </div>
 
@@ -595,20 +615,37 @@
           <button class="sheet-tab" data-page="2" type="button">Map</button>
         </div>
         <div class="sheet-body" id="sheetBody">
-          <!-- Horizontal swipe carousel: page 0 is the current product's controls,
-               page 1 the source settings (with the source selection bar), page 2 the
-               map settings. Panels are relocated into these pages on mobile. -->
-          <div class="sheet-pager" id="sheetPager">
-            <div class="sheet-page scroll" id="pageControls" data-page="0"></div>
-            <div class="sheet-page scroll" id="pageSettings" data-page="1"></div>
-            <div class="sheet-page scroll" id="pageMap" data-page="2"></div>
-          </div>
-          <div class="sheet-section" id="sheetPlayback" hidden>
-            <h2 class="panel-title">Playback speed</h2>
-            <label class="field opacity-field">
-              <span>Frames per second <b id="playSpeedVal">3</b></span>
-              <input type="range" id="playSpeed" min="1" max="8" value="3" />
-            </label>
+          <!-- Quick settings: the popup's pinned primary content (layer opacity,
+               smoothing, and the overlay switches pulled out of Display/Map
+               settings below). Populated by layoutQuickSettings() in app.js,
+               which reparents the real, ID-backed fields here — no duplicate
+               controls or state. Shown on both mobile and desktop. -->
+          <div class="quick-settings" id="quickSettings"></div>
+
+          <!-- Everything else: the app's full settings surface. On desktop this
+               starts collapsed behind the "More settings" toggle (see
+               toggleMoreSettings() in app.js) since the sidebar already surfaces
+               Elevation/Product/Alerts directly; on mobile it's always expanded
+               — it's the only home for Product/Tilt/Source/Alerts controls there. -->
+          <button type="button" class="more-settings-toggle" id="moreSettingsToggle" aria-expanded="true">
+            More settings <i data-lucide="chevron-down" class="lucide sm" aria-hidden="true"></i>
+          </button>
+          <div class="more-settings" id="moreSettingsBody">
+            <!-- Horizontal swipe carousel: page 0 is the current product's controls,
+                 page 1 the source settings (with the source selection bar), page 2 the
+                 map settings. Panels are relocated into these pages on mobile. -->
+            <div class="sheet-pager" id="sheetPager">
+              <div class="sheet-page scroll" id="pageControls" data-page="0"></div>
+              <div class="sheet-page scroll" id="pageSettings" data-page="1"></div>
+              <div class="sheet-page scroll" id="pageMap" data-page="2"></div>
+            </div>
+            <div class="sheet-section" id="sheetPlayback" hidden>
+              <h2 class="panel-title">Playback speed</h2>
+              <label class="field opacity-field">
+                <span>Frames per second <b id="playSpeedVal">3</b></span>
+                <input type="range" id="playSpeed" min="1" max="8" value="3" />
+              </label>
+            </div>
           </div>
         </div>
       </div>
@@ -635,6 +672,7 @@
             <figure class="snd-chart snd-hodo">
               <figcaption>Hodograph (kt) · storm motion</figcaption>
               <canvas id="sndHodo"></canvas>
+              <div id="sndStormMotion" class="snd-motion"></div>
             </figure>
           </div>
           <div id="sndParams" class="snd-params" hidden></div>
