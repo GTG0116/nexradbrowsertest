@@ -651,7 +651,7 @@ function drawAlertBriefing(ctx, b, mapX, mapY, mapW, mapH, u, mobile, theme, opt
       if (y > bottom) return;
       ctx.textAlign = 'left';
       if (i === 0) {
-        ctx.fillStyle = b.color || '#e2643f';
+        ctx.fillStyle = b.color || '#22d3ee';
         ctx.fillText('•', x0 + pad, y);
       }
       ctx.fillStyle = theme.text;
@@ -893,13 +893,13 @@ function normalizeTheme(theme) {
   const dark = base.mode === 'dark';
   return {
     mode: dark ? 'dark' : 'light',
-    bg: base.bg || '#fffaf2',
-    panel: base.panel || base.bg || '#fffaf2',
+    bg: base.bg || '#e9edf1',
+    panel: base.panel || base.bg || '#ffffff',
     separator: base.separator || 'rgba(42,37,32,0.12)',
-    text: base.text || '#2a2520',
-    dim: base.dim || '#6f655b',
-    faint: base.faint || '#9a8b7b',
-    accent: base.accent || '#e2643f',
+    text: base.text || '#0f1720',
+    dim: base.dim || '#5b6876',
+    faint: base.faint || '#8190a0',
+    accent: base.accent || '#0b93b8',
     alertPanel: base.alertPanel || (dark ? 'rgba(30,30,30,0.98)' : 'rgba(255,250,242,0.98)'),
     alertSoft: base.alertSoft || (dark ? 'rgba(255,255,255,0.06)' : 'rgba(42,37,32,0.055)'),
   };

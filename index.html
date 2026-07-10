@@ -15,7 +15,7 @@
       name="description"
       content="RadarNexus — live WSR-88D NEXRAD radar, GOES/Himawari satellite and NWP models decoded entirely in your browser and draped over an interactive map."
     />
-    <meta name="theme-color" content="#efe7da" />
+    <meta name="theme-color" content="#0a0e13" />
     <!-- Brand icons (favicon + iOS/Android web-app icon), generated from the
          RadarNexus storm mark in logo/. -->
     <link rel="icon" type="image/png" sizes="32x32" href="logo/favicon-32.png" />
@@ -29,7 +29,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
@@ -38,8 +38,9 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/redesign.css" />
   </head>
-  <body>
+  <body class="theme-dark">
     <!-- First-run gate: the viewer needs a Mapbox public access token, which the
          user supplies themselves (kept in localStorage) so the deployment carries
          no shared/billable key. Shown only when no token is stored yet. -->
@@ -78,6 +79,34 @@
     </div>
 
     <div class="app">
+      <!-- Desktop command bar mirrors the supplied console design. Its controls
+           proxy the existing, ID-backed controls below, so the active source,
+           radar site, clock, settings, and theme stay in sync without changing
+           the map application's panel-reparenting logic. -->
+      <header class="console-commandbar" aria-label="Radar controls">
+        <div class="console-brand" aria-label="RadarNexus">
+          <span class="console-brand-mark"><img src="logo/icon-512.png" alt="" /></span>
+          <span>Radar<span>Nexus</span></span>
+        </div>
+        <span class="console-divider" aria-hidden="true"></span>
+        <button class="console-site" type="button" data-console-focus="siteSelect" title="Choose radar site">
+          <i data-lucide="search" aria-hidden="true"></i>
+          <span class="console-site-code" id="consoleSiteCode">KTLX</span>
+          <span class="console-site-name" id="consoleSiteName">Oklahoma City, OK</span>
+          <i data-lucide="chevron-down" aria-hidden="true"></i>
+        </button>
+        <nav class="console-modes" aria-label="Primary data sources">
+          <button class="console-mode active" type="button" data-console-mode="radar"><i data-lucide="radar" aria-hidden="true"></i>Radar</button>
+          <button class="console-mode" type="button" data-console-mode="satellite"><i data-lucide="satellite" aria-hidden="true"></i>Sat</button>
+          <button class="console-mode" type="button" data-console-mode="mrms"><i data-lucide="layers-3" aria-hidden="true"></i>MRMS</button>
+          <button class="console-mode" type="button" data-console-mode="models"><i data-lucide="line-chart" aria-hidden="true"></i>Models</button>
+        </nav>
+        <div class="console-command-spacer"></div>
+        <span class="console-live"><span></span>Live</span>
+        <span class="console-clock" id="consoleClock">--:--:-- UTC</span>
+        <button class="console-icon-button" type="button" data-console-action="theme" title="Switch appearance">◐</button>
+        <button class="console-icon-button" type="button" data-console-action="settings" title="Settings and data"><i data-lucide="settings-2" aria-hidden="true"></i></button>
+      </header>
       <main class="layout">
         <!-- Desktop sidebar: brand, source switching, layout, picker, product,
              secondary controls, opacity and active alerts — everything has a
@@ -657,5 +686,6 @@
     <!-- The radar is drawn by a custom WebGL layer (js/radarLayer.js) straight
          from the polar gate data; no intermediate canvas is needed. -->
     <script type="module" src="js/app.js"></script>
+    <script type="module" src="js/redesign-chrome.js"></script>
   </body>
 </html>

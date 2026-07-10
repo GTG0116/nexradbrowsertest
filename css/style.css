@@ -1225,6 +1225,31 @@ input[type='range']::-moz-range-thumb {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent-ink);
+  animation: productSelectIn var(--dur-base) var(--ease-out);
+}
+
+@keyframes productSelectIn {
+  from { transform: scale(0.96); }
+  to { transform: scale(1); }
+}
+
+/* Outlooks have only a handful of products and durations. Give those controls
+   a compact, chip-like layout so the selector reads as a deliberate two-step
+   choice instead of another long stack in the sidebar. */
+.outlook-product-grid .product-btn {
+  min-height: 58px;
+}
+.outlook-detail-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.outlook-detail-list .vol-group-label {
+  grid-column: 1 / -1;
+}
+.outlook-detail-list .vol-btn {
+  min-height: 38px;
+  justify-content: flex-start;
 }
 
 /* ---------------- Tilt list ---------------- */
@@ -1298,6 +1323,11 @@ input[type='range']::-moz-range-thumb {
   justify-content: space-between;
 }
 .alerts-toggle {
+  min-width: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   background: var(--panel-soft);
   border: 1px solid var(--panel-edge);
   color: var(--ink-dim);
@@ -1313,11 +1343,24 @@ input[type='range']::-moz-range-thumb {
     box-shadow var(--dur-fast) var(--ease-out),
     transform var(--dur-fast) var(--ease-out);
 }
+.alerts-toggle::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
 .alerts-toggle.active {
   color: var(--warn);
   border-color: var(--warn);
   background: rgba(255, 120, 40, 0.14);
   box-shadow: 0 0 14px rgba(255, 120, 40, 0.22);
+}
+.alerts-toggle.active::before {
+  opacity: 1;
+  box-shadow: 0 0 8px currentColor;
 }
 
 /* ---------------- SPC outlook panel ---------------- */

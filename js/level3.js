@@ -26,8 +26,10 @@
 
 import { decodeBzip2 } from './bzip2.js';
 import { makeScale } from './products.js';
+import { loadMrmsFfgGrid } from './mrms.js';
 
 const BUCKET = 'https://unidata-nexrad-level3.s3.amazonaws.com';
+const M_PER_DEG_LAT = 111320; // matches the radar layer's flat-earth gate model
 
 // Per-product decode + geometry. `code` is the Level III message code; `space` is
 // the range-bin spacing in metres (EET is 1 km, the dual-pol QPE grids 0.25 km).
@@ -133,6 +135,13 @@ const VIL_SCALE = seg([
   [30, [235, 225, 60]], [40, [240, 160, 50]], [50, [225, 70, 50]], [65, [180, 30, 90]],
   [80, [240, 90, 240]],
 ]);
+// Flash-flood-guidance exceedance (mm over guidance) — only positive overages are
+// ever coloured (sub-guidance gates go transparent), graduating pale-yellow →
+// magenta with the depth of the overage. Mirrors the MRMS exceedance ramp.
+const EXCEED_SCALE = seg([
+  [1, [255, 245, 140]], [5, [255, 210, 0]], [12, [255, 150, 0]], [25, [255, 70, 0]],
+  [50, [210, 0, 0]], [90, [150, 0, 90]], [127, [255, 0, 255]],
+]);
 const MM_TO_IN = 0.0393700787;
 
 // Single-site Level III products, keyed by the id used in the radar product
@@ -143,14 +152,31 @@ const MM_TO_IN = 0.0393700787;
 const l3 = (id, name, bucketCode, msgCode, unit, scale, disp) =>
   ({ id, name, bucketCode, msgCode, unit, scale, moment: 'L3', dispUnit: disp.unit, dispFactor: disp.factor, dispOffset: 0 });
 
+// A custom FFG-exceedance product: it lists/decodes the single-site QPE frames of
+// `bucketCode` (DAA 1-hr / DUA 3-hr), then subtracts the MRMS-derived guidance grid
+// (recovered from radar QPE ÷ FLASH ratio for `qpeFolder`/`ffgFolder`) sampled at
+// each polar gate. `custom: 'ffgx'` routes loadLevel3() to the exceedance path.
+function ffgx(id, name, bucketCode, msgCode, qpeFolder, ffgFolder) {
+  const p = l3(id, name, bucketCode, msgCode, 'mm', EXCEED_SCALE, { unit: 'in', factor: MM_TO_IN });
+  p.custom = 'ffgx';
+  p.qpeFolder = qpeFolder;
+  p.ffgFolder = ffgFolder;
+  return p;
+}
+
 export const L3_PRODUCTS = {
   ET: l3('ET', 'Echo Tops', 'EET', 135, 'kft', ETOPS_SCALE, { unit: 'kft', factor: 1 }),
   VIL: l3('VIL', 'Vert. Int. Liquid', 'DVL', 134, 'kg/m²', VIL_SCALE, { unit: 'kg/m²', factor: 1 }),
   PR1: l3('PR1', '1-hr Precip', 'DAA', 170, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
   PR3: l3('PR3', '3-hr Precip', 'DU3', 173, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
   PRT: l3('PRT', 'Storm Total Precip', 'DTA', 172, 'mm', QPE_SCALE, { unit: 'in', factor: MM_TO_IN }),
+  FFX1: ffgx('FFX1', '1-hr FFG Exceedance', 'DAA', 170, 'RadarOnly_QPE_01H_00.00', 'FLASH_QPE_FFG01H_00.00'),
+  FFX3: ffgx('FFX3', '3-hr FFG Exceedance', 'DU3', 173, 'RadarOnly_QPE_03H_00.00', 'FLASH_QPE_FFG03H_00.00'),
 };
-export const L3_ORDER = ['ET', 'VIL', 'PR1', 'PR3', 'PRT'];
+export const L3_ORDER = ['ET', 'VIL', 'PR1', 'PR3', 'PRT', 'FFX1', 'FFX3'];
+
+const ENC_SCALE = 10;         // exceedance gate code → mm (0.1 mm per step)
+const EXCEED_FLOOR_MM = 0.25; // ignore sub-quarter-mm overage (radar QPE resolution)
 
 export function isL3Product(id) {
   return Object.prototype.hasOwnProperty.call(L3_PRODUCTS, id);
@@ -214,8 +240,83 @@ export async function fetchLevel3(key, onProgress) {
 
 // Download + decode one frame into the sweep + product the radar layer draws.
 export async function loadLevel3(site, productId, key, onProgress) {
+  const prod = L3_PRODUCTS[productId];
+  if (prod && prod.custom === 'ffgx') return loadLevel3Exceedance(site, productId, key, onProgress);
   const bytes = await fetchLevel3(key, onProgress);
   const decoded = decodeLevel3(bytes);
   if (!decoded) throw new Error('unsupported Level III product');
-  return { decoded, product: L3_PRODUCTS[productId], time: timeForKey(key), key };
+  return { decoded, product: prod, time: timeForKey(key), key };
+}
+
+// A nearest-cell sampler over an MRMS lat/lon grid, in guidance mm (NaN off-grid).
+function ffgSampler(ffg) {
+  const { ni, nj, lon1, lat1, di, dj, values } = ffg;
+  return (lon, lat) => {
+    const ci = Math.round((lon - lon1) / di);
+    const cj = Math.round((lat1 - lat) / dj);
+    if (ci < 0 || ci >= ni || cj < 0 || cj >= nj) return NaN;
+    return values[cj * ni + ci];
+  };
+}
+
+// Re-encode a decoded single-site QPE sweep in place as guidance exceedance: for
+// each gate, project it to lon/lat (same flat-earth model the radar shader uses),
+// look up the guidance there, and store the overage (QPE − FFG) as a 0.1-mm code.
+// Gates with no rain, no guidance, or at/below guidance become code 0 → transparent.
+function applyExceedance(decoded, ffg) {
+  const siteLat = decoded.lat, siteLon = decoded.lon;
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((siteLat * Math.PI) / 180);
+  const sample = ffgSampler(ffg);
+  for (const rad of decoded.sweep.radials) {
+    const m = rad.moments.L3;
+    const { raw, gateCount, firstGate, gateSpacing, offset, scale } = m;
+    const out = new Uint16Array(gateCount);
+    const azr = (rad.azimuth * Math.PI) / 180;
+    const sinA = Math.sin(azr), cosA = Math.cos(azr);
+    for (let g = 0; g < gateCount; g++) {
+      const code = raw[g];
+      if (code < 2) continue;                 // below threshold / no QPE
+      const qpe = (code - offset) / scale;     // mm observed
+      if (!(qpe > 0)) continue;
+      const range = firstGate + g * gateSpacing;
+      const lat = siteLat + (range * cosA) / M_PER_DEG_LAT;
+      const lon = siteLon + (range * sinA) / mPerDegLon;
+      const fg = sample(lon, lat);             // mm guidance
+      if (!(fg >= 0)) continue;                // NaN / no guidance
+      const exc = qpe - fg;
+      if (exc >= EXCEED_FLOOR_MM)
+        out[g] = Math.min(65535, Math.max(2, Math.round(exc * ENC_SCALE)));
+    }
+    rad.moments.L3 = { raw: out, gateCount, firstGate, gateSpacing, offset: 0, scale: ENC_SCALE };
+  }
+  decoded.offset = 0;
+  decoded.scale = ENC_SCALE;
+}
+
+// Guidance grids change slowly (issued ~hourly), so cache the derived FFG field by
+// UTC-hour bucket — stepping radar frames within an hour reuses one MRMS pull.
+const ffgGridCache = new Map();
+function cachedFfgGrid(qpeFolder, ffgFolder, when, onProgress) {
+  const b = `${qpeFolder}|${ffgFolder}|${when.getUTCFullYear()}${pad(when.getUTCMonth() + 1)}${pad(when.getUTCDate())}${pad(when.getUTCHours())}`;
+  if (!ffgGridCache.has(b)) {
+    const job = loadMrmsFfgGrid(qpeFolder, ffgFolder, when, onProgress)
+      .catch((e) => { ffgGridCache.delete(b); throw e; });
+    ffgGridCache.set(b, job);
+    if (ffgGridCache.size > 4) ffgGridCache.delete(ffgGridCache.keys().next().value);
+  }
+  return ffgGridCache.get(b);
+}
+
+// Load one custom exceedance frame: the site's QPE accumulation minus the MRMS-
+// derived guidance grid, sampled onto the QPE sweep's gates.
+async function loadLevel3Exceedance(site, productId, key, onProgress) {
+  const prod = L3_PRODUCTS[productId];
+  const bytes = await fetchLevel3(key, (p) => onProgress && onProgress(p * 0.4));
+  const decoded = decodeLevel3(bytes);
+  if (!decoded) throw new Error('unsupported Level III product');
+  const time = timeForKey(key);
+  const ffg = await cachedFfgGrid(prod.qpeFolder, prod.ffgFolder, time || new Date(),
+    (p) => onProgress && onProgress(0.4 + p * 0.6));
+  applyExceedance(decoded, ffg);
+  return { decoded, product: prod, time, key };
 }

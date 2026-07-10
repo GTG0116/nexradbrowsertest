@@ -9,7 +9,16 @@
 // rotation / rainfall values survive the reduction). Each cell is stored as a
 // 16-bit normalised code in the R,G bytes; 0 means "missing" (transparent).
 
-const MAX_DIM = 3600; // cap the larger texture dimension
+// A 3600×1800 RGBA upload is about 25 MB on both the CPU and GPU. That is fine
+// on desktop, but can overlap other WebGL buffers on phones and terminate the
+// tab. Keep the higher cap where resources allow.
+const constrained = typeof window !== 'undefined' && (
+  window.matchMedia('(max-width: 759.98px)').matches ||
+  (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0 &&
+    Math.min(window.innerWidth, window.innerHeight) <= 1024) ||
+  (typeof navigator !== 'undefined' && Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4)
+);
+const MAX_DIM = constrained ? 1400 : 3600;
 
 const VERT_SRC = `
 attribute vec2 a_pos;

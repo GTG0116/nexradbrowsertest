@@ -75,9 +75,21 @@ const FFG = [
   s(0.25, [40, 60, 120]), s(0.5, [0, 150, 210]), s(0.75, [0, 200, 120]),
   s(1, [230, 220, 0]), s(1.5, [255, 120, 0]), s(2, [220, 0, 0]), s(3, [255, 0, 255]),
 ];
+// Flash-flood-guidance EXCEEDANCE (mm) ramp — how much the observed rainfall
+// sits *above* guidance. Only positive (over-guidance) depths are ever coloured;
+// cells at or below guidance are dropped to NaN upstream so they render fully
+// transparent, and the ramp graduates the amount of the overage (pale yellow just
+// over, through orange/red to magenta for the most extreme exceedances).
+const EXCEED = [
+  s(1, [255, 245, 140]), s(5, [255, 210, 0]), s(12, [255, 150, 0]),
+  s(25, [255, 70, 0]), s(50, [210, 0, 0]), s(90, [150, 0, 90]), s(127, [255, 0, 255]),
+];
 
 const MM_TO_IN = 0.0393700787;
 const KM_TO_KFT = 3.2808399; // km → thousands of feet
+// FLASH stores the QPE/FFG field as percent: a decoded value of 105 means a
+// ratio of 1.05 (QPE is 105% of guidance), not a ratio of 105.
+const FLASH_RATIO_FACTOR = 0.01;
 
 // `disp` { unit, factor } gives an imperial display conversion for legend ticks
 // and the inspect readout, leaving the native values/colors untouched.
@@ -86,6 +98,18 @@ function product(id, folder, name, unit, lo, hi, floor, stops, disp) {
   const dispUnit = (disp && disp.unit) || unit;
   const dispFactor = (disp && disp.factor) || 1;
   return { id, folder, name, unit, lo, hi, floor, scale, dispUnit, dispFactor, dispOffset: 0 };
+}
+
+// A custom "flash-flood-guidance exceedance" product: not a single S3 folder but
+// a derived field. Its `folder` (the QPE accumulation) drives frame listing so the
+// rest of the app treats it like any other product; the loader then pairs each QPE
+// frame with the matching FLASH QPE/FFG ratio grid to recover guidance and returns
+// the overage. `custom: 'ffgx'` routes loadMrms() to loadMrmsExceedance().
+function exceedProduct(id, name, qpeFolder, ffgFolder) {
+  const p = product(id, qpeFolder, name, 'mm', 0, 127, 0.05, EXCEED, { unit: 'in', factor: MM_TO_IN });
+  p.custom = 'ffgx';
+  p.ffgFolder = ffgFolder;
+  return p;
 }
 
 export const MRMS_PRODUCTS = {
@@ -149,6 +173,12 @@ export const MRMS_PRODUCTS = {
   QPE48H: product('QPE48H', 'MultiSensor_QPE_48H_Pass2_00.00', '48-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   QPE72H: product('QPE72H', 'MultiSensor_QPE_72H_Pass2_00.00', '72-hr Precip Total', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
   QPEST: product('QPEST', 'RadarOnly_QPE_Since12Z_00.00', 'Storm Total (since 12Z)', 'mm', 0, 762, 0.2, QPE, { unit: 'in', factor: MM_TO_IN }),
+  // ---- Flash-flood-guidance exceedance (custom: radar QPE minus FFG) ----
+  // Uses the radar-only QPE that FLASH itself compares against guidance, so the
+  // recovered FFG (= QPE ÷ ratio) and the overage are internally consistent.
+  FFGX1: exceedProduct('FFGX1', '1-hr FFG Exceedance', 'RadarOnly_QPE_01H_00.00', 'FLASH_QPE_FFG01H_00.00'),
+  FFGX3: exceedProduct('FFGX3', '3-hr FFG Exceedance', 'RadarOnly_QPE_03H_00.00', 'FLASH_QPE_FFG03H_00.00'),
+  FFGX6: exceedProduct('FFGX6', '6-hr FFG Exceedance', 'RadarOnly_QPE_06H_00.00', 'FLASH_QPE_FFG06H_00.00'),
 };
 
 // The MRMS reflectivity products all share the single-site radar reflectivity
@@ -157,6 +187,11 @@ export const MRMS_PRODUCTS = {
 // composite.
 for (const id of ['REFC', 'LLREF', 'RALA', 'REF0C', 'REFM20C']) {
   MRMS_PRODUCTS[id].reflectivity = true;
+}
+// Convert the encoded FLASH percentage to the physical ratio used by the
+// product scale, cursor readout, and derived exceedance calculations.
+for (const id of ['FFG1H', 'FFG3H', 'FFG6H', 'FFGMAX']) {
+  MRMS_PRODUCTS[id].valueFactor = FLASH_RATIO_FACTOR;
 }
 
 // MRMS products grouped into the menu sections the picker renders, in the order
@@ -168,6 +203,7 @@ export const MRMS_CATEGORIES = [
   { id: 'hail', name: 'Hail', products: ['MESH', 'MESH1H', 'MESH6H', 'MESH24H', 'POSH', 'SHI'] },
   { id: 'lightning', name: 'Lightning', products: ['LTG30', 'LTG60', 'CGD1', 'CGD5', 'CGD15', 'CGD30'] },
   { id: 'precip', name: 'Precip Accumulation', products: ['PRATE', 'QPE1H', 'QPE3H', 'QPE6H', 'QPE12H', 'QPE24H', 'QPE48H', 'QPE72H', 'QPEST'] },
+  { id: 'ffgx', name: 'FFG Exceedance', products: ['FFGX1', 'FFGX3', 'FFGX6'] },
   { id: 'flooding', name: 'Flooding', products: ['ARI1H', 'ARI3H', 'ARI6H', 'ARI24H', 'ARIMAX', 'FFG1H', 'FFG3H', 'FFG6H', 'FFGMAX'] },
   { id: 'echotops', name: 'Echo Tops', products: ['ET18', 'ET30', 'ET50', 'ET60'] },
   { id: 'vil', name: 'Vertically Integrated Liquid', products: ['VIL', 'VILD', 'VIL2H', 'VIL24H', 'VII'] },
@@ -190,12 +226,10 @@ function labelForKey(key) {
   return t ? `${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}:${pad(t.getUTCSeconds())}Z` : key.split('/').pop();
 }
 
-// List the available frames for a product on a UTC day, newest last.
-export async function listMrms(productId, date) {
-  const prod = MRMS_PRODUCTS[productId];
-  if (!prod) throw new Error('unknown MRMS product');
+// List the frames in one product folder on a UTC day, newest last.
+async function listFolder(folder, date) {
   const ymd = `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`;
-  const prefix = `CONUS/${prod.folder}/${ymd}/`;
+  const prefix = `CONUS/${folder}/${ymd}/`;
   const url = `${BUCKET}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`MRMS list failed: ${res.status}`);
@@ -206,6 +240,112 @@ export async function listMrms(productId, date) {
   while ((m = re.exec(xml)) !== null) keys.push(m[1]);
   keys.sort();
   return keys.map((key) => ({ key, label: labelForKey(key), time: timeForKey(key) }));
+}
+
+// List the available frames for a product on a UTC day, newest last. Custom
+// (exceedance) products list their QPE-accumulation folder, so the frame slider
+// tracks the observed-rainfall cadence.
+export async function listMrms(productId, date) {
+  const prod = MRMS_PRODUCTS[productId];
+  if (!prod) throw new Error('unknown MRMS product');
+  return listFolder(prod.folder, date);
+}
+
+// The FLASH ratio grid nearest (at or just before) a target time — searched on
+// the target's UTC day and, if nothing sits at/before it, the previous day.
+// Small per-day cache keeps playback from re-listing the same folder each frame.
+const folderListCache = new Map();
+async function cachedList(folder, date) {
+  const ymd = `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`;
+  const ck = `${folder}/${ymd}`;
+  if (!folderListCache.has(ck)) folderListCache.set(ck, await listFolder(folder, date));
+  return folderListCache.get(ck);
+}
+async function nearestFrame(folder, target) {
+  const day = await cachedList(folder, target);
+  const pick = (frames) => {
+    let best = null;
+    for (const f of frames) {
+      if (!f.time) continue;
+      if (f.time <= target && (!best || f.time > best.time)) best = f;
+    }
+    return best;
+  };
+  let best = pick(day);
+  if (!best) {
+    const prev = new Date(target.getTime() - 24 * 3600 * 1000);
+    best = pick(await cachedList(folder, prev));
+  }
+  // Fall back to the earliest available frame if the target predates them all.
+  if (!best && day.length) best = day.find((f) => f.time) || null;
+  return best;
+}
+
+// Two MRMS CONUS grids share the standard 0.01° geometry, so exceedance is a
+// straight cell-for-cell subtraction. If the geometries ever differ, fall back to
+// nearest-neighbour sampling of the ratio grid at each QPE cell centre.
+function ratioAt(ratio, qpe) {
+  const same = ratio.ni === qpe.ni && ratio.nj === qpe.nj &&
+    Math.abs(ratio.lon1 - qpe.lon1) < 1e-4 && Math.abs(ratio.lat1 - qpe.lat1) < 1e-4;
+  if (same) return (i) => ratio.values[i] * FLASH_RATIO_FACTOR;
+  return (i) => {
+    const col = i % qpe.ni, row = (i - col) / qpe.ni;
+    const lon = qpe.lon1 + col * qpe.di, lat = qpe.lat1 - row * qpe.dj;
+    const ci = Math.round((lon - ratio.lon1) / ratio.di);
+    const cj = Math.round((ratio.lat1 - lat) / ratio.dj);
+    if (ci < 0 || ci >= ratio.ni || cj < 0 || cj >= ratio.nj) return NaN;
+    return ratio.values[cj * ratio.ni + ci] * FLASH_RATIO_FACTOR;
+  };
+}
+
+// exceedance = QPE − FFG = QPE·(1 − 1/ratio), kept only where the ratio exceeds 1
+// (rainfall has passed guidance). Everywhere else → NaN, which the grid layer
+// renders transparent. Returns a Float32Array aligned to the QPE grid.
+function exceedanceValues(qpe, ratio) {
+  const get = ratioAt(ratio, qpe);
+  const q = qpe.values;
+  const out = new Float32Array(q.length);
+  for (let i = 0; i < q.length; i++) {
+    const qi = q[i], ri = get(i);
+    out[i] = (qi > 0 && ri > 1 && Number.isFinite(qi) && Number.isFinite(ri))
+      ? qi * (1 - 1 / ri) : NaN;
+  }
+  return out;
+}
+
+// Recover the guidance grid itself (mm) from radar QPE and the normalized FLASH
+// ratio: FFG = QPE ÷ ratio, defined wherever rain was observed. Exposed so the
+// single-site radar exceedance path can sample the same field onto its polar gates.
+export async function loadMrmsFfgGrid(qpeFolder, ffgFolder, when, onProgress) {
+  const qFrame = await nearestFrame(qpeFolder, when);
+  if (!qFrame) throw new Error('no QPE frame');
+  const rFrame = await nearestFrame(ffgFolder, qFrame.time || when);
+  if (!rFrame) throw new Error('no FFG frame');
+  const qpe = await decodeGrib2(await fetchMrms(qFrame.key, (p) => onProgress && onProgress(p * 0.5)));
+  const ratio = await decodeGrib2(await fetchMrms(rFrame.key, (p) => onProgress && onProgress(0.5 + p * 0.5)));
+  const get = ratioAt(ratio, qpe);
+  const ffg = new Float32Array(qpe.values.length);
+  for (let i = 0; i < ffg.length; i++) {
+    const qi = qpe.values[i], ri = get(i);
+    ffg[i] = (qi > 0 && ri > 0 && Number.isFinite(qi) && Number.isFinite(ri)) ? qi / ri : NaN;
+  }
+  return { ...qpe, values: ffg, time: qFrame.time };
+}
+
+// Load one exceedance frame: the QPE grid at `qpeKey`, paired with the FLASH
+// ratio nearest that time, differenced into an over-guidance depth grid.
+async function loadMrmsExceedance(productId, qpeKey, onProgress) {
+  const prod = MRMS_PRODUCTS[productId];
+  const target = timeForKey(qpeKey) || new Date();
+  const qpe = await decodeGrib2(await fetchMrms(qpeKey, (p) => onProgress && onProgress(p * 0.5)));
+  const rFrame = await nearestFrame(prod.ffgFolder, target);
+  if (!rFrame) throw new Error('no FFG frame');
+  const ratio = await decodeGrib2(await fetchMrms(rFrame.key, (p) => onProgress && onProgress(0.5 + p * 0.5)));
+  const grid = { ...qpe, values: exceedanceValues(qpe, ratio) };
+  grid.product = prod;
+  grid.time = target;
+  grid.key = qpeKey;
+  return grid;
 }
 
 export async function fetchMrms(key, onProgress) {
@@ -231,9 +371,17 @@ export async function fetchMrms(key, onProgress) {
 
 // Download + decode one MRMS frame into a lat/lon grid of physical values.
 export async function loadMrms(productId, key, onProgress) {
+  const prod = MRMS_PRODUCTS[productId];
+  if (prod && prod.custom === 'ffgx') return loadMrmsExceedance(productId, key, onProgress);
   const bytes = await fetchMrms(key, onProgress);
   const grid = await decodeGrib2(bytes);
-  grid.product = MRMS_PRODUCTS[productId];
+  if (prod && prod.valueFactor != null && prod.valueFactor !== 1) {
+    const values = grid.values;
+    const scaled = new Float32Array(values.length);
+    for (let i = 0; i < values.length; i++) scaled[i] = values[i] * prod.valueFactor;
+    grid.values = scaled;
+  }
+  grid.product = prod;
   grid.time = timeForKey(key);
   grid.key = key;
   return grid;

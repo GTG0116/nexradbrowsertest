@@ -100,6 +100,39 @@ function eroStyle(f) {
   return { fill: t.fill, stroke: t.stroke, label: t.label, sort: dn || 0 };
 }
 
+// ---- RFC Flash Flood Guidance (raster image mosaic) -------------------------
+// Unlike every other outlook (vector risk polygons), FFG is a continuous 4-km
+// grid the 12 RFCs issue and NWS mosaics nationally. It isn't served as GeoJSON,
+// so this product renders the map service's own classified image straight onto
+// the map as a tiled raster overlay; `raster` marks that path for the controller.
+// Colours below are the service's official inch classes (low guidance = warm =
+// most flash-flood-prone), decoded from its legend so the swatch matches the map.
+const FFG_MOSAIC = 'https://mapservices.weather.noaa.gov/raster/rest/services/precip/rfc_gridded_ffg/MapServer';
+const FFG_LEGEND = [
+  { label: '< 0.25 in', fill: 'rgb(255,255,255)' },
+  { label: '0.25–0.5 in', fill: 'rgb(255,0,0)' },
+  { label: '0.5–0.75 in', fill: 'rgb(255,215,0)' },
+  { label: '0.75–1 in', fill: 'rgb(255,255,0)' },
+  { label: '1–1.5 in', fill: 'rgb(127,255,0)' },
+  { label: '1.5–2 in', fill: 'rgb(0,139,0)' },
+  { label: '2–2.5 in', fill: 'rgb(30,144,255)' },
+  { label: '2.5–3 in', fill: 'rgb(0,238,238)' },
+  { label: '3–4 in', fill: 'rgb(0,0,255)' },
+  { label: '4–5 in', fill: 'rgb(144,44,238)' },
+  { label: '≥ 5 in', fill: 'rgb(139,0,139)' },
+];
+// A MapLibre raster-source tile template hitting the service's export endpoint.
+// The service exposes each duration as a mosaic *group* with a child Image layer.
+// Asking the export endpoint for the child layer alone can yield a fully
+// transparent tile even though the parent is enabled in the ArcGIS viewer. Use
+// the duration's mosaic group ID, which lets the service resolve its visible Image
+// child itself (and works consistently for all four durations).
+function ffgTiles(mosaicLayerId) {
+  return `${FFG_MOSAIC}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857` +
+    `&size=256,256&dpi=96&format=png32&transparent=true&layers=show:${mosaicLayerId}` +
+    '&interpolation=RSP_NearestNeighbor&f=image';
+}
+
 export const OUTLOOKS = {
   spc_conv: {
     label: 'SPC Convective',
@@ -152,6 +185,16 @@ export const OUTLOOKS = {
     ],
     style: eroStyle,
   },
+  wpc_ffg: {
+    label: 'Flash Flood Guidance',
+    raster: { legend: FFG_LEGEND, tiles: (d) => ffgTiles(d.layer), source: FFG_MOSAIC },
+    details: [
+      { id: '1h', label: '1 Hour', layer: 0 },
+      { id: '3h', label: '3 Hour', layer: 4 },
+      { id: '6h', label: '6 Hour', layer: 8 },
+      { id: '12h', label: '12 Hour', layer: 12 },
+    ],
+  },
   cpc_temp: {
     label: 'CPC Temperature',
     details: [
@@ -170,7 +213,7 @@ export const OUTLOOKS = {
   },
 };
 
-export const OUTLOOK_ORDER = ['spc_conv', 'spc_fire', 'spc_md', 'wpc_ero', 'cpc_temp', 'cpc_precip'];
+export const OUTLOOK_ORDER = ['spc_conv', 'spc_fire', 'spc_md', 'wpc_ero', 'wpc_ffg', 'cpc_temp', 'cpc_precip'];
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
@@ -193,6 +236,10 @@ function validTextFor(feats, product) {
 export async function loadOutlookData(productId, detailId) {
   const product = OUTLOOKS[productId] || OUTLOOKS.spc_conv;
   const detail = product.details.find((d) => d.id === detailId) || product.details[0];
+  // Raster (FFG mosaic) products have no GeoJSON to hand back — the image overlay
+  // lives on the map itself, so callers just get an empty collection + status.
+  if (product.raster)
+    return { fc: EMPTY, product, detail, status: `NWS RFC ${detail.label} flash flood guidance` };
   const url = product.url ? product.url(detail) : arcUrl(detail.path, detail.layer);
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -320,7 +367,12 @@ export class OutlookController {
   setEnabled(on) {
     this.enabled = on;
     if (on) this.load();
-    else { this._setData(EMPTY); this._renderLegend([], null); this._setStatus(''); }
+    else {
+      this._setData(EMPTY);
+      if (this.els.setRasterOverlay) this.els.setRasterOverlay(null);
+      this._renderLegend([], null);
+      this._setStatus('');
+    }
   }
 
   setProduct(productId) {
@@ -343,13 +395,49 @@ export class OutlookController {
   }
 
   reapply() {
-    if (this.enabled) this._setData(this._last);
+    if (!this.enabled) return;
+    const product = OUTLOOKS[this.product] || OUTLOOKS.spc_conv;
+    // A basemap swap wipes custom sources/layers, so a raster overlay must be
+    // rebuilt rather than just re-fed data like the shared GeoJSON source.
+    if (product.raster) {
+      const detail = product.details.find((d) => d.id === this.detail) || product.details[0];
+      if (this.els.setRasterOverlay) this.els.setRasterOverlay({ tiles: product.raster.tiles(detail) });
+      return;
+    }
+    this._setData(this._last);
+  }
+
+  // Render a raster (FFG mosaic) product: its image overlay is driven onto the
+  // map through the host's setRasterOverlay hook, and the legend comes straight
+  // from the product's classified swatches (there are no per-feature colours).
+  _loadRaster(product, detail) {
+    this._setData(EMPTY); // no vector features for a raster overlay
+    if (this.els.setRasterOverlay) this.els.setRasterOverlay({ tiles: product.raster.tiles(detail) });
+    this._renderRasterLegend(product);
+    this._setStatus(`NWS RFC ${detail.label} flash flood guidance`);
+  }
+
+  _renderRasterLegend(product) {
+    const items = (product.raster && product.raster.legend) || [];
+    this._legendHTML = items.length
+      ? items.map((it) =>
+          `<div class="spc-legend-row"><span class="spc-legend-sw" style="background:${esc(it.fill)};border-color:${esc(it.fill)}"></span><span class="spc-legend-label">${esc(it.label)}</span></div>`
+        ).join('')
+      : '<div class="empty">No legend.</div>';
+    const seen = new Set();
+    const write = (node) => { if (node && !seen.has(node)) { seen.add(node); node.innerHTML = this._legendHTML; } };
+    write(this.els.legend);
+    if (typeof this.els.extraLegend === 'function') write(this.els.extraLegend());
   }
 
   async load() {
     const product = OUTLOOKS[this.product] || OUTLOOKS.spc_conv;
     const detail = product.details.find((d) => d.id === this.detail) || product.details[0];
     const mine = ++this.seq;
+    // Raster products (the FFG mosaic) render the service image directly.
+    if (product.raster) return this._loadRaster(product, detail);
+    // Leaving a raster product for a vector one: tear the image overlay down.
+    if (this.els.setRasterOverlay) this.els.setRasterOverlay(null);
     this._setStatus('Loading…');
     try {
       const url = product.url ? product.url(detail) : arcUrl(detail.path, detail.layer);

@@ -44,6 +44,23 @@ function isSmallScreenNow() {
   return typeof window !== 'undefined' && window.matchMedia(SMALL_SCREEN_QUERY).matches;
 }
 
+// Large decoded weather grids can overlap GPU uploads and cached radar volumes
+// on phones. Keep desktop resolution intact while using a smaller working set
+// on phones and devices that report limited memory.
+function isConstrainedDevice() {
+  if (isSmallScreenNow()) return true;
+  if (typeof navigator === 'undefined') return false;
+  // Safari does not expose deviceMemory. Its touch tablets still need the
+  // compact path, including in landscape where they use the desktop layout.
+  if (navigator.maxTouchPoints > 0 && typeof window !== 'undefined' &&
+      Math.min(window.innerWidth, window.innerHeight) <= 1024) return true;
+  const memory = Number(navigator.deviceMemory);
+  if (Number.isFinite(memory) && memory > 0 && memory <= 4) return true;
+  return false;
+}
+const CONSTRAINED_DEVICE = isConstrainedDevice();
+const CONSTRAINED_GRID_DIM = 1400;
+
 const MODEL_CITY_VALUE_SOURCE = 'model-city-values';
 const MODEL_CITY_VALUE_LAYER = 'model-city-value-labels';
 const GRID_CITY_VALUE_MODES = new Set(['radar', 'mrms', 'models', 'observations']);
@@ -254,15 +271,15 @@ function sitePillKind(icao) {
 }
 
 function sitePillImageId(icao, kind) {
-  return `site-pill-${icao}-${kind}-${state.uiTheme || 'light'}`;
+  return `site-pill-${icao}-${kind}-${state.uiTheme || 'dark'}`;
 }
 
 function selectedRadarColor() {
-  return state.uiTheme === 'dark' ? '#45d66b' : '#e2643f';
+  return state.uiTheme === 'dark' ? '#22d3ee' : '#0b93b8';
 }
 
 function selectedRadarInk() {
-  return state.uiTheme === 'dark' ? '#082414' : '#fff1ea';
+  return state.uiTheme === 'dark' ? '#04121a' : '#ffffff';
 }
 
 function sitePillImage(icao, kind, ratio = 2) {
@@ -272,13 +289,17 @@ function sitePillImage(icao, kind, ratio = 2) {
   const ctx = c.getContext('2d');
   const palette = {
     current: {
-      fill: state.uiTheme === 'dark' ? 'rgba(69,214,107,0.96)' : 'rgba(157,60,20,0.96)',
+      fill: state.uiTheme === 'dark' ? 'rgba(34,211,238,0.96)' : 'rgba(11,147,184,0.96)',
       stroke: selectedRadarColor(),
       text: selectedRadarInk(),
     },
-    down: { fill: 'rgba(92,20,28,0.96)', stroke: '#ff7878', text: '#ffe8e8' },
-    tdwr: { fill: 'rgba(86,72,12,0.96)', stroke: '#ffe682', text: '#fff7c2' },
-    base: { fill: 'rgba(12,30,58,0.94)', stroke: '#96cdff', text: '#e3f2ff' },
+    down: { fill: 'rgba(81,26,31,0.96)', stroke: '#f0663f', text: '#fff0ec' },
+    tdwr: { fill: 'rgba(77,57,16,0.96)', stroke: '#f5a623', text: '#fff2c9' },
+    base: {
+      fill: state.uiTheme === 'dark' ? 'rgba(17,24,32,0.96)' : 'rgba(255,255,255,0.96)',
+      stroke: state.uiTheme === 'dark' ? '#2b5364' : '#9cc9d5',
+      text: state.uiTheme === 'dark' ? '#c7eaf0' : '#145f73',
+    },
   }[kind] || {};
   ctx.beginPath();
   ctx.moveTo(r, 1);
@@ -296,7 +317,7 @@ function sitePillImage(icao, kind, ratio = 2) {
   ctx.lineWidth = 1.5 * ratio;
   ctx.fill();
   ctx.stroke();
-  ctx.font = `${11 * ratio}px "JetBrains Mono", monospace`;
+  ctx.font = `${11 * ratio}px "IBM Plex Mono", monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = palette.text;
@@ -733,8 +754,8 @@ function decodeVolume(bytes) {
 // globally-unique S3 object key, so stale entries from another site/day simply
 // age out; small screens keep far fewer frames to avoid memory pressure.
 // ---------------------------------------------------------------------------
-const VOLUME_CACHE_MAX = isSmallScreenNow() ? 3 : 8;
-const L3_CACHE_MAX = isSmallScreenNow() ? 6 : 16;
+const VOLUME_CACHE_MAX = CONSTRAINED_DEVICE ? 1 : 8;
+const L3_CACHE_MAX = CONSTRAINED_DEVICE ? 3 : 16;
 const volumeCache = new Map(); // L2 key -> decoded volume (Map order = LRU)
 const l3Cache = new Map(); // `${productId}|${key}` -> decoded L3 frame
 const volumeInflight = new Map(); // key -> in-flight Promise (dedupes prefetch vs. click)
@@ -832,7 +853,7 @@ const state = {
   timeSource: 'product',
   mapProvider: 'mapbox',
   basemap: 'dark',
-  uiTheme: 'light',
+  uiTheme: 'dark',
   // User customisation of the basemap's own layers (town labels, roads,
   // rivers, borders). Re-applied on every style load so it survives a
   // basemap switch. See js/mapStyle.js.
@@ -1214,10 +1235,9 @@ function initMap() {
     // The vector basemap renders on its own; our radar/alert layers slot into
     // its layer stack beneath the labels (set up in setupOverlays).
     renderWorldCopies: true,
-    // Keep the WebGL backbuffer readable so the export tool can grab the canvas
-    // (basemap + radar + drawings) with toDataURL at any time, not just inside a
-    // render frame. The cost is a small amount of GPU memory bandwidth.
-    preserveDrawingBuffer: true,
+    // Desktop retains an export-ready backbuffer. On constrained devices that
+    // buffer can be tens of MB, so stability takes priority while loading data.
+    preserveDrawingBuffer: !CONSTRAINED_DEVICE,
   });
   // The zoom control sits bottom-left: the top-left corner is now the floating
   // time readout and the top-right is the map-tool rail.
@@ -1375,7 +1395,7 @@ function applyUiTheme(theme = state.uiTheme) {
   state.uiTheme = theme === 'dark' ? 'dark' : 'light';
   document.body.classList.toggle('theme-dark', state.uiTheme === 'dark');
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', state.uiTheme === 'dark' ? '#181818' : '#efe7da');
+  if (meta) meta.setAttribute('content', state.uiTheme === 'dark' ? '#0a0e13' : '#e9edf1');
   if (el.uiThemeSelect) el.uiThemeSelect.value = state.uiTheme;
   if (state.map) ensureSitePillImages(state.map);
   refreshSiteDots();
@@ -1384,16 +1404,16 @@ function applyUiTheme(theme = state.uiTheme) {
     state.map.setPaintProperty('sites', 'circle-color', [
       'case',
       ['==', ['get', 'current'], 1], c,
-      ['==', ['get', 'down'], 1], 'rgba(235,60,60,0.9)',
-      ['==', ['get', 'tdwr'], 1], 'rgba(245,205,40,0.9)',
-      'rgba(80,140,220,0.85)',
+      ['==', ['get', 'down'], 1], 'rgba(240,102,63,0.92)',
+      ['==', ['get', 'tdwr'], 1], 'rgba(245,166,35,0.92)',
+      'rgba(92,156,180,0.86)',
     ]);
     state.map.setPaintProperty('sites', 'circle-stroke-color', [
       'case',
       ['==', ['get', 'current'], 1], c,
-      ['==', ['get', 'down'], 1], 'rgba(255,120,120,0.95)',
-      ['==', ['get', 'tdwr'], 1], 'rgba(255,230,130,0.95)',
-      'rgba(150,205,255,0.85)',
+      ['==', ['get', 'down'], 1], 'rgba(255,162,143,0.96)',
+      ['==', ['get', 'tdwr'], 1], 'rgba(255,223,143,0.96)',
+      'rgba(170,223,236,0.88)',
     ]);
   }
 }
@@ -1402,28 +1422,28 @@ function exportTheme() {
   if (state.uiTheme === 'dark') {
     return {
       mode: 'dark',
-      bg: '#181818',
-      panel: '#242424',
+      bg: '#0a0e13',
+      panel: '#111820',
       separator: 'rgba(255,255,255,0.12)',
-      text: '#f7efe4',
-      dim: '#b8a997',
-      faint: '#8f8172',
-      accent: '#e2643f',
-      alertPanel: 'rgba(30,30,30,0.98)',
+      text: '#e8eef4',
+      dim: '#93a1b0',
+      faint: '#5f6d7b',
+      accent: '#22d3ee',
+      alertPanel: 'rgba(17,24,32,0.98)',
       alertSoft: 'rgba(255,255,255,0.06)',
     };
   }
   return {
     mode: 'light',
-    bg: '#fffaf2',
-    panel: '#fffaf2',
-    separator: 'rgba(42,37,32,0.12)',
-    text: '#2a2520',
-    dim: '#6f655b',
-    faint: '#9a8b7b',
-    accent: '#e2643f',
-    alertPanel: 'rgba(255,250,242,0.98)',
-    alertSoft: 'rgba(42,37,32,0.055)',
+    bg: '#e9edf1',
+    panel: '#ffffff',
+    separator: 'rgba(15,23,32,0.12)',
+    text: '#0f1720',
+    dim: '#5b6876',
+    faint: '#8190a0',
+    accent: '#0b93b8',
+    alertPanel: 'rgba(255,255,255,0.98)',
+    alertSoft: 'rgba(15,23,32,0.055)',
   };
 }
 
@@ -1598,6 +1618,7 @@ const RADAR_CATEGORIES = [
   { id: 'doppler', name: 'Doppler', products: ['REF', 'VEL', 'SRV', 'SW'] },
   { id: 'dualpol', name: 'Dual Pol', products: ['RHO', 'ZDR', 'PHI'] },
   { id: 'precip', name: 'Precip Accumulation', products: ['PR1', 'PR3', 'PRT'] },
+  { id: 'ffgx', name: 'FFG Exceedance', products: ['FFX1', 'FFX3'] },
   { id: 'derived', name: 'Derived Products', products: ['ET', 'VIL'] },
 ];
 const radarCatOpen = {};
@@ -3281,12 +3302,13 @@ async function loadMrmsFrame(key) {
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
-    const grid = await loadMrms(state.mrms.productId, key, (p) => {
+    let grid = await loadMrms(state.mrms.productId, key, (p) => {
       el.progress.style.width = Math.round(p * 100) + '%';
     });
     if (seq !== mrmsLoadSeq) return; // a newer selection superseded this one
     setStatus('decoding MRMS…', true);
     el.decoding.classList.add('show');
+    grid = compactGridForConstrainedDevice(grid);
     state.mrms.grid = grid;
     renderMrms();
     setStatus(`MRMS ${grid.product.name} loaded`);
@@ -3869,7 +3891,7 @@ async function loadModelFrame() {
   el.progress.style.width = '0%';
   el.progress.classList.add('show');
   try {
-    const grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
+    let grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
       // A superseded load keeps downloading in the background — don't let its
       // progress fight the current one's bar.
       if (seq === modelLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
@@ -3880,6 +3902,7 @@ async function loadModelFrame() {
     if (seq !== modelLoadSeq || state.mode !== 'models') return;
     setStatus(`decoding ${modelName()}…`, true);
     el.decoding.classList.add('show');
+    grid = compactGridForConstrainedDevice(grid);
     grid._overlayData = prepareModelOverlayData(grid);
     state.models.grid = grid;
     state.models.overlayData = grid._overlayData;
@@ -4469,6 +4492,23 @@ function layerCacheKey(layer, extra = '') {
   return `${layer.source}:${target}:${layer.productId}:${layer.detailId || ''}:${extra}`;
 }
 
+// Layer-stack data used to stay in this Map indefinitely. A few stacked MRMS or
+// model products can each retain a full decoded grid, so keep a bounded LRU.
+const LAYER_CACHE_MAX = CONSTRAINED_DEVICE ? 8 : 32;
+function layerCacheGet(key) {
+  const cache = state.layers.cache;
+  const value = cache.get(key);
+  if (value !== undefined) { cache.delete(key); cache.set(key, value); }
+  return value;
+}
+function layerCachePut(key, value) {
+  const cache = state.layers.cache;
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > LAYER_CACHE_MAX) cache.delete(cache.keys().next().value);
+  return value;
+}
+
 async function loadLayerGrid(layer) {
   if (layer.source === 'mrms') {
     if (state.mode === 'mrms' && layer.productId === state.mrms.productId && state.mrms.grid) return state.mrms.grid;
@@ -4476,8 +4516,9 @@ async function loadLayerGrid(layer) {
     const frame = frames[frames.length - 1];
     if (!frame) return null;
     const ck = layerCacheKey(layer, frame.key);
-    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadMrms(layer.productId, frame.key));
-    return state.layers.cache.get(ck);
+    let grid = layerCacheGet(ck);
+    if (!grid) grid = layerCachePut(ck, compactGridForConstrainedDevice(await loadMrms(layer.productId, frame.key)));
+    return grid;
   }
   if (layer.source === 'observations') {
     if (state.mode === 'observations' && layer.productId === state.observations.productId && state.observations.grid) return state.observations.grid;
@@ -4490,8 +4531,9 @@ async function loadLayerGrid(layer) {
     }
     if (!key) return null;
     const ck = layerCacheKey(layer, key);
-    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadObservation(layer.productId, key));
-    return state.layers.cache.get(ck);
+    let grid = layerCacheGet(ck);
+    if (!grid) grid = layerCachePut(ck, compactGridForConstrainedDevice(await loadObservation(layer.productId, key)));
+    return grid;
   }
   if (layer.source === 'models') {
     const modelKey = (layer.modelKey && MODELS[layer.modelKey]) ? layer.modelKey : state.models.modelKey;
@@ -4525,8 +4567,9 @@ async function loadLayerGrid(layer) {
     // different model has no shared timeline, so it shows F00.
     const fhour = onActiveModel ? state.models.fhour : 0;
     const ck = layerCacheKey(layer, `${modelKey}:${stormId}:${run.key}:${fhour}`);
-    if (!state.layers.cache.has(ck)) state.layers.cache.set(ck, await loadModel(modelKey, layer.productId, run, fhour));
-    return state.layers.cache.get(ck);
+    let grid = layerCacheGet(ck);
+    if (!grid) grid = layerCachePut(ck, compactGridForConstrainedDevice(await loadModel(modelKey, layer.productId, run, fhour)));
+    return grid;
   }
   return null;
 }
@@ -4620,7 +4663,7 @@ async function loadLayerRadarVolume(siteId, seq) {
   } catch (_) { return hit ? hit.volume : null; }
   if (!volume) return hit ? hit.volume : null;
   cache.set(siteId, { volume, key, ts: Date.now() });
-  while (cache.size > 4) cache.delete(cache.keys().next().value);
+  while (cache.size > (CONSTRAINED_DEVICE ? 1 : 4)) cache.delete(cache.keys().next().value);
   return volume;
 }
 
@@ -4675,10 +4718,11 @@ async function ensureLayerSatScene(layer, seq) {
   if (seq !== state.layers.renderSeq || !scenes.length) return null;
   const key = scenes[scenes.length - 1].key;
   const ck = `layerscene:${satKey}:${sectorKey}:${key}`;
-  if (state.layers.cache.has(ck)) return { scene: state.layers.cache.get(ck), satKey, sectorKey };
+  const cached = layerCacheGet(ck);
+  if (cached) return { scene: cached, satKey, sectorKey };
   const scene = await loadSceneAsync(satKey, sectorKey, key, bandsFor(layer.productId));
   if (seq !== state.layers.renderSeq) return null;
-  state.layers.cache.set(ck, scene);
+  layerCachePut(ck, scene);
   return { scene, satKey, sectorKey };
 }
 
@@ -4716,12 +4760,12 @@ async function renderOutlookUserLayer(layer, seq) {
   const fillId = `rn-user-${layer.id}-fill`;
   const lineId = `rn-user-${layer.id}-line`;
   const ck = layerCacheKey(layer);
-  if (!state.layers.cache.has(ck)) {
+  if (!layerCacheGet(ck)) {
     const data = await loadOutlookData(layer.productId, layer.detailId);
-    state.layers.cache.set(ck, data.fc);
+    layerCachePut(ck, data.fc);
   }
   if (seq !== state.layers.renderSeq) return;
-  map.addSource(sourceId, { type: 'geojson', data: state.layers.cache.get(ck) || { type: 'FeatureCollection', features: [] } });
+  map.addSource(sourceId, { type: 'geojson', data: layerCacheGet(ck) || { type: 'FeatureCollection', features: [] } });
   const layers = [];
   if (layer.style !== 'contour') {
     map.addLayer({
@@ -5655,6 +5699,7 @@ const OUTLOOK_PRODUCT_SHORT = {
   spc_fire: 'FIRE',
   spc_md: 'MD',
   wpc_ero: 'ERO',
+  wpc_ffg: 'FFG',
   cpc_temp: 'TEMP',
   cpc_precip: 'PCPN',
 };
@@ -5691,7 +5736,7 @@ function routeOutlookToPane(product, detail) {
 
 function buildOutlookProductButtons() {
   el.productButtons.innerHTML = '';
-  el.productButtons.className = 'product-grid';
+  el.productButtons.className = 'product-grid outlook-product-grid';
   if (!state.spc) {
     el.productButtons.innerHTML = '<div class="empty">Loading outlooks...</div>';
     return;
@@ -5702,7 +5747,10 @@ function buildOutlookProductButtons() {
     btn.className = 'product-btn';
     btn.dataset.id = id;
     btn.innerHTML = `<span class="pb-id">${OUTLOOK_PRODUCT_SHORT[id] || id}</span><span class="pb-name">${product.label}</span>`;
-    if (id === activeOutlookSelection().product) btn.classList.add('active');
+    const active = id === activeOutlookSelection().product;
+    if (active) btn.classList.add('active');
+    btn.setAttribute('aria-pressed', String(active));
+    btn.title = `Show ${product.label}`;
     btn.addEventListener('click', () => selectOutlookProduct(id));
     el.productButtons.appendChild(btn);
   }
@@ -5712,6 +5760,7 @@ function buildOutlookDetailList() {
   if (state.mode !== 'outlooks') return;
   const list = el.outlookDetailList;
   if (!list) return;
+  list.className = 'vol-list scroll outlook-detail-list';
   list.innerHTML = '';
   if (!state.spc) {
     list.innerHTML = '<div class="empty">Loading outlooks...</div>';
@@ -5731,7 +5780,9 @@ function buildOutlookDetailList() {
       for (const it of items) {
         const btn = document.createElement('button');
         btn.className = 'vol-btn';
-        if (it.id === activeId) btn.classList.add('active');
+        const active = it.id === activeId;
+        if (active) btn.classList.add('active');
+        btn.setAttribute('aria-pressed', String(active));
         btn.innerHTML = `<span class="dot"></span>${it.label}`;
         btn.addEventListener('click', () => onPick(it.id));
         list.appendChild(btn);
@@ -5744,7 +5795,9 @@ function buildOutlookDetailList() {
   for (const d of state.spc.detailsForProduct(sel.product)) {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
-    if (d.id === sel.detail) btn.classList.add('active');
+    const active = d.id === sel.detail;
+    if (active) btn.classList.add('active');
+    btn.setAttribute('aria-pressed', String(active));
     btn.innerHTML = `<span class="dot"></span>${d.label}`;
     btn.addEventListener('click', () => selectOutlookDetail(d.id));
     list.appendChild(btn);
@@ -5907,6 +5960,36 @@ function applyOutlookOpacity() {
   if (map.getLayer('spc-outlook-fill')) map.setPaintProperty('spc-outlook-fill', 'fill-opacity', o);
   if (map.getLayer('spc-outlook-cig'))
     map.setPaintProperty('spc-outlook-cig', 'fill-opacity', Math.min(1, (o / 0.3) * 0.85));
+  if (map.getLayer('ffg-outlook')) map.setPaintProperty('ffg-outlook', 'raster-opacity', o);
+}
+
+// Drive the Flash Flood Guidance mosaic image overlay (the one "raster" outlook
+// product) onto the map. `cfg = { tiles }` (re)creates the source+layer; `null`
+// removes it. It sits at the data anchor — under the radar and alerts, like the
+// vector outlook fill. Rebuilt on each call so a 1/3/6-hr switch just swaps tiles.
+// If the style isn't ready (mid basemap swap), the controller's reapply() re-runs
+// this once the new style loads.
+function setOutlookRasterOverlay(cfg) {
+  const map = state.map;
+  const SRC = 'ffg-outlook', LYR = 'ffg-outlook';
+  if (!map || !map.isStyleLoaded || !map.isStyleLoaded()) return;
+  if (map.getLayer(LYR)) map.removeLayer(LYR);
+  if (map.getSource(SRC)) map.removeSource(SRC);
+  if (!cfg) return;
+  map.addSource(SRC, {
+    type: 'raster',
+    tiles: [cfg.tiles],
+    tileSize: 256,
+    scheme: 'xyz',
+    attribution: 'NWS RFC Flash Flood Guidance',
+  });
+  // Anchor beneath the vector outlook fill so the mosaic sits at the very bottom
+  // of the data overlays — the radar, alerts and boundaries all read on top.
+  const below = map.getLayer('spc-outlook-fill') ? 'spc-outlook-fill' : dataLayerAnchor(map);
+  map.addLayer(
+    { id: LYR, type: 'raster', source: SRC, paint: { 'raster-opacity': state.spcOpacity, 'raster-fade-duration': 180 } },
+    below
+  );
 }
 
 // Reflect state.spcOpacity on the slider + its readout (used at init and restore).
@@ -5923,6 +6006,8 @@ function setupSpcOutlook() {
     detailSelect: el.outlookDetail,
     legend: el.spcLegend,
     status: el.spcStatus,
+    // Flash Flood Guidance is a raster image mosaic, not vector polygons.
+    setRasterOverlay: setOutlookRasterOverlay,
     // Mesoscale-discussion click-through reuses the alert popup/briefing chrome.
     previewWrap: el.alertPreview,
     previewCard: el.alertPreviewCard,
@@ -6224,7 +6309,7 @@ function applyResponsiveLayout() {
 // per-frame network latency; the decode worker pool caps how much actually runs
 // in parallel for radar, while grid/satellite frames are network-bound so a few
 // extra lanes mostly hide round-trip time.
-const PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 2 : 6;
+const PLAYBACK_CONCURRENCY = CONSTRAINED_DEVICE ? 1 : 6;
 
 // A model loop spans *every* forecast hour of the run (GFS goes hourly to F120
 // then 3-hourly to F384 — 200+ frames; AI-GFS is 6-hourly to F384), and every
@@ -6251,7 +6336,7 @@ const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
 // of a run's frames. BYTES_PER_CELL pads the 2-byte codes for JS object/GeoJSON
 // overhead so the budget errs safe.
 const MODEL_LOOP_FILL_BUDGET = 512 * 1024 * 1024;
-const MODEL_LOOP_FILL_BUDGET_MOBILE = 64 * 1024 * 1024;
+const MODEL_LOOP_FILL_BUDGET_MOBILE = 32 * 1024 * 1024;
 const MODEL_LOOP_BYTES_PER_CELL = 3;
 // Barb/contour overlays ride along on loop frames only while they stay cheap:
 // a per-frame GeoJSON feature cap (global grids blow past it — a 0.6°-stride
@@ -6361,6 +6446,15 @@ function poolGridByFactor(grid, factor) {
     }
   }
   return { ...grid, ni: no, nj: mo, values: out, di: di * factor, dj: dj * factor, overlays };
+}
+
+// Retain a compact display/inspection grid after decoding on constrained
+// devices. This lets the full source array be reclaimed instead of remaining
+// pinned in application state beside its GPU texture.
+function compactGridForConstrainedDevice(grid) {
+  if (!CONSTRAINED_DEVICE || !grid || !grid.values) return grid;
+  const factor = Math.ceil(Math.max(grid.ni || 0, grid.nj || 0) / CONSTRAINED_GRID_DIM);
+  return factor > 1 ? poolGridByFactor(grid, factor) : grid;
 }
 
 // A short key identifying the current playback context; when it changes (site,
@@ -9061,6 +9155,7 @@ function applyStoredSettings(s) {
 function setToggleBtn(btn, on) {
   if (!btn) return;
   btn.classList.toggle('active', !!on);
+  btn.setAttribute('aria-pressed', String(!!on));
   btn.textContent = on ? 'ON' : 'OFF';
 }
 

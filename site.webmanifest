@@ -4,8 +4,8 @@
   "description": "Live NEXRAD radar, satellite and weather models decoded in your browser.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#03060f",
-  "theme_color": "#03060f",
+  "background_color": "#0a0e13",
+  "theme_color": "#0a0e13",
   "icons": [
     { "src": "logo/favicon-16.png", "sizes": "16x16", "type": "image/png" },
     { "src": "logo/favicon-32.png", "sizes": "32x32", "type": "image/png" },
