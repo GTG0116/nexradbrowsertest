@@ -2561,7 +2561,10 @@ input[type='range']::-moz-range-thumb {
   left: 0;
   right: 0;
   bottom: 0;
+  /* Two stacked rows: the product chip + play (row 1) and the frame nav + source
+     + settings (row 2). The source picker replaces both rows when open. */
   display: flex;
+  flex-direction: column;
   gap: 8px;
   /* No upward fade behind the dock: it darkened the bottom edge of the map on
      every mobile browser. Each dock control carries its own panel background,
@@ -2572,6 +2575,98 @@ input[type='range']::-moz-range-thumb {
   padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
   background: none;
   z-index: 700;
+}
+.dock-main,
+.dock-nav {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.dock-nav-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.dock-nav-btn:active {
+  transform: scale(0.96);
+}
+.dock-nav-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+.dock-source-btn {
+  flex: 1.5 1 0;
+}
+.dock-nav-btn .lucide {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+/* Source picker: fills the dock (replacing both rows) when the source button is
+   tapped, so the whole bottom UI becomes a source selection surface. */
+.dock-source-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.dock-source-picker[hidden] {
+  display: none !important;
+}
+.mobile-dock.source-picking .dock-main,
+.mobile-dock.source-picking .dock-nav {
+  display: none;
+}
+.dock-source-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 54px;
+  padding: 8px 6px;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.dock-source-item:active {
+  transform: scale(0.96);
+}
+.dock-source-item.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+.dock-source-item .lucide {
+  width: 18px;
+  height: 18px;
+}
+/* Desktop keeps only the floating product chip + play (row 1); the frame nav,
+   source switcher and source picker are mobile-only. */
+.app:not(.mobile) .dock-nav,
+.app:not(.mobile) .dock-source-picker {
+  display: none !important;
 }
 .dock-status {
   flex: 1;
@@ -2848,7 +2943,7 @@ input[type='range']::-moz-range-thumb {
    it stands in for just the product chip + the dock's own play button; the
    inspect and tools buttons stay put beside it, so the slider "only takes up the
    part of the bottom UI that shows the current product and the play button". */
-.mobile-dock > .playback-bar {
+.dock-main > .playback-bar {
   position: static;
   flex: 1 1 auto;
   min-width: 0;
@@ -2871,7 +2966,7 @@ input[type='range']::-moz-range-thumb {
 /* When idle the docked bar must reserve no row space. The shared [hidden] rule
    keeps it laid out (display:flex) for its fade; inside the dock that would shove
    the buttons around, so collapse it outright instead. */
-.mobile-dock > .playback-bar[hidden] {
+.dock-main > .playback-bar[hidden] {
   display: none !important;
 }
 /* The product chip and the dock's play button yield their slot to the scrubber. */
@@ -2881,11 +2976,11 @@ input[type='range']::-moz-range-thumb {
 }
 /* The frame label would crowd out the scrub track on a phone — show it only once
    there's room (it duplicates info the scrubber already conveys visually). */
-.mobile-dock > .playback-bar .pb-label {
+.dock-main > .playback-bar .pb-label {
   display: none;
 }
 @media (min-width: 520px) {
-  .mobile-dock > .playback-bar .pb-label {
+  .dock-main > .playback-bar .pb-label {
     display: block;
     min-width: 0;
     max-width: 140px;
@@ -3003,6 +3098,65 @@ input[type='range']::-moz-range-thumb {
   gap: 12px;
   padding: 2px 2px 8px;
 }
+/* ---- Mobile single-scroll popup (Products / Settings) ----
+   Replaces the horizontal swipe carousel with one vertical scroll so the whole
+   popup scrolls as a single surface. Exactly one group (Products or Settings) is
+   visible at a time; layoutMobileSheet() relocates the real panels into them. */
+.sheet-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 2px 8px;
+}
+.sheet-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sheet-group[hidden] {
+  display: none !important;
+}
+.sheet-title {
+  margin: 0;
+  font-family: 'Manrope', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--ink);
+}
+.sheet-title[hidden] {
+  display: none;
+}
+/* Source switching on mobile happens through the dock's source picker, so the
+   in-panel Source mode switch is redundant there. */
+.app.mobile #modeSwitch {
+  display: none;
+}
+/* Mobile shows the single-scroll surface; the desktop drawer's swipe tabs +
+   pager body are hidden. Desktop does the reverse. */
+.app.mobile .mobile-sheet .sheet-tabs,
+.app.mobile .mobile-sheet .sheet-body {
+  display: none !important;
+}
+.app:not(.mobile) .mobile-sheet .sheet-scroll {
+  display: none !important;
+}
+/* Mobile: grip (drag handle) on top, popup title centered beneath it. */
+.app.mobile .sheet-header {
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 4px 8px;
+}
+.app.mobile .sheet-header .sheet-grip {
+  margin: 8px 0 2px;
+}
+
 /* Rails relocated into the sheet stack as full-width sections. The sheet body
    is a scrolling flex column, so the rails must keep their natural (content)
    height — without flex-shrink:0 the flex layout squeezes each rail's box while
