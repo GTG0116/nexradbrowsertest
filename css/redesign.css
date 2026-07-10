@@ -1001,7 +1001,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     box-shadow: 0 0 14px var(--accent-soft);
   }
 
-  .app:not(.mobile) .mobile-dock > .playback-bar {
+  .app:not(.mobile) .dock-main > .playback-bar {
     height: 44px;
     padding: 5px 8px;
     color: var(--ink);
@@ -1155,7 +1155,11 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
 .snd-head {
   min-height: 58px;
+  /* Keep the close button clear of the iOS status-bar / notch: this rule used to
+     flatten the safe-area padding that style.css sets, which pushed the ✕ up into
+     the top safe area on iPhones and left users unable to leave sounding mode. */
   padding: 9px 16px;
+  padding-top: calc(9px + env(safe-area-inset-top, 0px));
   background: var(--panel);
   border-bottom-color: var(--panel-edge);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -1572,10 +1576,9 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     left: 0;
     right: 0;
     width: auto;
-    min-height: 92px;
-    align-items: center;
-    gap: 7px;
-    padding: 12px 10px calc(14px + env(safe-area-inset-bottom, 0px));
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 10px calc(12px + env(safe-area-inset-bottom, 0px));
     background: var(--panel);
     border-top: 1px solid var(--panel-edge);
     box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.18);
@@ -1695,7 +1698,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .playback-bar,
-  .mobile-dock > .playback-bar {
+  .dock-main > .playback-bar {
     color: var(--ink);
     background: var(--panel-2);
     border-color: var(--panel-edge);
@@ -1712,6 +1715,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   .snd-head {
     min-height: 52px;
     padding: 8px 12px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
   }
 
   .snd-title h2 {
@@ -1985,6 +1989,35 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
   .mtb-live.is-live .mtb-live-dot {
     box-shadow: 0 0 8px var(--live);
+  }
+  /* Day + time of the on-screen product (radar scan / model forecast time). */
+  .mtb-time {
+    flex: 0 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    height: 46px;
+    padding: 0 11px;
+    color: var(--ink);
+    background: var(--hud);
+    border: 1px solid var(--hud-border);
+    border-radius: 13px;
+    backdrop-filter: blur(10px);
+  }
+  .mtb-time-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+    font: 600 11px 'IBM Plex Mono', ui-monospace, monospace;
+    letter-spacing: 0.2px;
+  }
+  /* Under ~380px the city label yields so the site chip + time + theme all fit. */
+  @media (max-width: 380px) {
+    .mtb-site-text span {
+      display: none;
+    }
   }
   .mtb-theme {
     flex: none;

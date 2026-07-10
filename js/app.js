@@ -843,6 +843,9 @@ const state = {
   // off to inspect the raw folded field.
   dealias: true,
   live: false,
+  // Radar is pinned to live; archive mode is the only way to browse past scans
+  // without the 60 s refresh snapping the view forward. Off ⇒ live.
+  radarArchive: false,
   liveTimer: null,
   map: null,
   geolocate: null,
@@ -1000,6 +1003,8 @@ function cacheEls() {
   el.readout = $('#mapReadout');
   el.liveBtn = $('#liveBtn');
   el.refreshBtn = $('#refreshBtn');
+  el.archiveField = $('#archiveField');
+  el.archiveToggle = $('#archiveToggle');
   el.progress = $('#progress');
   el.decoding = $('#decoding');
   el.opacity = $('#opacity');
@@ -1132,6 +1137,14 @@ function cacheEls() {
   el.playBtn = $('#playBtn');
   el.inspectBtn = $('#inspectBtn');
   el.dockSettings = $('#dockSettings');
+  el.dockMain = $('#dockMain');
+  el.dockNav = $('#dockNav');
+  el.dockBack = $('#dockBack');
+  el.dockFwd = $('#dockFwd');
+  el.dockSource = $('#dockSource');
+  el.dockSourceIcon = $('#dockSourceIcon');
+  el.dockSourceLabel = $('#dockSourceLabel');
+  el.dockSourcePicker = $('#dockSourcePicker');
   el.dockToolSlot = $('#dockToolSlot');
   el.dockToolMore = $('#dockToolMore');
   el.dockToolBtn = $('#dockToolBtn');
@@ -1142,6 +1155,8 @@ function cacheEls() {
   el.mtbCode = $('#mtbCode');
   el.mtbCity = $('#mtbCity');
   el.mtbLive = $('#mtbLive');
+  el.mtbTime = $('#mtbTime');
+  el.mtbTimeText = $('#mtbTimeText');
   el.mtbTheme = $('#mtbTheme');
   el.mtbThemeIcon = $('#mtbThemeIcon');
   el.soundingHint = $('#soundingHint');
@@ -1153,6 +1168,11 @@ function cacheEls() {
   el.sheetScrim = $('#sheetScrim');
   el.sheetGrip = $('#sheetGrip');
   el.sheetHeader = $('#sheetHeader');
+  el.sheetTitle = $('#sheetTitle');
+  // Mobile single-scroll surface (Products popup / Settings popup).
+  el.sheetScroll = $('#sheetScroll');
+  el.sheetProducts = $('#sheetProducts');
+  el.sheetSettings = $('#sheetSettings');
   // Mobile swipe carousel (pages + tabs) and the panels relocated into them.
   el.sheetTabs = $('#sheetTabs');
   el.sheetPager = $('#sheetPager');
@@ -1206,7 +1226,7 @@ function cacheEls() {
   // Dock the playback scrubber inside the bottom dock so that, while a loop runs,
   // it only takes the product + play slot and the inspect + tools buttons stay
   // reachable beside it (CSS hides the product chip + dock play button instead).
-  el.mobileDock.insertBefore(el.playbackBar, el.inspectBtn);
+  el.dockMain.insertBefore(el.playbackBar, el.inspectBtn);
 
   // Model sounding (Skew-T / hodograph / severe parameters). Launched in models
   // mode by right-clicking (desktop) or long-pressing (mobile) a map point.
@@ -2599,9 +2619,16 @@ function applyModePanels() {
   placeDesktopVolumePanel();
   document.querySelectorAll('.mode-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
-  // The right-click gesture only opens a sounding in Models mode (elsewhere it
-  // jumps to the nearest radar site instead) — only claim it there.
-  if (el.soundingHint) el.soundingHint.hidden = state.mode !== 'models';
+  // The forecast-sounding hint is intentionally never shown.
+  if (el.soundingHint) el.soundingHint.hidden = true;
+  // Radar is pinned live: swap its free LIVE button for the Archive-mode toggle.
+  if (el.archiveField) el.archiveField.hidden = state.mode !== 'radar';
+  if (el.liveBtn) el.liveBtn.hidden = state.mode === 'radar';
+  if (el.archiveToggle) {
+    el.archiveToggle.classList.toggle('active', state.radarArchive);
+    el.archiveToggle.textContent = state.radarArchive ? 'ON' : 'OFF';
+  }
+  if (typeof updateDockSourceButton === 'function') updateDockSourceButton();
 }
 
 function setMode(mode) {
@@ -2627,6 +2654,8 @@ function setMode(mode) {
   state._forceLatest = true;
 
   if (mode === 'radar') {
+    // Radar is pinned live unless the user is in archive mode.
+    if (!state.radarArchive) ensureLiveForSwitch();
     buildTiltList();
     buildVolumeList();
     if (state.volumes.length) loadVolumeList();
@@ -2643,6 +2672,8 @@ function setMode(mode) {
     enterOutlookSourceMode();
   }
   if (state.splitView) state.splitView.onModeChange();
+  // Mobile: re-place the product/settings panels for the new source.
+  if (mqSmallScreen.matches) layoutMobileSheet();
   updateMeta();
   saveSettings();
 }
@@ -5689,6 +5720,12 @@ function updateMobileTopBar(info = null) {
     if (parts[1]) city = parts[1].trim();
   }
   el.mtbCity.textContent = city || '—';
+  // Day + time of the on-screen product (radar scan time / model forecast valid
+  // time). The desktop time-bar is hidden on mobile, so this is the read-out.
+  if (el.mtbTimeText) {
+    const pt = productTime();
+    el.mtbTimeText.textContent = pt ? fmtProductStamp(pt.time) : '—';
+  }
   if (el.mtbLive) el.mtbLive.classList.toggle('is-live', !!state.live);
   if (el.mtbThemeIcon) {
     const want = state.uiTheme === 'dark' ? 'sun' : 'moon';
@@ -5703,13 +5740,28 @@ function updateMobileTopBar(info = null) {
 const SHEET_EASE = 'cubic-bezier(.22,1,.36,1)';
 let sheetCloseTimer = null;
 
-function openSheet() {
+// `kind` selects which mobile popup opens: 'products' (the dock chip — products
+// for the current source + any satellite/model selection) or 'settings' (the
+// gear — everything else). Desktop ignores it and shows its drawer/pager.
+function openSheet(kind = 'settings') {
   if (sheetCloseTimer) { clearTimeout(sheetCloseTimer); sheetCloseTimer = null; }
+  closeDockSourcePicker();
+  if (mqSmallScreen.matches) {
+    layoutMobileSheet();
+    const products = kind === 'products';
+    if (el.sheetProducts) el.sheetProducts.hidden = !products;
+    if (el.sheetSettings) el.sheetSettings.hidden = products;
+    if (el.sheetTitle) {
+      el.sheetTitle.hidden = false;
+      el.sheetTitle.textContent = products ? 'Products' : 'Settings & data';
+    }
+    if (el.sheetScroll) el.sheetScroll.scrollTop = 0;
+  }
   el.sheet.hidden = false;
   el.sheetScrim.hidden = false;
   document.querySelector('.app').classList.add('sheet-open');
-  // The current product's controls always lead — open on page 0 every time.
-  requestAnimationFrame(() => setSheetPage(0, false));
+  // Desktop drawer: the current product's controls always lead — open on page 0.
+  if (!mqSmallScreen.matches) requestAnimationFrame(() => setSheetPage(0, false));
   // Slide up from the bottom: start off-screen, then animate to rest next frame.
   el.sheet.style.transition = 'none';
   el.sheet.style.transform = 'translateY(100%)';
@@ -5734,6 +5786,95 @@ function closeSheet() {
     el.sheet.style.transform = '';
     el.sheet.style.transition = '';
   }, 240);
+}
+
+// ---------------------------------------------------------------------------
+// Dock source picker — the dock's source button morphs the bottom UI into a row
+// of sources (radar / satellite / MRMS / models / outlook / obs) so the user can
+// jump straight from, say, radar to models without opening a menu.
+// ---------------------------------------------------------------------------
+const DOCK_SOURCES = [
+  ['radar', 'Radar', 'radar'],
+  ['satellite', 'Satellite', 'satellite'],
+  ['mrms', 'MRMS', 'layers-3'],
+  ['models', 'Models', 'line-chart'],
+  ['outlooks', 'Outlook', 'cloud-sun'],
+  ['observations', 'Obs', 'eye'],
+];
+
+function setupDockSourcePicker() {
+  if (!el.dockSourcePicker || !el.dockSource) return;
+  el.dockSourcePicker.innerHTML = '';
+  for (const [mode, label, icon] of DOCK_SOURCES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dock-source-item';
+    b.dataset.mode = mode;
+    b.innerHTML = `<i data-lucide="${icon}" class="lucide sm"></i><span>${label}</span>`;
+    b.addEventListener('click', () => {
+      closeDockSourcePicker();
+      if (state.mode !== mode) setMode(mode);
+      else updateDockSourceButton();
+    });
+    el.dockSourcePicker.appendChild(b);
+  }
+  el.dockSource.addEventListener('click', toggleDockSourcePicker);
+  refreshIcons();
+  updateDockSourceButton();
+}
+
+// Reflect the active source on the dock's source button + picker highlight.
+function updateDockSourceButton() {
+  const found = DOCK_SOURCES.find((s) => s[0] === state.mode);
+  if (el.dockSourceLabel) el.dockSourceLabel.textContent = found ? found[1] : 'Source';
+  if (el.dockSourceIcon && el.dockSourceIcon.dataset.icon !== (found && found[2])) {
+    const icon = found ? found[2] : 'radar';
+    el.dockSourceIcon.dataset.icon = icon;
+    el.dockSourceIcon.innerHTML = `<i data-lucide="${icon}" class="lucide sm"></i>`;
+    refreshIcons();
+  }
+  if (el.dockSourcePicker) {
+    el.dockSourcePicker.querySelectorAll('.dock-source-item')
+      .forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
+  }
+}
+
+function openDockSourcePicker() {
+  if (!el.dockSourcePicker) return;
+  updateDockSourceButton();
+  el.dockSourcePicker.hidden = false;
+  el.mobileDock.classList.add('source-picking');
+  el.dockSource.classList.add('active');
+}
+function closeDockSourcePicker() {
+  if (!el.dockSourcePicker || el.dockSourcePicker.hidden) return;
+  el.dockSourcePicker.hidden = true;
+  el.mobileDock.classList.remove('source-picking');
+  el.dockSource.classList.remove('active');
+}
+function toggleDockSourcePicker() {
+  if (el.dockSourcePicker && el.dockSourcePicker.hidden) openDockSourcePicker();
+  else closeDockSourcePicker();
+}
+
+// ---------------------------------------------------------------------------
+// Radar live / archive mode. Radar is pinned to live so the newest scan always
+// shows; flipping Archive mode on stops the 60 s refresh from snapping the view
+// forward so the user can step back freely. Turning it off returns to live at
+// once. Non-radar sources keep their own free LIVE toggle.
+// ---------------------------------------------------------------------------
+function setRadarArchive(on) {
+  on = !!on;
+  state.radarArchive = on;
+  if (el.archiveToggle) {
+    el.archiveToggle.classList.toggle('active', on);
+    el.archiveToggle.textContent = on ? 'ON' : 'OFF';
+  }
+  if (state.mode === 'radar') {
+    if (on) stopLive();   // free to browse — no forced-latest, no auto-refresh
+    else startLive();     // snap straight back to live
+  }
+  updateMobileTopBar();
 }
 
 // Drag the settings sheet down to dismiss it — a more discoverable close than
@@ -6256,21 +6397,44 @@ function layoutQuickSettings() {
   el.quickSettings.append(el.overlayOpacityField, el.smoothField, el.dealiasField, el.metarsField, el.ringsField);
 }
 
-// Distribute the control panels into the mobile swipe carousel pages. Page 0 is
-// the controls for the current product; page 1 the source settings (its mode
-// switch acts as the single-site / SAT / MRMS / models selection bar); page 2 the
-// map settings + metadata. The same DOM nodes are moved, so all wiring is intact.
-function layoutMobilePages() {
+// Mobile: distribute the control panels into the two single-scroll popups.
+//
+// The Products popup (#sheetProducts) shows only the products for the current
+// source — plus the satellite/model selection UI (with model runs) for the
+// sources that have no map dots to switch. Everything else goes in the Settings
+// popup (#sheetSettings) as one continuous vertical scroll, replacing the old
+// horizontal swipe carousel (which made scrolling awkward). The same id-backed
+// DOM nodes are moved, so all wiring/state is intact.
+//
+// Every mobile panel is placed exactly once here, so neither popup is ever left
+// with a stranded panel from a previous mode.
+function layoutMobileSheet() {
+  if (!el.sheetProducts) return;
   layoutQuickSettings();
-  // The scan/frame list (volumePanel — "Volume scans" / "Satellite scans" /
-  // "MRMS frames" / "Model runs") lives with the product controls so the frame
-  // picker sits beside the product/tilt controls instead of on the source page.
-  el.pageControls.append(el.tiltPanel, el.productPanel, el.layerPanel, el.outlookDetailPanel, el.displayPanel, el.volumePanel, el.fhourPanel, el.satOptsPanel);
-  el.pageSettings.append(el.sourcePanel, el.layoutPanel, el.alertsPanel, el.cyclonesPanel);
-  el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
-  setSheetTabLabels('Controls', 'Settings', 'Map');
-  // Mobile has no sidebar — this is the only home for these controls, so the
-  // "more settings" body always stays expanded there (see setMoreSettingsCollapsed).
+  const mode = state.mode;
+  const prod = el.sheetProducts;
+  const set = el.sheetSettings;
+  // Radar/MRMS/observations switch site/domain from the map, so their popup is
+  // just the product grid; satellite and models have no dots, so their selection
+  // UI (satellite/sector, model/storm + model runs) rides in the popup too.
+  const sourceInProducts = mode === 'satellite' || mode === 'models';
+
+  if (sourceInProducts) prod.append(el.sourcePanel);
+  if (mode === 'models') prod.append(el.volumePanel); // model runs
+  prod.append(el.productPanel);
+  if (mode === 'outlooks') prod.append(el.spcPanel, el.outlookDetailPanel);
+
+  set.append(el.quickSettings);
+  if (!sourceInProducts) set.append(el.sourcePanel);
+  set.append(el.tiltPanel, el.fhourPanel);
+  if (mode !== 'models') set.append(el.volumePanel);
+  set.append(el.layoutPanel, el.layerPanel, el.displayPanel, el.satOptsPanel);
+  set.append(el.alertsPanel, el.cyclonesPanel, el.basemapPanel);
+  if (mode !== 'outlooks') set.append(el.spcPanel, el.outlookDetailPanel);
+  set.append(el.metaPanel);
+
+  // Mobile has no sidebar and no swipe carousel — keep the "more settings" body
+  // expanded and the tabs out of the way (they're desktop-only now).
   setMoreSettingsCollapsed(false);
 }
 
@@ -6296,6 +6460,11 @@ function layoutDesktopSidebar() {
 }
 function layoutDesktopDrawer() {
   layoutQuickSettings();
+  // On mobile the quick-settings block is relocated into the Settings popup
+  // group; restore it as the desktop drawer's pinned first child.
+  if (el.quickSettings && el.moreSettingsToggle && el.quickSettings.parentElement !== el.sheetBody) {
+    el.sheetBody.insertBefore(el.quickSettings, el.moreSettingsToggle);
+  }
   el.pageControls.append(el.volumePanel, el.layoutPanel, el.layerPanel);
   el.pageSettings.append(el.displayPanel, el.satOptsPanel, el.cyclonesPanel);
   el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
@@ -6403,11 +6572,7 @@ function applyResponsiveLayout() {
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
     closeSheet();
-    if (el.productPanel.parentElement !== el.pageControls) {
-      layoutMobilePages();
-      // Re-anchor the carousel to whatever page was last shown (default: controls).
-      requestAnimationFrame(() => setSheetPage(state._sheetPage || 0, false));
-    }
+    layoutMobileSheet();
   } else {
     closeSheet();
     if (state.inspect) toggleInspect(false);
@@ -7279,6 +7444,9 @@ function ensureLiveForSwitch() {
     state.playback.cache.clear();
     state.playback.cacheCtx = null;
   }
+  // Radar archive mode: the user is deliberately browsing past scans, so a
+  // product/tilt switch must not snap the view forward to the newest frame.
+  if (state.mode === 'radar' && state.radarArchive) { state._forceLatest = false; return; }
   state._forceLatest = true;
   if (state.live) return;
   state.live = true;
@@ -7318,6 +7486,28 @@ function fmtDate(d, local = state.tzLocal) {
   return local
     ? `${MONTH_ABBR[d.getMonth()]} ${d.getDate()}`
     : `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Weekday + date + short time for the mobile top bar's product read-out, e.g.
+// "Fri Jul 10 12:05pm" (local) or "Fri Jul 10 17:05z" (UTC) — matching whichever
+// zone the clock is set to. This is the phone's "what time am I looking at".
+function fmtProductStamp(d) {
+  if (!d || !Number.isFinite(d.getTime())) return '—';
+  const local = state.tzLocal;
+  const p = (n) => String(n).padStart(2, '0');
+  const wd = WEEKDAY_ABBR[local ? d.getDay() : d.getUTCDay()];
+  const mo = MONTH_ABBR[local ? d.getMonth() : d.getUTCMonth()];
+  const day = local ? d.getDate() : d.getUTCDate();
+  let time;
+  if (local) {
+    const h24 = d.getHours();
+    const h12 = ((h24 + 11) % 12) + 1;
+    time = `${h12}:${p(d.getMinutes())}${h24 < 12 ? 'am' : 'pm'}`;
+  } else {
+    time = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}z`;
+  }
+  return `${wd} ${mo} ${day} ${time}`;
 }
 
 // The valid/scan time (Date) of the frame currently shown for the active mode,
@@ -7365,6 +7555,11 @@ function productTime() {
 // in 'product' mode (the default) it shows the selected frame's scan / valid time
 // with a short tag, falling back to the wall clock until a frame has loaded.
 function tickClock() {
+  // Keep the mobile top bar's product day/time fresh (and time-zone correct).
+  if (el.mtbTimeText && mqSmallScreen.matches) {
+    const pt = productTime();
+    el.mtbTimeText.textContent = pt ? fmtProductStamp(pt.time) : '—';
+  }
   if (!el.clock) return;
   if (state.timeSource === 'product') {
     const pt = productTime();
@@ -8635,6 +8830,9 @@ function runPlaybackAction(which) {
 function stepFrame(dir) {
   const pb = state.playback;
   if (pb && pb.active && pb.frames.length) { pb.seek(pb.idx + dir); return true; }
+  // Radar is pinned live; stepping back is what flips on archive browsing so the
+  // 60 s refresh stops snapping the view forward as the user pages through scans.
+  if (state.mode === 'radar' && dir < 0 && !state.radarArchive) setRadarArchive(true);
   if (state.mode === 'models') return stepButtonList(el.fhourList, dir > 0 ? 'next' : 'prev');
   // The scan/scene/frame lists render newest-first, so "later" = previous row.
   return stepButtonList(el.volumeList, dir > 0 ? 'prev' : 'next');
@@ -9482,6 +9680,12 @@ function init() {
 
   el.refreshBtn.addEventListener('click', () => refreshActive());
   el.liveBtn.addEventListener('click', toggleLive);
+  // Radar-only Archive-mode toggle (replaces the LIVE button in radar).
+  if (el.archiveToggle) {
+    el.archiveToggle.addEventListener('click', () =>
+      setRadarArchive(!state.radarArchive)
+    );
+  }
 
   // Clock time-zone toggle (UTC ↔ local).
   if (el.tzToggle) {
@@ -9740,28 +9944,29 @@ function init() {
   setupDockTools();
 
   // ---- Mobile dock + sheet + playback + inspect wiring ----
+  // The product chip opens the Products popup (just the products for the current
+  // source, plus satellite/model selection where there are no map dots).
   el.dockStatus.addEventListener('click', () => {
     if (!mqSmallScreen.matches) return;
-    el.sheet.hidden ? openSheet() : closeSheet();
+    el.sheet.hidden ? openSheet('products') : closeSheet();
   });
-  // Dock settings button (mobile) opens the same sheet as the status chip.
+  // Dock settings button (mobile) opens the full Settings popup.
   if (el.dockSettings) {
     el.dockSettings.addEventListener('click', () =>
-      el.sheet.hidden ? openSheet() : closeSheet()
+      el.sheet.hidden ? openSheet('settings') : closeSheet()
     );
   }
-  // Mobile top bar: the site chip opens the sheet on the Source page (change
-  // radar site / source); the theme button flips light/dark like the desktop
-  // command bar's toggle.
+  // Back / forward step through frames like the desktop arrow keys.
+  if (el.dockBack) el.dockBack.addEventListener('click', () => stepFrame(-1));
+  if (el.dockFwd) el.dockFwd.addEventListener('click', () => stepFrame(1));
+  // The source button morphs the dock into a source picker.
+  setupDockSourcePicker();
+  // Mobile top bar: the site chip opens the Settings popup (radar site / source
+  // live under Settings now); the theme button flips light/dark.
   if (el.mtbSite) {
-    el.mtbSite.addEventListener('click', () => {
-      if (el.sheet.hidden) {
-        openSheet();
-        requestAnimationFrame(() => setSheetPage(1, false));
-      } else {
-        closeSheet();
-      }
-    });
+    el.mtbSite.addEventListener('click', () =>
+      el.sheet.hidden ? openSheet('settings') : closeSheet()
+    );
   }
   if (el.mtbTheme) {
     el.mtbTheme.addEventListener('click', () => {

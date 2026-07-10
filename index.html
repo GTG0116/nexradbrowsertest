@@ -300,6 +300,13 @@
              mobile they're distributed into the swipe sheet pages as before. -->
         <section class="panel grow" id="volumePanel" hidden>
           <h2 class="panel-title" id="volumeTitle">Volume scans</h2>
+          <!-- Radar-only: radar stays pinned to live; flipping Archive mode on
+               lets the user step back through past scans without the 60 s
+               refresh snapping them forward. Turning it off returns to live. -->
+          <div class="toggle-field" id="archiveField" hidden>
+            <span>Archive mode</span>
+            <button id="archiveToggle" class="alerts-toggle" title="Browse past scans without snapping back to live">OFF</button>
+          </div>
           <label class="field">
             <span>UTC date</span>
             <input type="date" id="dateInput" />
@@ -355,6 +362,12 @@
                 </span>
                 <span id="mtbLive" class="mtb-live"><span class="mtb-live-dot"></span>LIVE</span>
               </button>
+              <!-- Day + time of the on-screen product (radar scan time / model
+                   forecast valid time). The .time-bar clock is hidden on mobile,
+                   so this is the phone's read-out of "what time am I looking at". -->
+              <div id="mtbTime" class="mtb-time" title="Time of the product on screen">
+                <span id="mtbTimeText" class="mtb-time-text">—</span>
+              </div>
               <button id="mtbTheme" class="mtb-theme" type="button" title="Switch appearance">
                 <span id="mtbThemeIcon"><i data-lucide="sun" class="lucide sm" aria-hidden="true"></i></span>
               </button>
@@ -609,29 +622,64 @@
         <button id="playClose" class="pb-close" title="Exit playback">✕</button>
       </div>
 
+      <!-- Two-row mobile dock. Row 1 (the product chip + play) opens the Products
+           popup and swaps for the playback scrubber during a loop. Row 2 steps
+           frames (like the desktop arrow keys), morphs the dock into a source
+           picker, and opens the full Settings popup. -->
       <div id="mobileDock" class="mobile-dock" hidden>
-        <button id="dockStatus" class="dock-status" title="Settings">
-          <span id="dockProd" class="dock-prod">REF</span>
-          <span class="dock-meta">
-            <b id="dockSite">—</b>
-            <span id="dockTime">—</span>
-          </span>
-          <span class="dock-caret">▴</span>
-        </button>
-        <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
-        <!-- Inspect stays in the DOM (its toggle + active-state wiring lives here
-             and the rail's tool chooser delegates to it) but is hidden on mobile;
-             the map tools now live in the right-side rail's single-tool slot. -->
-        <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
-        <button id="dockSettings" class="dock-tool" title="Display settings"><i data-lucide="sliders-horizontal" class="lucide sm"></i></button>
+        <div id="dockMain" class="dock-main">
+          <button id="dockStatus" class="dock-status" title="Products">
+            <span id="dockProd" class="dock-prod">REF</span>
+            <span class="dock-meta">
+              <b id="dockSite">—</b>
+              <span id="dockTime">—</span>
+            </span>
+            <span class="dock-caret">▴</span>
+          </button>
+          <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
+          <!-- Inspect stays in the DOM (its toggle + active-state wiring lives here
+               and the rail's tool chooser delegates to it) but is hidden on mobile;
+               the map tools now live in the right-side rail's single-tool slot. -->
+          <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
+          <!-- playbackBar is relocated here by JS -->
+        </div>
+        <div id="dockNav" class="dock-nav">
+          <button id="dockBack" class="dock-nav-btn" title="Previous frame"><i data-lucide="chevron-left" class="lucide sm"></i><span>Back</span></button>
+          <button id="dockFwd" class="dock-nav-btn" title="Next frame"><span>Next</span><i data-lucide="chevron-right" class="lucide sm"></i></button>
+          <button id="dockSource" class="dock-nav-btn dock-source-btn" title="Change source">
+            <span id="dockSourceIcon"><i data-lucide="radar" class="lucide sm"></i></span>
+            <span id="dockSourceLabel">Radar</span>
+          </button>
+          <button id="dockSettings" class="dock-nav-btn" title="Settings &amp; data"><i data-lucide="sliders-horizontal" class="lucide sm"></i></button>
+        </div>
+        <!-- Source picker: the source-switch button morphs the dock into this row
+             of sources (radar / satellite / MRMS / models / outlook / obs). -->
+        <div id="dockSourcePicker" class="dock-source-picker" hidden></div>
       </div>
 
       <div id="sheetScrim" class="sheet-scrim" hidden></div>
       <div id="mobileSheet" class="mobile-sheet" hidden>
         <div class="sheet-header" id="sheetHeader">
-          <button class="sheet-grip" id="sheetGrip" aria-label="Close settings"></button>
+          <button class="sheet-grip" id="sheetGrip" aria-label="Close"></button>
+          <!-- Mobile only: names which popup this is (Products / Settings). -->
+          <h2 class="sheet-title" id="sheetTitle" hidden>Products</h2>
         </div>
-        <!-- Swipe tabs: jump straight to a page (also reflects the swipe position). -->
+
+        <!-- Mobile single-scroll surface. Exactly one group shows at a time:
+             Products (opened by the dock chip — just the products for the current
+             source, plus the satellite/model selection where there are no map dots
+             to switch) or Settings (everything else). layoutMobileSheet() relocates
+             the real, id-backed panels into these two groups, so no state or wiring
+             is duplicated. This replaces the old horizontal swipe carousel so the
+             whole popup is one vertical scroll. -->
+        <div class="sheet-scroll" id="sheetScroll">
+          <div class="sheet-group" id="sheetProducts"></div>
+          <div class="sheet-group" id="sheetSettings" hidden></div>
+        </div>
+
+        <!-- Swipe tabs: jump straight to a page (also reflects the swipe position).
+             Desktop settings drawer only — hidden on mobile in favour of the
+             single-scroll surface above. -->
         <div class="sheet-tabs" id="sheetTabs">
           <button class="sheet-tab active" data-page="0" type="button">Controls</button>
           <button class="sheet-tab" data-page="1" type="button">Settings</button>
