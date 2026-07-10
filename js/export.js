@@ -4,8 +4,8 @@
 // layers and the draw/measure shapes all render into the map's single WebGL
 // canvas, so a `toDataURL` of that canvas already contains the full picture (the
 // map is created with preserveDrawingBuffer:true so the backbuffer stays
-// readable). We composite that canvas onto a 2D canvas, stamp a title banner and
-// a color legend reconstructed from the live `#legend` DOM, then present a small
+// readable). We composite that canvas onto a clean 2D canvas, stamp only compact
+// product/time context and a full-width color legend, then present a small
 // preview modal offering native Share, Copy and Download.
 //
 // In split view both panes are passed in and laid out side by side.
@@ -54,123 +54,27 @@ export class ExportTool {
     const mapW = cols * cellW + gap * (cols - 1);
     const mapH = rows * cellH + gap * (rows - 1);
 
-    // Size the banners relative to the image width so the layout keeps the same
-    // proportions whatever the map's resolution/DPR — with a floor so a small
-    // (mobile) capture stays legible and a ceiling so a huge one isn't blown up.
-    // On phones the captured map is narrow, so the default unit comes out tiny
-    // and the header/legend are unreadable when shared. Scale the unit up there
-    // (bigger divisor floor) — the header, legend and credit are all measured
-    // against `u` and clipped/dropped if space runs out, so a larger unit makes
-    // the text far more readable without ever letting the colour table overlap.
-    const mobile =
-      typeof window !== 'undefined' &&
-      Math.min(window.innerWidth || Infinity, window.innerHeight || Infinity) <= 820;
-    // Sized so the banner text stays clearly readable when the image is
-    // shared/downscaled to a phone timeline, but capped against the map height
-    // so a short capture isn't dominated by the bands.
-    const u = Math.min(
-      mobile
-        ? clamp(mapW / 34, 28, 56) // phones: chunkier, readable banners
-        : clamp(mapW / 42, 22, 56), // base text unit, ~px
-      Math.max(18, mapH / 12));
-    const padX = Math.round(u * 1.4);
-    const headerH = Math.round(u * 4.4);
-    const footerH = Math.round(legend ? u * 4.6 : u * 2.4);
-
-    // Desktop alert briefings make the stage yield room to the side panel.
-    // Mirror that in the export: draw the briefing beside the pane grid instead
-    // of over the left column, or quad/split exports lose the left panes.
-    // The panel's width and text unit are derived from a single pane's
-    // dimensions (not the whole grid) so the briefing renders at the same size
-    // whether the export carries one pane or four.
-    // An open alert briefing takes precedence over the storm briefing for the
-    // docked side panel (both would otherwise want the same left column).
-    const dockBriefing = !!scene.briefing && !mobile;
-    const dockStorm = !dockBriefing && !!scene.stormBriefing && !mobile;
-    const sidePanel = dockBriefing || dockStorm;
-    const bu = Math.min(
-      mobile ? clamp(cellW / 34, 28, 56) : clamp(cellW / 42, 22, 56),
-      Math.max(18, cellH / 12));
-    const briefingW = sidePanel ? briefingPanelWidth(cellW, bu, mobile) : 0;
-    const mapX = sidePanel ? briefingW : 0;
-    const outW = mapW + (sidePanel ? briefingW : 0);
-
-    const out = document.createElement('canvas');
-    out.width = outW;
-    out.height = headerH + mapH + footerH;
-    const ctx = out.getContext('2d');
-    ctx.fillStyle = theme.bg;
-    ctx.fillRect(0, 0, out.width, out.height);
-
-    // Header band.
-    ctx.fillStyle = theme.panel;
-    ctx.fillRect(0, 0, out.width, headerH);
-    drawHeader(ctx, cap, out.width, headerH, u, padX, theme);
-
-    // The map panes, laid out on the grid (centred in their cell if smaller).
+    // Clean export mode: map canvases only, with the two pieces of context a
+    // shared image needs — product/time at top-left and a full-width legend at
+    // the bottom. No app chrome, alert/briefing panels, stat cards or credits.
+    const clean = document.createElement('canvas');
+    clean.width = mapW;
+    clean.height = mapH;
+    const cleanCtx = clean.getContext('2d');
+    cleanCtx.fillStyle = theme.bg;
+    cleanCtx.fillRect(0, 0, mapW, mapH);
     maps.forEach((c, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const px = mapX + col * (cellW + gap) + Math.round((cellW - c.width) / 2);
-      const py = headerH + row * (cellH + gap) + Math.round((cellH - c.height) / 2);
-      ctx.drawImage(c, px, py, c.width, c.height);
+      const px = col * (cellW + gap) + Math.round((cellW - c.width) / 2);
+      const py = row * (cellH + gap) + Math.round((cellH - c.height) / 2);
+      cleanCtx.drawImage(c, px, py, c.width, c.height);
     });
-
-    // Multi-pane exports lose the on-screen pane badges (DOM overlays, not part
-    // of the canvas), so stamp each pane's product in its top-left corner.
-    if (maps.length > 1 && scene.paneLabels && scene.paneLabels.length) {
-      maps.forEach((c, i) => {
-        const label = scene.paneLabels[i];
-        if (!label) return;
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        drawPaneTag(ctx, String(label),
-          mapX + col * (cellW + gap), headerH + row * (cellH + gap), u, theme);
-      });
-    }
-
-    if (scene.modelStats) drawModelStats(ctx, scene.modelStats, mapX, headerH, mapW, u, theme);
-
-    // The full alert briefing reproduced as the on-screen side panel takes
-    // precedence; otherwise the floating preview card is stamped over the map
-    // near the bottom (matching where it sits live), without its "View full
-    // briefing" footer.
-    if (scene.briefing) {
-      if (dockBriefing) {
-        drawAlertBriefing(ctx, scene.briefing, 0, headerH, briefingW, mapH, bu, mobile, theme, {
-          panelW: briefingW,
-        });
-      } else {
-        drawAlertBriefing(ctx, scene.briefing, 0, headerH, mapW, mapH, u, mobile, theme);
-      }
-    }
-    else if (scene.stormBriefing) {
-      if (dockStorm) {
-        drawStormBriefing(ctx, scene.stormBriefing, 0, headerH, briefingW, mapH, bu, mobile, theme, {
-          panelW: briefingW,
-        });
-      } else {
-        drawStormBriefing(ctx, scene.stormBriefing, 0, headerH, mapW, mapH, u, mobile, theme);
-      }
-    }
-    else if (scene.alert) drawAlertCard(ctx, scene.alert, 0, headerH, mapW, mapH, u, mobile, theme);
-
-    // Footer band: legend (left) + credit/timestamp (right), measured so they
-    // never collide.
-    const fy = headerH + mapH;
-    ctx.fillStyle = theme.panel;
-    ctx.fillRect(0, fy, out.width, footerH);
-    // Hairline separators between the map and each band.
-    ctx.fillStyle = theme.separator;
-    ctx.fillRect(0, headerH - 1, out.width, 1);
-    ctx.fillRect(0, fy, out.width, 1);
-
-    const legendRight = legend
-      ? drawLegend(ctx, legend, padX, fy, footerH, u, out.width - padX * 2, theme)
-      : padX;
-    drawCredit(ctx, cap, legendRight + Math.round(u), out.width - padX, fy, footerH, u, theme);
-
-    return out;
+    const cleanUnit = clamp(mapW / 58, 16, 38);
+    drawExportInfo(cleanCtx, cap, mapW, cleanUnit, theme);
+    drawExportWatermark(cleanCtx, mapW, mapH, cleanUnit, legend ? Math.round(cleanUnit * 2.75) : 0);
+    if (legend) drawExportLegend(cleanCtx, legend, mapW, mapH, cleanUnit, theme);
+    return clean;
   }
 
   // ---- Preview modal ------------------------------------------------------
@@ -300,6 +204,78 @@ const SANS = "'Manrope', system-ui, sans-serif";
 // Header: "◆ RadarNexus" wordmark on the left, title + sub stacked in the middle,
 // scan time on the right. Everything is measured and clipped so the three blocks
 // never overlap, whatever the image width. `u` is the base text unit (~px).
+function drawExportInfo(ctx, cap, W, u, theme) {
+  const pad = Math.round(u * 0.65);
+  const gap = Math.round(u * 0.38);
+  const title = cap.sub || cap.title || 'RadarNexus';
+  const time = cap.time || '';
+  ctx.save();
+  ctx.font = `700 ${Math.round(u * 1.0)}px ${SANS}`;
+  const titleW = ctx.measureText(title).width;
+  ctx.font = `600 ${Math.round(u * 0.7)}px ${MONO}`;
+  const detail = time;
+  const detailW = ctx.measureText(detail).width;
+  const boxW = Math.min(W - pad * 2, Math.ceil(Math.max(titleW, detailW) + pad * 2));
+  const boxH = Math.round(u * 3.05);
+  const x = pad;
+  const y = pad;
+  roundRectPath(ctx, x, y, boxW, boxH, Math.round(u * 0.42));
+  ctx.fillStyle = 'rgba(5,10,16,0.82)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.24)';
+  ctx.lineWidth = Math.max(1, Math.round(u / 22));
+  ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `700 ${Math.round(u * 1.0)}px ${SANS}`;
+  ctx.fillText(clip(ctx, title, boxW - pad * 2), x + pad, y + pad);
+  ctx.fillStyle = theme.accent;
+  ctx.font = `600 ${Math.round(u * 0.7)}px ${MONO}`;
+  ctx.fillText(clip(ctx, detail, boxW - pad * 2), x + pad, y + pad + u + gap);
+  ctx.restore();
+}
+
+function drawExportWatermark(ctx, W, H, u, legendHeight) {
+  const padX = Math.round(u * 0.75);
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.82)';
+  ctx.font = `700 ${Math.round(u * 0.62)}px ${MONO}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('RADARNEXUS', padX, H - legendHeight - Math.round(u * 0.38));
+  ctx.restore();
+}
+
+function drawExportLegend(ctx, legend, W, H, u, theme) {
+  const panelH = Math.round(u * 2.75);
+  const padX = Math.round(u * 0.75);
+  const barY = H - panelH + Math.round(u * 0.82);
+  const barH = Math.max(7, Math.round(u * 0.48));
+  const barX = padX;
+  const barW = W - padX * 2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(5,10,16,0.84)';
+  ctx.fillRect(0, H - panelH, W, panelH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(clip(ctx, (legend.title || '').toUpperCase(), barW), barX, barY - Math.round(u * 0.24));
+  const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  for (const [pos, color] of legend.stops || []) grad.addColorStop(clamp(pos, 0, 1), color);
+  ctx.fillStyle = grad;
+  ctx.fillRect(barX, barY, barW, barH);
+  const ticks = legend.ticks || [];
+  const ty = barY + barH + Math.round(u * 0.7);
+  ctx.fillStyle = 'rgba(255,255,255,0.86)';
+  ctx.font = `600 ${Math.round(u * 0.58)}px ${MONO}`;
+  if (ticks[0]) { ctx.textAlign = 'left'; ctx.fillText(ticks[0], barX, ty); }
+  if (ticks[1]) { ctx.textAlign = 'center'; ctx.fillText(ticks[1], barX + barW / 2, ty); }
+  if (ticks[2]) { ctx.textAlign = 'right'; ctx.fillText(ticks[2], barX + barW, ty); }
+  ctx.restore();
+}
+
 function drawHeader(ctx, cap, W, H, u, padX, theme) {
   const AZURE = theme.accent;
   // Brand accent bar down the left edge.

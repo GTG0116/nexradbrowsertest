@@ -254,7 +254,11 @@ export function createRadarLayer(id = 'radar') {
       this.lutTex = gl.createTexture();
 
       // A style reload re-runs onAdd on the same logical layer — re-upload.
-      if (this.pending) this._upload(this.pending);
+      if (this.pending) {
+        const pending = this.pending;
+        this.pending = null;
+        this._upload(pending);
+      }
     },
 
     // CPU-side prep: resample to a polar grid, stash the LUT + uniforms, and
@@ -271,7 +275,7 @@ export function createRadarLayer(id = 'radar') {
       const maxRange =
         grid.rep.firstGate + grid.gateCount * grid.rep.gateSpacing;
 
-      this.pending = {
+      const payload = {
         grid,
         lut: sc.rgba,
         steps: sc.steps,
@@ -299,12 +303,17 @@ export function createRadarLayer(id = 'radar') {
       const n = mercY(site.lat + dLat);
       const s = mercY(site.lat - dLat);
       // two triangles (TL,TR,BR, TL,BR,BL)
-      this.pending.verts = new Float32Array([
+      payload.verts = new Float32Array([
         w, n, e, n, e, s,
         w, n, e, s, w, s,
       ]);
 
-      if (this.gl) this._upload(this.pending);
+      if (this.gl) {
+        this._upload(payload);
+        this.pending = null;
+      } else {
+        this.pending = payload;
+      }
       this.has = true;
       if (this.map) this.map.triggerRepaint();
     },

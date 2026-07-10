@@ -13,7 +13,7 @@ import { CyclonesController } from './cyclones.js';
 import { applyMapStyle, liftBoundaryLayers, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
-import { loadSceneAsync, ensureBandsAsync, evictScene } from './satClient.js';
+import { loadSceneAsync, ensureBandsAsync, evictScene, clearSceneCache } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
 import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { MIRS_PRODUCTS, MIRS_ORDER, isMirsSat, listMirsScenes, loadMirsGrid, mirsGridBBox } from './mirs.js';
@@ -707,9 +707,11 @@ function clearRadarSource(map) {
 // slow (each multi-MB frame waited for the previous one); a pool lets the
 // parallel frame loader below keep more than one core busy. Sized to the
 // hardware but capped so we don't spawn a worker per frame or hog memory.
-const DECODE_POOL_SIZE = isSmallScreenNow()
-  ? 1
-  : Math.min(6, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+// Keep the idle footprint predictable. Decoder workers retain their JS/WASM
+// heaps after a job, so six long-lived workers could account for hundreds of
+// megabytes even after playback closed. Two still overlap download/decode work
+// without multiplying the resident heap; constrained devices use one.
+const DECODE_POOL_SIZE = CONSTRAINED_DEVICE ? 1 : 2;
 let decodeSeq = 0;
 const pending = new Map();
 const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
@@ -754,8 +756,8 @@ function decodeVolume(bytes) {
 // globally-unique S3 object key, so stale entries from another site/day simply
 // age out; small screens keep far fewer frames to avoid memory pressure.
 // ---------------------------------------------------------------------------
-const VOLUME_CACHE_MAX = CONSTRAINED_DEVICE ? 1 : 8;
-const L3_CACHE_MAX = CONSTRAINED_DEVICE ? 3 : 16;
+const VOLUME_CACHE_MAX = CONSTRAINED_DEVICE ? 1 : 3;
+const L3_CACHE_MAX = CONSTRAINED_DEVICE ? 2 : 6;
 const volumeCache = new Map(); // L2 key -> decoded volume (Map order = LRU)
 const l3Cache = new Map(); // `${productId}|${key}` -> decoded L3 frame
 const volumeInflight = new Map(); // key -> in-flight Promise (dedupes prefetch vs. click)
@@ -1047,6 +1049,7 @@ function cacheEls() {
   el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
+  el.playFramesField = $('#playFramesField');
   el.playFrames = $('#playFrames');
   el.playFramesVal = $('#playFramesVal');
   el.palInput = $('#palInput');
@@ -1766,6 +1769,22 @@ function buildTiltList() {
     });
     el.tiltList.appendChild(btn);
   });
+  el.tiltList.querySelector('.tilt-btn.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
+}
+
+// Elevation / forecast-hour rows are deliberately one horizontal rail. Mouse
+// wheels should move through that rail (not strand the higher tilts off-screen),
+// while touch users retain native horizontal panning.
+function enableHorizontalRailScroll(node) {
+  if (!node || node.dataset.horizontalRail === '1') return;
+  node.dataset.horizontalRail = '1';
+  node.addEventListener('wheel', (event) => {
+    if (!node.offsetParent || node.scrollWidth <= node.clientWidth) return;
+    const delta = event.shiftKey ? event.deltaX : (Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX);
+    if (!delta) return;
+    node.scrollLeft += delta;
+    event.preventDefault();
+  }, { passive: false });
 }
 
 function buildVolumeList() {
@@ -1780,7 +1799,7 @@ function buildVolumeList() {
     btn.className = 'vol-btn';
     btn.dataset.key = v.key;
     if (v.key === state.volumeKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.innerHTML = `<span class="dot"></span>${scanFrameLabel(v)}`;
     btn.addEventListener('click', () => loadVolume(v.key));
     frag.appendChild(btn);
   });
@@ -2607,6 +2626,9 @@ function applyModePanels() {
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar' || state.mode === 'outlooks';
   if (el.modelCityValuesField) el.modelCityValuesField.hidden = !GRID_CITY_VALUE_MODES.has(state.mode);
+  // Model playback always spans the complete run. The generic 2–20 frame
+  // control applies only to the scan-based sources and would be misleading.
+  if (el.playFramesField) el.playFramesField.hidden = state.mode === 'models';
   buildCityValueProductControls();
   if (el.overlayOpacityField) el.overlayOpacityField.hidden = state.mode === 'outlooks';
   el.conusViewField.hidden = !(state.mode === 'satellite' && state.sat.sectorKey === 'conus');
@@ -2638,6 +2660,25 @@ function setMode(mode) {
   const prevMode = state.mode;
   if (prevMode === 'outlooks' && mode !== 'outlooks') leaveOutlookSourceMode();
   state.mode = mode;
+  // Do not let one visit to each data source accumulate several full decoded
+  // grids/scenes. The browser HTTP cache still makes revisits quick; these are
+  // only the large live JS objects and worker parser caches.
+  if (prevMode === 'satellite' && mode !== 'satellite') {
+    clearSceneCache();
+    state.sat.scene = null;
+    state.sat.displayMeta = null;
+    state.sat._bbox = null;
+  } else if (prevMode === 'mrms' && mode !== 'mrms') {
+    state.mrms.grid = null;
+  } else if (prevMode === 'models' && mode !== 'models') {
+    state.models.grid = null;
+    state.models.displayGrid = null;
+    state.models.overlayData = null;
+    packedGridMemo = { payload: null, grid: null };
+  } else if (prevMode === 'observations' && mode !== 'observations') {
+    state.observations.grid = null;
+  }
+  if (state.layers && !state.layers.enabled) state.layers.cache.clear();
   // Each source keeps its own smoothing level — restore this mode's.
   applySmooth(state.smoothByMode[mode] ?? 0);
   if (mode !== 'satellite') clearSatellite();
@@ -3033,7 +3074,7 @@ function buildSatList() {
     btn.className = 'vol-btn';
     btn.dataset.key = v.key;
     if (v.key === state.sat.sceneKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.innerHTML = `<span class="dot"></span>${scanFrameLabel(v)}`;
     btn.addEventListener('click', () => loadSatScene(v.key));
     frag.appendChild(btn);
   });
@@ -3339,7 +3380,7 @@ function buildMrmsList() {
     btn.className = 'vol-btn';
     btn.dataset.key = v.key;
     if (v.key === state.mrms.frameKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.innerHTML = `<span class="dot"></span>${scanFrameLabel(v)}`;
     btn.addEventListener('click', () => loadMrmsFrame(v.key));
     frag.appendChild(btn);
   });
@@ -3517,7 +3558,7 @@ function buildObservationList() {
     btn.className = 'vol-btn';
     btn.dataset.key = v.key;
     if (v.key === state.observations.frameKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${v.label}`;
+    btn.innerHTML = `<span class="dot"></span>${scanFrameLabel(v)}`;
     btn.addEventListener('click', () => loadObservationFrame(v.key));
     frag.appendChild(btn);
   });
@@ -3848,7 +3889,7 @@ function buildModelList() {
     const btn = document.createElement('button');
     btn.className = 'vol-btn';
     if (r.key === state.models.runKey) btn.classList.add('active');
-    btn.innerHTML = `<span class="dot"></span>${r.label} run`;
+    btn.innerHTML = `<span class="dot"></span>${fmtDate(r.time, false)} · ${r.label} run`;
     btn.addEventListener('click', () => selectModelRun(r.key));
     el.volumeList.appendChild(btn);
   });
@@ -3871,6 +3912,7 @@ function buildFhourList() {
     frag.appendChild(btn);
   }
   el.fhourList.appendChild(frag);
+  el.fhourList.querySelector('.tilt-btn.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
 }
 
 function selectFhour(f) {
@@ -3884,6 +3926,7 @@ function selectFhour(f) {
     if (active) found = true;
   }
   if (!found) buildFhourList();
+  else el.fhourList.querySelector('.tilt-btn.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
   loadModelFrame();
 }
 
@@ -4570,7 +4613,9 @@ function layerCacheKey(layer, extra = '') {
 
 // Layer-stack data used to stay in this Map indefinitely. A few stacked MRMS or
 // model products can each retain a full decoded grid, so keep a bounded LRU.
-const LAYER_CACHE_MAX = CONSTRAINED_DEVICE ? 8 : 32;
+// Decoded grids are large; retain only the visible layer working set instead of
+// dozens of historical model/MRMS grids after the user changes products.
+const LAYER_CACHE_MAX = CONSTRAINED_DEVICE ? 2 : 6;
 function layerCacheGet(key) {
   const cache = state.layers.cache;
   const value = cache.get(key);
@@ -5231,7 +5276,7 @@ async function openSounding(loc) {
   }
 
   el.sndStatus.textContent = `Loading ${label} sounding…`;
-  const utc = `${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
+  const utc = `${WEEKDAY_ABBR[validTime.getUTCDay()]} ${p2(validTime.getUTCHours())}:00Z ${validTime.getUTCFullYear()}-${p2(validTime.getUTCMonth() + 1)}-${p2(validTime.getUTCDate())}`;
   el.sndMeta.textContent = `${c.lat.toFixed(2)}°, ${c.lng.toFixed(2)}° · valid ${utc}`;
 
   try {
@@ -5622,7 +5667,7 @@ function dockInfo() {
       prod,
       name,
       source: sat ? sat.label.replace(/\s*\(.*\)$/, '') : 'Satellite',
-      time: t ? t.label : '—',
+      time: t ? scanFrameLabel(t) : '—',
     };
   }
   if (state.mode === 'mrms') {
@@ -5632,7 +5677,7 @@ function dockInfo() {
       prod: state.mrms.productId,
       name: p ? p.name : state.mrms.productId,
       source: 'MRMS',
-      time: t ? t.label : '—',
+      time: t ? scanFrameLabel(t) : '—',
     };
   }
   if (state.mode === 'models') {
@@ -5652,7 +5697,7 @@ function dockInfo() {
       prod: state.observations.productId,
       name: p ? p.name : state.observations.productId,
       source: 'RTMA',
-      time: t ? t.label : '—',
+      time: t ? scanFrameLabel(t) : '—',
     };
   }
   if (state.mode === 'outlooks') {
@@ -5672,7 +5717,7 @@ function dockInfo() {
     prod: state.productId,
     name: p ? p.name : state.productId,
     source: (!isL3Product(state.productId) && state.volume && state.volume.icao) || state.site,
-    time: t ? t.label : '—',
+    time: t ? scanFrameLabel(t) : '—',
   };
 }
 
@@ -5757,14 +5802,20 @@ function openSheet(kind = 'settings') {
     }
     if (el.sheetScroll) el.sheetScroll.scrollTop = 0;
   }
+  const mobile = mqSmallScreen.matches;
+  if (!mobile && el.sheetTitle) {
+    el.sheetTitle.hidden = false;
+    el.sheetTitle.textContent = 'Settings & data';
+  }
   el.sheet.hidden = false;
-  el.sheetScrim.hidden = false;
+  // Desktop settings are a sidebar drawer, so the map stays visible and usable.
+  el.sheetScrim.hidden = !mobile;
   document.querySelector('.app').classList.add('sheet-open');
   // Desktop drawer: the current product's controls always lead — open on page 0.
   if (!mqSmallScreen.matches) requestAnimationFrame(() => setSheetPage(0, false));
   // Slide up from the bottom: start off-screen, then animate to rest next frame.
   el.sheet.style.transition = 'none';
-  el.sheet.style.transform = 'translateY(100%)';
+  el.sheet.style.transform = mobile ? 'translateY(100%)' : 'translateX(-100%)';
   // Force a reflow so the starting transform is committed before transitioning.
   void el.sheet.offsetHeight;
   requestAnimationFrame(() => {
@@ -5775,8 +5826,9 @@ function openSheet(kind = 'settings') {
 
 function closeSheet() {
   if (el.sheet.hidden) return;
+  const mobile = mqSmallScreen.matches;
   el.sheet.style.transition = `transform 0.24s ${SHEET_EASE}`;
-  el.sheet.style.transform = 'translateY(110%)';
+  el.sheet.style.transform = mobile ? 'translateY(110%)' : 'translateX(-105%)';
   el.sheetScrim.hidden = true;
   document.querySelector('.app').classList.remove('sheet-open');
   if (sheetCloseTimer) clearTimeout(sheetCloseTimer);
@@ -6465,14 +6517,16 @@ function layoutDesktopDrawer() {
   if (el.quickSettings && el.moreSettingsToggle && el.quickSettings.parentElement !== el.sheetBody) {
     el.sheetBody.insertBefore(el.quickSettings, el.moreSettingsToggle);
   }
-  el.pageControls.append(el.volumePanel, el.layoutPanel, el.layerPanel);
-  el.pageSettings.append(el.displayPanel, el.satOptsPanel, el.cyclonesPanel);
-  el.pageMap.append(el.basemapPanel, el.spcPanel, el.metaPanel);
-  setSheetTabLabels('Scans', 'Display', 'Map');
+  // One continuous settings surface in the desktop sidebar: no paging and no
+  // secondary "More settings" fold.
+  el.pageControls.append(
+    el.volumePanel, el.layoutPanel, el.layerPanel, el.displayPanel,
+    el.satOptsPanel, el.cyclonesPanel, el.basemapPanel, el.spcPanel, el.metaPanel
+  );
   placeDesktopVolumePanel();
   // The sidebar already surfaces the primary controls directly — collapse the
   // rest behind "More settings" by default each time the drawer is (re)built.
-  setMoreSettingsCollapsed(true);
+  setMoreSettingsCollapsed(false);
 }
 
 // Show/hide the settings popup's secondary content (everything but the pinned
@@ -6482,12 +6536,13 @@ function layoutDesktopDrawer() {
 // Product/Tilt/Source/Alerts.
 function setMoreSettingsCollapsed(collapsed) {
   if (!el.moreSettingsBody) return;
+  if (!mqSmallScreen.matches) collapsed = false;
   el.moreSettingsBody.classList.toggle('collapsed', collapsed);
-  if (el.sheetTabs) el.sheetTabs.hidden = collapsed;
+  if (el.sheetTabs) el.sheetTabs.hidden = !mqSmallScreen.matches || collapsed;
   if (el.moreSettingsToggle) {
     // Mobile has no way to collapse it (there's nowhere else Product/Tilt/
     // Source/Alerts would live), so hide the toggle affordance there.
-    el.moreSettingsToggle.hidden = mqSmallScreen.matches;
+    el.moreSettingsToggle.hidden = true;
     el.moreSettingsToggle.setAttribute('aria-expanded', String(!collapsed));
     el.moreSettingsToggle.classList.toggle('is-collapsed', collapsed);
   }
@@ -6635,7 +6690,7 @@ const MODEL_PLAYBACK_CHUNK = isSmallScreenNow() ? 2 : 6; // forecast hours decod
 const MODEL_PLAYBACK_CHUNK_PAUSE = isSmallScreenNow() ? 260 : 120; // ms breather between batches (GC/paint)
 // Decode concurrency within a model batch — kept modest so the transient memory of
 // several in-flight GRIB decodes can't pile up the way 10 parallel lanes did.
-const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 4;
+const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 2;
 // Total bytes the resident fill codes of one model loop may occupy, across all
 // of a run's frames. BYTES_PER_CELL pads the 2-byte codes for JS object/GeoJSON
 // overhead so the budget errs safe.
@@ -6873,6 +6928,12 @@ async function buildPlaybackProvider(opts = {}) {
     const hours = forecastHours(run);
     const frameCount = hours.length;
     return {
+      // Native-resolution frames are streamed through a small sliding window.
+      // This keeps playback visually identical to the static model view without
+      // holding an entire 200-frame run in memory.
+      streaming: true,
+      maxCachedFrames: CONSTRAINED_DEVICE ? 2 : 3,
+      prefetchAhead: CONSTRAINED_DEVICE ? 1 : 2,
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
@@ -6887,17 +6948,14 @@ async function buildPlaybackProvider(opts = {}) {
       })),
       async load(f) {
         const grid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
-        // Down-pool per the run-length budget; the full-res `grid` here is
-        // transient and GC'd after this returns.
-        const pooled = poolGridForLoop(grid, frameCount);
-        const payload = prepareGridTexture(pooled, resolveGridProduct(grid.product), { packed: true });
-        payload.meta = { product: pooled.product, time: pooled.time, fhour: f.fhour };
+        const payload = prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
+        payload.meta = { product: grid.product, time: grid.time, fhour: f.fhour };
         // Barb/contour overlays only when the whole run can afford them: bounded
         // frame count AND a per-frame GeoJSON budget (grid geometry makes the
         // count identical for every frame of a run, so the whole loop uniformly
         // has overlays or uniformly doesn't — no mid-loop flicker).
-        if (pooled.overlays && frameCount <= MODEL_LOOP_OVERLAY_MAX_FRAMES) {
-          const overlays = prepareModelOverlayData(pooled);
+        if (grid.overlays && frameCount <= MODEL_LOOP_OVERLAY_MAX_FRAMES) {
+          const overlays = prepareModelOverlayData(grid);
           if (overlays && countOverlayFeatures(overlays) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
             payload.overlays = overlays;
           }
@@ -6936,14 +6994,10 @@ async function buildPlaybackProvider(opts = {}) {
 }
 
 function scheduleFrameWarm() {
-  if (!state.playback || state.playback.active) return;
-  if (mqSmallScreen.matches) return;
-  if (state.mode === 'models' || state.mode === 'outlooks') return;
-  if (frameWarmTimer) clearTimeout(frameWarmTimer);
-  frameWarmTimer = setTimeout(() => {
-    frameWarmTimer = null;
-    if (state.playback && !state.playback.active) state.playback.warmAll();
-  }, FRAME_WARM_START_DELAY);
+  // Playback frames now load only after the user opens playback. The former
+  // desktop idle warmer was convenient, but it retained several decoded radar,
+  // satellite, or grid frames while the app appeared idle.
+  cancelFrameWarm();
 }
 
 function cancelFrameWarm() {
@@ -7012,6 +7066,15 @@ function createPlayback() {
         return;
       }
       this.provider = provider;
+      if (state.mode === 'models') {
+        // The GPU already owns the currently displayed texture. Drop the full
+        // static decode before forecast frames begin arriving so it cannot
+        // overlap the streaming window and its transient GRIB decodes.
+        state.models.grid = null;
+        state.models.displayGrid = null;
+        state.models.overlayData = null;
+        packedGridMemo = { payload: null, grid: null };
+      }
       this.active = true;
       el.playBtn.classList.add('active');
       if (el.loopBtn) el.loopBtn.classList.add('active');
@@ -7036,7 +7099,7 @@ function createPlayback() {
       el.playScrub.max = String(this.frames.length - 1);
       el.playScrub.value = '0';
       el.playLabel.textContent = `loading 0/${this.frames.length}…`;
-      el.dockTime.textContent = this.frames[0].label;
+      el.dockTime.textContent = scanFrameLabel(this.frames[0]);
       setStatus('loading playback…', true);
 
       this.loadInChunks();
@@ -7066,7 +7129,7 @@ function createPlayback() {
       el.playScrub.max = String(Math.max(0, this.frames.length - 1));
       el.playScrub.value = '0';
       el.playLabel.textContent = `loading 0/${this.frames.length}…`;
-      el.dockTime.textContent = this.frames[0].label;
+      el.dockTime.textContent = scanFrameLabel(this.frames[0]);
       setStatus('loading playback…', true);
       this.loadInChunks();
     },
@@ -7203,8 +7266,12 @@ function createPlayback() {
     evictForLimit() {
       const limit = this.provider && this.provider.maxCachedFrames;
       if (!limit || this.loadedCount <= limit) return;
+      const n = this.frames.length || 1;
       const candidates = this.frames
-        .map((f, i) => ({ f, i, d: this.circularDistance(i, this.idx) }))
+        // In a streaming loop, an index just behind the current frame has a
+        // large forward distance; evict those consumed frames before any of the
+        // prefetched frames immediately ahead.
+        .map((f, i) => ({ f, i, d: (i - this.idx + n) % n }))
         .filter((x) => x.f.loaded && x.i !== this.idx)
         .sort((a, b) => b.d - a.d);
       for (const { f, i } of candidates) {
@@ -7277,7 +7344,7 @@ function createPlayback() {
       if (this.provider && this.provider.streaming && (!this.frames[i] || !this.frames[i].loaded)) {
         this.idx = i;
         el.playScrub.value = String(i);
-        el.playLabel.textContent = `${i + 1}/${this.frames.length} · ${this.frames[i].label} · loading`;
+        el.playLabel.textContent = `${i + 1}/${this.frames.length} · ${scanFrameLabel(this.frames[i])} · loading`;
         this.loadOne(i, this.loadSeq);
         this.prefetchAhead();
         return;
@@ -7303,8 +7370,8 @@ function createPlayback() {
       if (state.mode === 'models') setDisplayedFhour(f.fhour);
       const suffix = this.loadedCount < this.frames.length
         ? ` · ${this.loadedCount}/${this.frames.length} loaded` : '';
-      el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${f.label}${suffix}`;
-      el.dockTime.textContent = f.label;
+      el.playLabel.textContent = `${this.idx + 1}/${this.frames.length} · ${scanFrameLabel(f)}${suffix}`;
+      el.dockTime.textContent = scanFrameLabel(f);
       tickClock();
       this.prefetchAhead();
       this.evictForLimit();
@@ -7327,8 +7394,10 @@ function createPlayback() {
       // Dropping `.playing` re-shows the product chip + dock play button that the
       // scrubber stood in for; the dock itself stayed visible throughout.
       document.querySelector('.app').classList.remove('playing');
-      // Release the frame cache on phones so playback memory is freed at once.
-      if (mqSmallScreen.matches) { this.cache.clear(); this.cacheCtx = null; }
+      // Playback is an on-demand working set; release it on every device as soon
+      // as the loop closes so the idle app returns to its baseline footprint.
+      this.cache.clear();
+      this.cacheCtx = null;
       // Restore the live view for the active source.
       if (provider && provider.idle) provider.idle();
       else displaySweep(currentSweep(), state.volume && state.volume.site);
@@ -7479,16 +7548,17 @@ function fmtClock(d, withSeconds) {
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-// Compact calendar date ("Jun 27") to pair with fmtClock. Defaults to the same
+const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Compact weekday + calendar date ("Sat Jun 27") to pair with fmtClock. Defaults to the same
 // zone the clock is showing (UTC or the viewer's local time); pass local=false to
 // force a UTC date for the always-UTC frame labels (radar/satellite/MRMS exports).
 function fmtDate(d, local = state.tzLocal) {
+  const weekday = WEEKDAY_ABBR[local ? d.getDay() : d.getUTCDay()];
   return local
-    ? `${MONTH_ABBR[d.getMonth()]} ${d.getDate()}`
-    : `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    ? `${weekday} ${MONTH_ABBR[d.getMonth()]} ${d.getDate()}`
+    : `${weekday} ${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
-const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // Weekday + date + short time for the mobile top bar's product read-out, e.g.
 // "Fri Jul 10 12:05pm" (local) or "Fri Jul 10 17:05z" (UTC) — matching whichever
 // zone the clock is set to. This is the phone's "what time am I looking at".
@@ -7508,6 +7578,16 @@ function fmtProductStamp(d) {
     time = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}z`;
   }
   return `${wd} ${mo} ${day} ${time}`;
+}
+
+// Uniform label for every scan/frame list and playback readout. Catalog labels
+// are usually time-only; once a real timestamp is available, include its date
+// and weekday so crossing midnight is always unambiguous.
+function scanFrameLabel(frame) {
+  if (!frame) return '—';
+  if (!frame.time) return frame.label || '—';
+  const stamp = fmtProductStamp(frame.time);
+  return /^F\d+/i.test(frame.label || '') ? `${frame.label} · ${stamp}` : stamp;
 }
 
 // The valid/scan time (Date) of the frame currently shown for the active mode,
@@ -9650,6 +9730,8 @@ function init() {
   buildProductButtons();
   buildLegend();
   buildTiltList();
+  enableHorizontalRailScroll(el.tiltList);
+  enableHorizontalRailScroll(el.fhourList);
 
   state.playback = createPlayback();
   state.map.on('move', updateInspect);

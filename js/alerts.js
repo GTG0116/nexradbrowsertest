@@ -1184,10 +1184,19 @@ export class AlertsController {
   // one — otherwise the split/quad panes keep their stale canvas size and
   // render dead space where the container grew.
   _resizeMaps() {
-    setTimeout(() => {
+    const resize = () => {
       this.map.resize();
-      for (const m of this.mirrors) if (m && m.resize) m.resize();
-    }, 60);
+      this.map.triggerRepaint?.();
+      for (const m of this.mirrors) {
+        if (!m || !m.resize) continue;
+        m.resize();
+        m.triggerRepaint?.();
+      }
+    };
+    // The briefing changes flex/fixed geometry. Two frames ensure MapLibre sees
+    // the final right-hand map width rather than the transient zero-width box.
+    requestAnimationFrame(() => requestAnimationFrame(resize));
+    setTimeout(resize, 180);
   }
 
   // Step the briefing to another alert at the same location (delta = ±1, wraps).
@@ -1207,12 +1216,21 @@ export class AlertsController {
     const sel = this.alerts.find((a) => a.id === id);
     if (!sel) return;
     const [minLat, minLon, maxLat, maxLon] = sel.bounds;
+    const mobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 759.98px)').matches;
     this.map.fitBounds(
       [
         [minLon, minLat],
         [maxLon, maxLat],
       ],
-      { padding: 80, maxZoom: 11 }
+      {
+        // On phones the briefing occupies the lower 64% of the viewport. Bias
+        // the fit into the visible map above it so the selected polygon is not
+        // technically rendered but hidden behind the briefing text.
+        padding: mobile
+          ? { top: 44, right: 34, bottom: Math.round(window.innerHeight * 0.66), left: 34 }
+          : 80,
+        maxZoom: 11,
+      }
     );
   }
 

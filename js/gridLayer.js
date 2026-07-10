@@ -260,7 +260,11 @@ export function createGridLayer(id = 'mrms') {
       this.quad = gl.createBuffer();
       this.dataTex = gl.createTexture();
       this.lutTex = gl.createTexture();
-      if (this.pending) this._upload(this.pending);
+      if (this.pending) {
+        const pending = this.pending;
+        this.pending = null;
+        this._upload(pending);
+      }
     },
 
     setGrid(grid, product) {
@@ -270,8 +274,15 @@ export function createGridLayer(id = 'mrms') {
     // Display an already-prepared payload (from prepareGridTexture). Playback
     // uses this to swap cached frames without rebuilding the texture each time.
     showPrepared(payload) {
-      this.pending = payload;
-      if (this.gl) this._upload(this.pending);
+      // WebGL copies texels synchronously. Retain a CPU payload only while the
+      // layer is waiting for onAdd; once GL exists, keeping it here duplicates
+      // every large MRMS/model texture in resident memory.
+      if (this.gl) {
+        this._upload(payload);
+        this.pending = null;
+      } else {
+        this.pending = payload;
+      }
       this.has = true;
       if (this.map) this.map.triggerRepaint();
     },

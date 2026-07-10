@@ -20,7 +20,10 @@ import { loadScene, ensureBands } from './goes.js';
 // keeping memory bounded (each cached GOES scene pins its downloaded file bytes).
 const scenes = new Map();
 const order = [];
-const MAX_SCENES = 6;
+// Full-disk source files are very large. Two scenes preserve fast product/band
+// switches while preventing an idle satellite session from pinning six files
+// and their parser state in the worker heap.
+const MAX_SCENES = 2;
 
 function remember(key, scene) {
   scenes.set(key, scene);
@@ -59,6 +62,11 @@ self.onmessage = async (e) => {
       scenes.delete(msg.key);
       const i = order.indexOf(msg.key);
       if (i >= 0) order.splice(i, 1);
+      return;
+    }
+    if (type === 'clear') {
+      scenes.clear();
+      order.length = 0;
       return;
     }
     if (type === 'load') {

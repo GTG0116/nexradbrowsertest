@@ -70,3 +70,9 @@ export function ensureBandsAsync(scene, satKey, sectorKey, bands) {
 export function evictScene(key) {
   if (worker) worker.postMessage({ type: 'evict', key });
 }
+
+// Release every decoded source file when Satellite is no longer active. The
+// worker is kept alive for fast reuse, but its large scene/parser cache is not.
+export function clearSceneCache() {
+  if (worker) worker.postMessage({ type: 'clear' });
+}

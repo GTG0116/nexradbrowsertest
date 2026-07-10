@@ -326,7 +326,11 @@ button {
 
 .app {
   color: var(--ink);
+  --sidebar-w: 284px;
 }
+
+.sidebar-resize,
+.sidebar-collapse { display: none; }
 
 .layout {
   min-height: 0;
@@ -342,7 +346,7 @@ button {
 }
 
 .sidebar {
-  width: 284px;
+  width: var(--sidebar-w);
   gap: 0;
   padding: 8px 16px 14px;
   color: var(--ink);
@@ -622,6 +626,9 @@ input[type='range']::-moz-range-thumb {
   gap: 4px;
   max-height: none;
   overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
   scrollbar-width: none;
 }
 
@@ -1048,9 +1055,15 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 /* -------------------------- Drawers and overlays ------------------------- */
 
 .mobile-sheet,
-.alert-detail,
 .sounding {
   background: var(--bg);
+}
+
+/* The briefing is only an interaction shell for the opaque panel at its left.
+   Keeping the full-viewport shell transparent lets the resized/repainted map
+   remain visible to the right instead of covering it with the app background. */
+.alert-detail {
+  background: transparent;
 }
 
 .mobile-sheet {
@@ -1511,6 +1524,156 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   display: none;
 }
 
+/* Desktop settings are a true left sidebar drawer. The map is neither dimmed
+   nor blocked, and every settings section is available in one vertical scroll. */
+@media (min-width: 760px) {
+  .app:not(.mobile) .mobile-sheet {
+    position: fixed;
+    top: 52px;
+    right: auto;
+    bottom: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0 12px 14px;
+    border: 0;
+    border-right: 1px solid var(--panel-edge);
+    border-radius: 0;
+    box-shadow: 14px 0 34px rgba(0, 0, 0, 0.18);
+  }
+  .app:not(.mobile) .sheet-header {
+    min-height: 50px;
+    justify-content: flex-start;
+    padding: 0 40px 0 2px;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  .app:not(.mobile) .sheet-title {
+    display: block;
+    font: 700 13px/1 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  .app:not(.mobile) .sheet-grip {
+    position: absolute;
+    top: 9px;
+    right: 0;
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    display: grid;
+    place-items: center;
+    color: var(--ink-dim);
+    background: var(--panel-2);
+    border: 1px solid var(--panel-edge);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .app:not(.mobile) .sheet-grip::before {
+    content: '×';
+    font: 500 20px/1 system-ui, sans-serif;
+  }
+  .app:not(.mobile) .sheet-tabs,
+  .app:not(.mobile) .more-settings-toggle {
+    display: none !important;
+  }
+  .app:not(.mobile) .sheet-pager {
+    display: block;
+    overflow: visible;
+  }
+  .app:not(.mobile) .sheet-page {
+    display: none;
+  }
+  .app:not(.mobile) #pageControls {
+    display: flex;
+    flex-basis: 100%;
+    overflow: visible;
+  }
+  .app:not(.mobile) .quick-settings {
+    gap: 13px;
+    padding-bottom: 10px;
+  }
+  .app:not(.mobile).sheet-open .mobile-dock {
+    opacity: 1;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  /* The drawer itself is the one scroll surface, so its quick controls and
+     every formerly-secondary section move together. */
+  .app:not(.mobile) .mobile-sheet {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .app:not(.mobile) .sheet-body,
+  .app:not(.mobile) .more-settings:not(.collapsed) {
+    display: block;
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .app:not(.mobile) .sheet-page {
+    min-height: 0;
+    overflow: visible;
+  }
+}
+
+@media (min-width: 760px) and (max-width: 1180px) {
+  .app:not(.mobile) .mobile-sheet { width: var(--sidebar-w); }
+}
+
+/* The product legend is part of the bottom control system: a thin, readable
+   full-width strip across the map, immediately above the timeline/dock. */
+.map-hud .legend:not(.weather-card) {
+  top: auto;
+  right: 0;
+  bottom: 64px;
+  left: 0;
+  width: auto;
+  max-width: none;
+  padding: 5px 14px 6px;
+  border-radius: 0;
+  transform: none;
+}
+.map-hud .legend:not(.weather-card) .legend-title {
+  margin-bottom: 3px;
+  font-size: 9px;
+}
+.map-hud .legend:not(.weather-card) .legend-bar {
+  height: 8px;
+  border-radius: 3px;
+}
+.map-hud .legend:not(.weather-card) .legend-ticks {
+  margin-top: 2px;
+  font-size: 8px;
+}
+
+/* Compact alert cards must not turn their full-width positioning container
+   into a blurred band across the map. */
+.alert-preview {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+@media (max-width: 759.98px) {
+  .map-hud .legend:not(.weather-card) {
+    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Leave the alert polygon/map visible above the briefing on phones instead
+     of covering the entire viewport with the text panel. */
+  .alert-detail-panel {
+    top: auto;
+    bottom: 0;
+    height: 64%;
+    border-right: 0;
+    border-top: 1px solid var(--panel-edge);
+    border-radius: 16px 16px 0 0;
+  }
+  .alert-detail[hidden] .alert-detail-panel {
+    transform: translateY(100%);
+  }
+}
+
 /* ------------------------------ Mobile scope ----------------------------- */
 
 @media (max-width: 759.98px) {
@@ -1777,13 +1940,120 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
 @media (min-width: 760px) and (max-width: 1120px) {
   .sidebar {
-    width: 264px;
+    width: var(--sidebar-w);
+  }
+
+  .app:not(.mobile) .mobile-sheet {
+    width: var(--sidebar-w);
   }
 
   .app:not(.mobile) .mobile-dock {
-    left: 264px;
+    left: var(--sidebar-w);
   }
 }
+
+/* Desktop sidebar resize/collapse controls. The current 284px presentation is
+   the minimum; JS supplies the maximum from the right edge of the site picker. */
+@media (min-width: 760px) {
+  .app:not(.mobile) .mobile-dock {
+    left: var(--sidebar-w);
+  }
+  .app:not(.mobile) .alert-preview {
+    left: var(--sidebar-w);
+  }
+  .sidebar-resize {
+    position: fixed;
+    z-index: 1100;
+    top: 52px;
+    bottom: 64px;
+    left: calc(var(--sidebar-w) - 4px);
+    width: 8px;
+    cursor: col-resize;
+    touch-action: none;
+    display: block;
+  }
+  .sidebar-resize::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 2px;
+    width: 3px;
+    height: 46px;
+    border-radius: 999px;
+    background: var(--panel-edge);
+    opacity: 0;
+    transition: opacity 0.14s, background 0.14s;
+  }
+  .sidebar-resize:hover::after,
+  .app.sidebar-resizing .sidebar-resize::after {
+    opacity: 1;
+    background: var(--accent);
+  }
+  .sidebar-collapse {
+    position: fixed;
+    z-index: 1101;
+    top: 62px;
+    left: 8px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    color: var(--ink-dim);
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 8px;
+    box-shadow: var(--glow);
+    cursor: pointer;
+    display: grid;
+  }
+  .sidebar-collapse:hover {
+    color: var(--accent-ink);
+    border-color: var(--accent-border);
+  }
+  .sidebar-collapse .lucide { width: 16px; height: 16px; }
+  .app.sidebar-hidden .sidebar {
+    width: 0 !important;
+    min-width: 0;
+    padding-right: 0;
+    padding-left: 0;
+    overflow: hidden;
+    border-right: 0;
+    pointer-events: none;
+  }
+  .app.sidebar-hidden .mobile-dock { left: 0; }
+  .app.sidebar-hidden .sidebar-resize { left: 0; }
+  .app.sidebar-hidden .sidebar-collapse { left: 8px; }
+  .app.sidebar-hidden .sidebar-collapse .lucide { transform: rotate(180deg); }
+  /* The open/close control occupies the sidebar's top-left corner. Give the
+     first control group its own row so the button never covers Source. */
+  .app:not(.sidebar-hidden) .sidebar > #sourcePanel {
+    padding-top: 42px;
+  }
+  /* Once the sidebar is gone the map HUD moves into that same corner. Reserve
+     a small gutter for the reopen control so Source/Product remains clickable. */
+  .app.sidebar-hidden .hud-left {
+    left: 52px;
+  }
+  /* Alert briefings reserve a real map viewport instead of relying on a flex
+     margin, which could leave the MapLibre canvas at zero width after a resize. */
+  .app.alert-mode .stage {
+    position: fixed;
+    top: 52px;
+    right: 0;
+    bottom: 0;
+    left: var(--alert-panel-w);
+    margin: 0;
+    min-width: 0;
+  }
+}
+
+/* Keep every scroll surface usable without exposing scrollbar chrome. */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 @media (max-width: 420px) {
   .map-tools {

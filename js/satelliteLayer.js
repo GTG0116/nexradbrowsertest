@@ -184,7 +184,11 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       ]) this.u[name] = gl.getUniformLocation(p, name);
       this.quad = gl.createBuffer();
       this.tex = gl.createTexture();
-      if (this.pending) this._upload(this.pending);
+      if (this.pending) {
+        const pending = this.pending;
+        this.pending = null;
+        this._upload(pending);
+      }
     },
 
     // scene: from goes.loadScene; rgba: Uint8Array(W*H*4) from buildRGBA;
@@ -199,7 +203,7 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
       const s = mercY(Math.max(-85, Math.min(85, bb[1])));
       const verts = new Float32Array([w, n, e, n, e, s, w, n, e, s, w, s]);
 
-      this.pending = {
+      const payload = {
         rgba, W: scene.width, H: scene.height, verts,
         uni: {
           W: scene.width, H: scene.height,
@@ -210,7 +214,14 @@ export function createSatelliteLayer(id = SATELLITE_LAYER_ID) {
           sweepY: scene.proj.sweep === 'y' ? 1 : 0,
         },
       };
-      if (this.gl) this._upload(this.pending);
+      // The driver owns a copy after texImage2D. Avoid pinning another full RGBA
+      // scene on the layer object; state.sat.scene remains the source of truth.
+      if (this.gl) {
+        this._upload(payload);
+        this.pending = null;
+      } else {
+        this.pending = payload;
+      }
       this.has = true;
       if (this.map) this.map.triggerRepaint();
     },
