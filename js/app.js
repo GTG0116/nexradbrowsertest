@@ -1131,10 +1131,19 @@ function cacheEls() {
   el.dockTime = $('#dockTime');
   el.playBtn = $('#playBtn');
   el.inspectBtn = $('#inspectBtn');
+  el.dockSettings = $('#dockSettings');
   el.dockToolSlot = $('#dockToolSlot');
   el.dockToolMore = $('#dockToolMore');
   el.dockToolBtn = $('#dockToolBtn');
   el.dockToolMenu = $('#dockToolMenu');
+  // Mobile floating top bar (site chip + LIVE + theme toggle).
+  el.mobileTopBar = $('#mobileTopBar');
+  el.mtbSite = $('#mtbSite');
+  el.mtbCode = $('#mtbCode');
+  el.mtbCity = $('#mtbCity');
+  el.mtbLive = $('#mtbLive');
+  el.mtbTheme = $('#mtbTheme');
+  el.mtbThemeIcon = $('#mtbThemeIcon');
   el.soundingHint = $('#soundingHint');
   el.breadcrumb = $('#breadcrumb');
   el.breadcrumbText = $('#breadcrumbText');
@@ -1429,6 +1438,7 @@ function applyUiTheme(theme = state.uiTheme) {
       'rgba(170,223,236,0.88)',
     ]);
   }
+  if (typeof updateMobileTopBar === 'function') updateMobileTopBar();
 }
 
 function exportTheme() {
@@ -5657,9 +5667,37 @@ function updateDock() {
       refreshIcons();
     }
   }
+  updateMobileTopBar(info);
   tickClock();
   if (state.playback && state.playback.active) return; // dock time owned by playback
   el.dockTime.textContent = info.name ? `${info.name} · ${info.time}` : info.time;
+}
+
+// Reflect the current source/site, live state and theme onto the mobile floating
+// top bar (the site chip + LIVE indicator + theme toggle that replace the desktop
+// command bar on phones). Reuses the same info the dock chip is built from.
+function updateMobileTopBar(info = null) {
+  if (!el.mtbCode) return;
+  info = info || dockInfo();
+  el.mtbCode.textContent = info.source;
+  // In radar mode the site select carries a "CODE — City, ST" label; show the
+  // city as the secondary line. Other sources have no per-site city, so fall
+  // back to the product name (what that source is currently showing).
+  let city = info.name || '';
+  if (state.mode === 'radar' && el.siteSelect && el.siteSelect.selectedOptions[0]) {
+    const parts = el.siteSelect.selectedOptions[0].textContent.split('—');
+    if (parts[1]) city = parts[1].trim();
+  }
+  el.mtbCity.textContent = city || '—';
+  if (el.mtbLive) el.mtbLive.classList.toggle('is-live', !!state.live);
+  if (el.mtbThemeIcon) {
+    const want = state.uiTheme === 'dark' ? 'sun' : 'moon';
+    if (el.mtbThemeIcon.dataset.icon !== want) {
+      el.mtbThemeIcon.dataset.icon = want;
+      el.mtbThemeIcon.innerHTML = `<i data-lucide="${want}" class="lucide sm"></i>`;
+      refreshIcons();
+    }
+  }
 }
 
 const SHEET_EASE = 'cubic-bezier(.22,1,.36,1)';
@@ -6357,6 +6395,10 @@ function applyResponsiveLayout() {
   // only replaces the product + play slot (see `.app.playing` CSS).
   el.mobileDock.hidden = false;
   el.sidebar.hidden = mobile;
+  if (el.mobileTopBar) {
+    el.mobileTopBar.hidden = !mobile;
+    if (mobile) updateMobileTopBar();
+  }
   if (!mobile && state._closeDockMenu) state._closeDockMenu();
   refreshSiteDots(); // dot sizes differ between desktop and touch layouts
   if (mobile) {
@@ -7203,6 +7245,7 @@ function startLive() {
   state.live = true;
   el.liveBtn.classList.add('active');
   el.liveBtn.textContent = '● LIVE';
+  updateMobileTopBar();
   syncDateToUtcToday();
   // Explicitly going live means "show me the newest data now" — jump to the
   // latest run/frame even if an older one was selected. (The 60 s auto-refresh
@@ -7217,6 +7260,7 @@ function stopLive() {
   state.live = false;
   el.liveBtn.classList.remove('active');
   el.liveBtn.textContent = '○ LIVE';
+  updateMobileTopBar();
   if (state.liveTimer) {
     clearInterval(state.liveTimer);
     state.liveTimer = null;
@@ -8136,6 +8180,7 @@ function toolIconMarkup(icon) {
 // The tools offered in the mobile dock slot. Kept as a function (rather than the
 // constant list) so source-specific filtering can be reintroduced if needed.
 const MOBILE_TOOL_DEFS = [
+  { id: 'inspect', icon: 'crosshair', label: 'Inspect a pixel', btn: () => el.inspectBtn },
   { id: 'storm', icon: CONE_ICON, label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
@@ -8150,7 +8195,7 @@ function dockToolsForMode() {
 
 function setupDockTools() {
   if (!el.dockToolBtn) return;
-  state.dockTool = state.dockTool || 'storm';
+  state.dockTool = state.dockTool || 'inspect';
   if (el.dockToolMore) {
     el.dockToolMore.innerHTML = '<i data-lucide="wrench" class="lucide sm"></i>';
     el.dockToolMore.title = 'Choose tool';
@@ -9699,6 +9744,31 @@ function init() {
     if (!mqSmallScreen.matches) return;
     el.sheet.hidden ? openSheet() : closeSheet();
   });
+  // Dock settings button (mobile) opens the same sheet as the status chip.
+  if (el.dockSettings) {
+    el.dockSettings.addEventListener('click', () =>
+      el.sheet.hidden ? openSheet() : closeSheet()
+    );
+  }
+  // Mobile top bar: the site chip opens the sheet on the Source page (change
+  // radar site / source); the theme button flips light/dark like the desktop
+  // command bar's toggle.
+  if (el.mtbSite) {
+    el.mtbSite.addEventListener('click', () => {
+      if (el.sheet.hidden) {
+        openSheet();
+        requestAnimationFrame(() => setSheetPage(1, false));
+      } else {
+        closeSheet();
+      }
+    });
+  }
+  if (el.mtbTheme) {
+    el.mtbTheme.addEventListener('click', () => {
+      applyUiTheme(state.uiTheme === 'dark' ? 'light' : 'dark');
+      saveSettings();
+    });
+  }
   el.sheetScrim.addEventListener('click', closeSheet);
   el.sheetGrip.addEventListener('click', closeSheet);
   enableSheetSwipe();
