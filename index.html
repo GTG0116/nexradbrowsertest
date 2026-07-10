@@ -342,8 +342,32 @@
               <div id="legend" class="legend"></div>
             </div>
 
-            <!-- Map tools: draw / measure / storm track / METARs -->
+            <!-- Mobile-only floating top bar (matches the RadarNexus mobile
+                 design): a site chip that opens the settings sheet, a LIVE
+                 indicator, and a theme toggle. Hidden on desktop, where the top
+                 command bar carries the same affordances. -->
+            <div id="mobileTopBar" class="mobile-topbar" hidden>
+              <button id="mtbSite" class="mtb-site" type="button" title="Radar site &amp; settings">
+                <i data-lucide="map-pin" class="lucide sm" aria-hidden="true"></i>
+                <span class="mtb-site-text">
+                  <b id="mtbCode">—</b>
+                  <span id="mtbCity">—</span>
+                </span>
+                <span id="mtbLive" class="mtb-live"><span class="mtb-live-dot"></span>LIVE</span>
+              </button>
+              <button id="mtbTheme" class="mtb-theme" type="button" title="Switch appearance">
+                <span id="mtbThemeIcon"><i data-lucide="sun" class="lucide sm" aria-hidden="true"></i></span>
+              </button>
+            </div>
+
+            <!-- Map tools: draw / measure / storm track / METARs. On mobile the
+                 rail collapses to a single swappable tool slot (#dockToolSlot);
+                 the full list below is desktop-only (see CSS). -->
             <div id="mapTools" class="map-tools">
+              <div id="dockToolSlot" class="dock-tool-slot">
+                <button id="dockToolBtn" class="dock-tool" title="Storm track">➤</button>
+                <button id="dockToolMore" class="dock-tool-more" title="Choose tool">▾</button>
+              </div>
               <button id="toolDraw" class="map-tool" title="Draw (freehand)"><i data-lucide="pencil" class="lucide sm"></i></button>
               <button id="toolMeasure" class="map-tool" title="Measure distance &amp; area"><i data-lucide="ruler" class="lucide sm"></i></button>
               <!-- Custom tracking-cone glyph (Lucide has none): a dot with a
@@ -355,6 +379,9 @@
               <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="navigation" class="lucide sm"></i></button>
               <button id="toolExport" class="map-tool" title="Export / share image"><i data-lucide="download" class="lucide sm"></i></button>
             </div>
+            <!-- Chooser for the rail's single tool slot (mobile). Sits beside the
+                 rail; built + toggled by setupDockTools(). -->
+            <div id="dockToolMenu" class="dock-tool-menu" hidden></div>
             <div id="drawToolPopup" class="tool-popover" hidden>
               <div class="tool-popover-head">
                 <span id="drawToolPopupTitle">Draw</span>
@@ -592,16 +619,12 @@
           <span class="dock-caret">▴</span>
         </button>
         <button id="playBtn" class="dock-tool" title="Playback (last 10 scans)">▶</button>
+        <!-- Inspect stays in the DOM (its toggle + active-state wiring lives here
+             and the rail's tool chooser delegates to it) but is hidden on mobile;
+             the map tools now live in the right-side rail's single-tool slot. -->
         <button id="inspectBtn" class="dock-tool" title="Inspect a pixel">✛</button>
-        <!-- Swappable tool slot: tap ▴ to choose which map tool (storm track,
-             measure, draw, METARs…) lives in the slot, then tap the slot to use
-             it. Keeps all the side tools one thumb-reach away on mobile. -->
-        <div id="dockToolSlot" class="dock-tool-slot">
-          <button id="dockToolMore" class="dock-tool-more" title="Choose tool">▴</button>
-          <button id="dockToolBtn" class="dock-tool" title="Storm track">➤</button>
-        </div>
+        <button id="dockSettings" class="dock-tool" title="Display settings"><i data-lucide="sliders-horizontal" class="lucide sm"></i></button>
       </div>
-      <div id="dockToolMenu" class="dock-tool-menu" hidden></div>
 
       <div id="sheetScrim" class="sheet-scrim" hidden></div>
       <div id="mobileSheet" class="mobile-sheet" hidden>
