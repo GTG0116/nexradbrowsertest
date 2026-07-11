@@ -2412,3 +2412,120 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     display: flex;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Mobile overlap/safe-area corrections
+   -------------------------------------------------------------------------- */
+@media (max-width: 759.98px) {
+  /* Use the full visual viewport on iOS: the app already runs under a
+     translucent status bar, so do not reserve extra notch/home-indicator space
+     that turns into unusable bands around the map. */
+  .mobile-topbar {
+    top: 10px;
+  }
+
+  .map-tools {
+    top: 62px;
+  }
+
+  .dock-tool-menu {
+    top: 72px;
+  }
+
+  .mobile-dock,
+  .app:not(.mobile) .mobile-dock {
+    padding-bottom: 10px;
+  }
+
+  .mobile-sheet {
+    padding-bottom: 12px;
+  }
+
+  /* Draw and measure need the gesture area more than the playback/product dock.
+     Hide the dock while either tool is armed so the drawing controls cannot
+     overlap the bottom UI and the lower map remains reachable. */
+  body.draw-measure-active .mobile-dock,
+  body.draw-measure-active .playback-bar,
+  body.draw-measure-active .legend {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  body.draw-measure-active .tool-popover {
+    bottom: 14px;
+  }
+}
+
+@media (max-width: 819.98px) {
+  /* Mobile soundings should scroll instead of squeezing all charts and severe
+     parameter cards into one fixed grid, which caused the UI to overlap itself
+     on phone-sized screens. */
+  .snd-head {
+    padding-top: 8px;
+  }
+
+  .snd-body {
+    display: block;
+    overflow-y: auto;
+    padding-bottom: 10px;
+  }
+
+  .snd-charts {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .snd-skewt canvas {
+    height: clamp(360px, 68vh, 620px);
+  }
+
+  .snd-hodo canvas {
+    height: auto;
+    aspect-ratio: 1 / 1;
+    max-height: none;
+  }
+
+  .snd-motion {
+    position: static;
+    min-width: 0;
+    margin-top: 8px;
+  }
+
+  .snd-params {
+    margin-top: 8px;
+    grid-template-columns: 1fr;
+  }
+
+  .snd-pgroup {
+    display: block;
+  }
+
+  .snd-pgrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .snd-prow {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .snd-plabel,
+  .snd-pval {
+    display: inline;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+}
+
+@media (max-width: 380px) {
+  .snd-pgrid {
+    grid-template-columns: 1fr;
+  }
+}
