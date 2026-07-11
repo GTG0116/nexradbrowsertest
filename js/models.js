@@ -1509,6 +1509,47 @@ async function mapConcurrent(items, limit, fn) {
 // per-host connection cap would just queue them anyway.
 const ENS_CONCURRENCY = 12;
 
+// ECMWF ensemble files (enfo/ef) pack every perturbed member into a single
+// grib2, and the members of a given field are stored (near-)contiguously. The
+// `.index` lists one byte range per member, so a naive fetch fires ~50 tiny
+// Range requests per field — each paying full RTT/TLS latency and throttled to
+// the browser's ~6 connections/host. Merging ranges that sit within
+// COALESCE_GAP bytes of each other into one request (then slicing each member
+// message back out of the combined buffer) collapses those ~50 requests into a
+// handful, which is the dominant cost of loading these means fully.
+const COALESCE_GAP = 1 << 20; // 1 MiB — bridge the small gaps between members
+
+// Fetch + decode many byte ranges from one URL with as few HTTP requests as
+// possible. Ranges are grouped by proximity, each group is fetched in a single
+// Range request, and every member message is decoded from the shared buffer.
+// Results are returned in the input order (so the mean is deterministic).
+async function fetchDecodeEcmwfRanges(url, ranges, onProgress) {
+  // Group by byte proximity while remembering each range's original index.
+  const sorted = ranges.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start);
+  const groups = [];
+  for (const item of sorted) {
+    const g = groups[groups.length - 1];
+    if (g && item.r.start - g.end - 1 <= COALESCE_GAP) {
+      g.end = Math.max(g.end, item.r.end);
+      g.items.push(item);
+    } else {
+      groups.push({ start: item.r.start, end: item.r.end, items: [item] });
+    }
+  }
+  const out = new Array(ranges.length);
+  let done = 0;
+  await mapConcurrent(groups, ENS_CONCURRENCY, async (group) => {
+    const buf = await fetchRange(url, { start: group.start, end: group.end },
+      groups.length === 1 && ranges.length === 1 ? onProgress : null);
+    for (const { r, i } of group.items) {
+      const slice = buf.subarray(r.start - group.start, r.end - group.start + 1);
+      out[i] = normalizeScan(await decodeGrib2(slice, r.sub));
+      if (onProgress && ranges.length > 1) onProgress(++done / ranges.length);
+    }
+  });
+  return out;
+}
+
 // Cell-by-cell mean of grids sharing one geometry (ensemble members). A cell is
 // the mean of the members that have data there; all-missing stays NaN.
 function meanOfGrids(grids) {
@@ -1765,14 +1806,7 @@ async function fetchDecodeSource(model, run, fhour, src, idxCache, onProgress) {
     if (!q) throw new Error(`field ${src.varName}/${src.level} not available from ${model.label}`);
     const entries = await ecmwfEntriesFor(model, grib, idx, idxCache);
     const ranges = rangesFromEcmwfIndex(entries, q);
-    let done = 0;
-    const grids = await mapConcurrent(ranges, ENS_CONCURRENCY, async (range) => {
-      const bytes = await fetchRange(modelUrl(model, grib), range,
-        ranges.length === 1 ? onProgress : null);
-      const g = normalizeScan(await decodeGrib2(bytes, range.sub));
-      if (onProgress && ranges.length > 1) onProgress(++done / ranges.length);
-      return g;
-    });
+    const grids = await fetchDecodeEcmwfRanges(modelUrl(model, grib), ranges, onProgress);
     return scaleGridValues(meanOfGrids(grids), q.scale);
   }
 

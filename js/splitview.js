@@ -93,7 +93,6 @@ export class SplitView {
     this.drawings = { type: 'FeatureCollection', features: [] };
     this._gridCache = new Map();
     this._paneLegends = [null, null, null, null];
-    this._weatherPickers = [null, null, null, null];
     this._badges = [null, null, null, null];
     this._paneSelectHandlers = [];
     this._syncHandlers = [];
@@ -657,29 +656,14 @@ export class SplitView {
       host.appendChild(d);
       return d;
     };
-    const makePicker = (host) => {
-      if (!host) return null;
-      const d = document.createElement('div');
-      d.className = 'weather-center-picker split-weather-picker';
-      d.hidden = true;
-      d.innerHTML = `
-        <div class="wxp-line wxp-v"></div>
-        <div class="wxp-line wxp-h"></div>
-        <div class="wxp-ring"></div>
-        <div class="wxp-label">Weather center</div>`;
-      host.appendChild(d);
-      return d;
-    };
     this._paneLegends = this._paneNums().map((n) => makeLegend(paneContainer(n)));
-    this._weatherPickers = this._paneNums().map((n) => makePicker(paneContainer(n)));
   }
 
   _removePaneChrome() {
-    for (const node of [...this._paneLegends, ...this._weatherPickers]) {
+    for (const node of this._paneLegends) {
       if (node) node.remove();
     }
     this._paneLegends = [null, null, null, null];
-    this._weatherPickers = [null, null, null, null];
   }
 
   setPaneLegends(...htmls) {
@@ -688,12 +672,6 @@ export class SplitView {
       if (!node) return;
       node.innerHTML = vals[i] || '';
       node.hidden = !vals[i];
-    });
-  }
-
-  setWeatherPickers(on) {
-    this._weatherPickers.forEach((node) => {
-      if (node) node.hidden = !on;
     });
   }
 
