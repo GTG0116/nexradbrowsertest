@@ -10,6 +10,7 @@ import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep, stormRelativeSweep } from './dealias.js';
 import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
 import { CyclonesController } from './cyclones.js';
+import { LsrController, LSR_HOURS_CHOICES, LSR_DEFAULT_HOURS, defaultLsrCats } from './lsr.js';
 import { applyMapStyle, liftBoundaryLayers, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
@@ -405,6 +406,8 @@ function setupOverlays(map) {
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
   if (!map.getSource('cyclones'))
     map.addSource('cyclones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getSource('lsr'))
+    map.addSource('lsr', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
 
   // Register the CIG hatch tiles. Style loads wipe added images, so (re)add them
   // each time before the layer that references them by name.
@@ -584,6 +587,25 @@ function setupOverlays(map) {
     },
     anchor
   );
+  // Local storm reports — point markers coloured by report category (feature
+  // `color`), at the label anchor so they read over the radar. The controller
+  // re-applies the category filter (setFilter) and visibility in reapply().
+  map.addLayer(
+    {
+      id: 'lsr-points',
+      type: 'circle',
+      source: 'lsr',
+      layout: { visibility: (state.lsr ? state.lsr.enabled : state._lsr.on) ? 'visible' : 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 7, 5.5, 10, 7],
+        'circle-color': ['get', 'color'],
+        'circle-stroke-color': 'rgba(10,20,35,0.9)',
+        'circle-stroke-width': 1.2,
+        'circle-opacity': 0.92,
+      },
+    },
+    anchor
+  );
   map.addLayer(
     {
       id: 'rings',
@@ -673,6 +695,7 @@ function setupOverlays(map) {
   if (state.alerts) state.alerts.refreshVisible();
   if (state.spc) state.spc.reapply();
   if (state.cyclones) state.cyclones.reapply();
+  if (state.lsr) state.lsr.reapply();
   renderLayerStack();
 }
 
@@ -923,6 +946,11 @@ const state = {
   // init — the same pattern as `spc`/`_spc` below.
   cyclones: null,
   _cyclones: { on: false, path: true, current: true, cone: true },
+  // Local storm reports overlay (IEM LSR feed — all report types, flooding
+  // included). `_lsr` holds the restored prefs (master toggle, time window,
+  // per-category filters) applied when the controller is built at init.
+  lsr: null,
+  _lsr: { on: false, hours: LSR_DEFAULT_HOURS, cats: defaultLsrCats() },
   // ICAO codes of radars judged "down" (no scan in the past hour, or none found)
   // by the background scan kicked off on load; their map dots are drawn red.
   downSites: new Set(),
@@ -1118,6 +1146,14 @@ function cacheEls() {
   el.cycloneList = $('#cycloneList');
   el.cyclonePreview = $('#cyclonePreview');
   el.cyclonePreviewCard = $('#cyclonePreviewCard');
+  el.lsrPanel = $('#lsrPanel');
+  el.lsrToggle = $('#lsrToggle');
+  el.lsrHours = $('#lsrHours');
+  el.lsrFilters = $('#lsrFilters');
+  el.lsrStatus = $('#lsrStatus');
+  el.lsrList = $('#lsrList');
+  el.lsrPreview = $('#lsrPreview');
+  el.lsrPreviewCard = $('#lsrPreviewCard');
   el.mapStyleControls = $('#mapStyleControls');
   el.alertOpacity = $('#alertOpacity');
   el.alertOpacityVal = $('#alertOpacityVal');
@@ -6492,6 +6528,7 @@ const COLLAPSIBLE_PANELS = [
   ['outlookDetailPanel', false],
   ['alertsPanel', false],
   ['cyclonesPanel', true],
+  ['lsrPanel', true],
 ];
 
 function setupCollapsiblePanels() {
@@ -6566,7 +6603,7 @@ function layoutMobileSheet() {
   set.append(el.tiltPanel, el.fhourPanel);
   if (mode !== 'models') set.append(el.volumePanel);
   set.append(el.layoutPanel, el.layerPanel, el.displayPanel, el.satOptsPanel);
-  set.append(el.alertsPanel, el.cyclonesPanel, el.basemapPanel);
+  set.append(el.alertsPanel, el.cyclonesPanel, el.lsrPanel, el.basemapPanel);
   if (mode !== 'outlooks') set.append(el.spcPanel, el.outlookDetailPanel);
   set.append(el.metaPanel);
 
@@ -6606,7 +6643,7 @@ function layoutDesktopDrawer() {
   // secondary "More settings" fold.
   el.pageControls.append(
     el.volumePanel, el.layoutPanel, el.layerPanel, el.displayPanel,
-    el.satOptsPanel, el.cyclonesPanel, el.basemapPanel, el.spcPanel, el.metaPanel
+    el.satOptsPanel, el.cyclonesPanel, el.lsrPanel, el.basemapPanel, el.spcPanel, el.metaPanel
   );
   placeDesktopVolumePanel();
   // The sidebar already surfaces the primary controls directly — collapse the
@@ -9148,6 +9185,9 @@ function saveSettings() {
         cyclones: state.cyclones
           ? { on: state.cyclones.enabled, ...state.cyclones.show }
           : { ...state._cyclones },
+        lsr: state.lsr
+          ? { on: state.lsr.enabled, hours: state.lsr.hours, cats: { ...state.lsr.cats } }
+          : { ...state._lsr, cats: { ...state._lsr.cats } },
         spc: state.spc
           ? {
               on: state._outlookSourceForced && typeof state._outlookSourcePrevOn === 'boolean'
@@ -9288,6 +9328,14 @@ function applyStoredSettings(s) {
   if (s.cyclones && typeof s.cyclones === 'object') {
     for (const key of ['on', 'path', 'current', 'cone']) {
       if (typeof s.cyclones[key] === 'boolean') state._cyclones[key] = s.cyclones[key];
+    }
+  }
+  if (s.lsr && typeof s.lsr === 'object') {
+    if (typeof s.lsr.on === 'boolean') state._lsr.on = s.lsr.on;
+    if (LSR_HOURS_CHOICES.includes(s.lsr.hours)) state._lsr.hours = s.lsr.hours;
+    if (s.lsr.cats && typeof s.lsr.cats === 'object') {
+      for (const key of Object.keys(state._lsr.cats))
+        if (typeof s.lsr.cats[key] === 'boolean') state._lsr.cats[key] = s.lsr.cats[key];
     }
   }
   if (s.spc && typeof s.spc === 'object') {
@@ -9792,6 +9840,37 @@ function init() {
   wireCyclonePart(el.cyclonesPathToggle, 'path');
   wireCyclonePart(el.cyclonesCurrentToggle, 'current');
   wireCyclonePart(el.cyclonesConeToggle, 'cone');
+
+  // ---- NWS local storm reports overlay (IEM feed — all LSR types) ----
+  state.lsr = new LsrController(state.map, {
+    list: el.lsrList,
+    status: el.lsrStatus,
+    filters: el.lsrFilters,
+    hoursSelect: el.lsrHours,
+    preview: el.lsrPreview,
+    previewCard: el.lsrPreviewCard,
+    // Same guard as alerts/cyclones: while a click-consuming map tool is
+    // active, taps belong to the tool, not to opening a report card.
+    suppressClick: () => clickConsumingToolActive(),
+    // Time-window / category-chip changes are user prefs — persist them.
+    onPrefsChanged: () => saveSettings(),
+  });
+  // Apply the restored master toggle + time window + category filters before
+  // the first load.
+  state.lsr.hours = state._lsr.hours;
+  state.lsr.cats = { ...state._lsr.cats };
+  if (el.lsrHours) el.lsrHours.value = String(state._lsr.hours);
+  setToggleBtn(el.lsrToggle, state._lsr.on);
+  state.lsr.setEnabled(state._lsr.on);
+  if (el.lsrToggle) {
+    el.lsrToggle.addEventListener('click', () => {
+      const on = !el.lsrToggle.classList.contains('active');
+      setToggleBtn(el.lsrToggle, on);
+      state.lsr.setEnabled(on);
+      setStatus(on ? 'storm reports on' : 'storm reports off');
+      saveSettings();
+    });
+  }
 
   // ---- Basemap layer customisation (town labels, roads, rivers, borders) ----
   setupMapStyleControls();
