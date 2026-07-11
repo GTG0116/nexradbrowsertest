@@ -71,9 +71,39 @@ export class ExportTool {
       cleanCtx.drawImage(c, px, py, c.width, c.height);
     });
     const cleanUnit = clamp(mapW / 58, 16, 38);
-    drawExportInfo(cleanCtx, cap, mapW, cleanUnit, theme);
-    drawExportWatermark(cleanCtx, mapW, mapH, cleanUnit, legend ? Math.round(cleanUnit * 2.75) : 0);
-    if (legend) drawExportLegend(cleanCtx, legend, mapW, mapH, cleanUnit, theme);
+    const mobile = typeof window !== 'undefined' && typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 759.98px)').matches;
+
+    // A full alert briefing (or storm-track briefing) reproduces the on-screen
+    // side panel over the scope. On desktop the panel sits on the left, so the
+    // export chrome (info chip, legend, watermark) insets to the visible map
+    // beside it — mirroring how the live legend shifts in alert mode. On phones
+    // the briefing is a full-bleed panel, so no inset is applied (the chrome is
+    // covered, as the on-screen bottom sheet covers it).
+    const leftPanelW = (scene.briefing || scene.stormBriefing) && !mobile
+      ? briefingPanelWidth(mapW, cleanUnit, mobile)
+      : 0;
+    // With both an alert briefing and a storm briefing open, the alert briefing
+    // keeps the left and the storm list moves to the right so they don't stack.
+    const stormOnRight = !!(scene.briefing && scene.stormBriefing);
+
+    drawExportInfo(cleanCtx, cap, mapW, cleanUnit, theme, leftPanelW);
+    drawExportWatermark(cleanCtx, mapW, mapH, cleanUnit, legend ? Math.round(cleanUnit * 2.75) : 0, leftPanelW);
+    if (legend) drawExportLegend(cleanCtx, legend, mapW, mapH, cleanUnit, theme, leftPanelW);
+
+    // Alert overlays, stamped over the scope. A full briefing takes precedence
+    // over the compact preview card (only one is ever passed anyway).
+    if (scene.briefing) {
+      drawAlertBriefing(cleanCtx, scene.briefing, 0, 0, mapW, mapH, cleanUnit, mobile, theme,
+        leftPanelW ? { panelW: leftPanelW } : {});
+    } else if (scene.alert) {
+      drawAlertCard(cleanCtx, scene.alert, 0, 0, mapW, mapH, cleanUnit, mobile, theme);
+    }
+    if (scene.stormBriefing) {
+      const sw = mobile ? mapW : briefingPanelWidth(mapW, cleanUnit, mobile);
+      const sx = stormOnRight ? mapW - sw : 0;
+      drawStormBriefing(cleanCtx, scene.stormBriefing, sx, 0, mapW, mapH, cleanUnit, mobile, theme, { panelW: sw });
+    }
     return clean;
   }
 
@@ -204,7 +234,7 @@ const SANS = "'Manrope', system-ui, sans-serif";
 // Header: "◆ RadarNexus" wordmark on the left, title + sub stacked in the middle,
 // scan time on the right. Everything is measured and clipped so the three blocks
 // never overlap, whatever the image width. `u` is the base text unit (~px).
-function drawExportInfo(ctx, cap, W, u, theme) {
+function drawExportInfo(ctx, cap, W, u, theme, xInset = 0) {
   const pad = Math.round(u * 0.65);
   const gap = Math.round(u * 0.38);
   const title = cap.sub || cap.title || 'RadarNexus';
@@ -215,9 +245,9 @@ function drawExportInfo(ctx, cap, W, u, theme) {
   ctx.font = `600 ${Math.round(u * 0.7)}px ${MONO}`;
   const detail = time;
   const detailW = ctx.measureText(detail).width;
-  const boxW = Math.min(W - pad * 2, Math.ceil(Math.max(titleW, detailW) + pad * 2));
+  const boxW = Math.min(W - xInset - pad * 2, Math.ceil(Math.max(titleW, detailW) + pad * 2));
   const boxH = Math.round(u * 3.05);
-  const x = pad;
+  const x = xInset + pad;
   const y = pad;
   roundRectPath(ctx, x, y, boxW, boxH, Math.round(u * 0.42));
   ctx.fillStyle = 'rgba(5,10,16,0.82)';
@@ -236,8 +266,8 @@ function drawExportInfo(ctx, cap, W, u, theme) {
   ctx.restore();
 }
 
-function drawExportWatermark(ctx, W, H, u, legendHeight) {
-  const padX = Math.round(u * 0.75);
+function drawExportWatermark(ctx, W, H, u, legendHeight, xInset = 0) {
+  const padX = xInset + Math.round(u * 0.75);
   ctx.save();
   ctx.fillStyle = 'rgba(255,255,255,0.82)';
   ctx.font = `700 ${Math.round(u * 0.62)}px ${MONO}`;
@@ -247,16 +277,16 @@ function drawExportWatermark(ctx, W, H, u, legendHeight) {
   ctx.restore();
 }
 
-function drawExportLegend(ctx, legend, W, H, u, theme) {
+function drawExportLegend(ctx, legend, W, H, u, theme, xInset = 0) {
   const panelH = Math.round(u * 2.75);
   const padX = Math.round(u * 0.75);
   const barY = H - panelH + Math.round(u * 0.82);
   const barH = Math.max(7, Math.round(u * 0.48));
-  const barX = padX;
-  const barW = W - padX * 2;
+  const barX = xInset + padX;
+  const barW = W - xInset - padX * 2;
   ctx.save();
   ctx.fillStyle = 'rgba(5,10,16,0.84)';
-  ctx.fillRect(0, H - panelH, W, panelH);
+  ctx.fillRect(xInset, H - panelH, W - xInset, panelH);
   ctx.fillStyle = '#ffffff';
   ctx.font = `600 ${Math.round(u * 0.62)}px ${MONO}`;
   ctx.textAlign = 'left';

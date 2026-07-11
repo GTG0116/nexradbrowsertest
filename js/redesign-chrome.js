@@ -51,6 +51,12 @@ function installCommandBar() {
   const setSidebarHidden = (hidden, persist = true) => {
     if (!app) return;
     app.classList.toggle('sidebar-hidden', hidden);
+    // The desktop Settings drawer lives against the sidebar; hiding the sidebar
+    // should take its drawer with it. Otherwise the settings panel is left
+    // floating over the map after the sidebar it belongs to has slid away.
+    if (hidden && app.classList.contains('sheet-open')) {
+      document.querySelector('#settingsBtn')?.click();
+    }
     if (sidebarCollapse) {
       sidebarCollapse.title = hidden ? 'Show sidebar' : 'Hide sidebar';
       sidebarCollapse.setAttribute('aria-label', hidden ? 'Show sidebar' : 'Hide sidebar');

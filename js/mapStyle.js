@@ -27,6 +27,8 @@ export const DEFAULT_MAP_STYLE = {
   townFont: 'default',
   townThickness: 1, // text-halo-width, px
   townSize: 1, // multiplier on the style's native text-size (town/place labels)
+  townColor: '', // '' → keep the style's native text colour
+  townDensity: 1, // how many town/place labels show (1 = the style's native density)
   roadColor: '', // '' → keep the style's native colour
   roadWidth: 1, // multiplier on the native line width
   riverColor: '',
@@ -41,6 +43,8 @@ export function normalizeMapStyle(s) {
     if (TOWN_FONTS[s.townFont]) o.townFont = s.townFont;
     if (typeof s.townThickness === 'number') o.townThickness = clamp(s.townThickness, 0, 6);
     if (typeof s.townSize === 'number') o.townSize = clamp(s.townSize, 0.5, 3);
+    if (typeof s.townColor === 'string') o.townColor = s.townColor;
+    if (typeof s.townDensity === 'number') o.townDensity = clamp(s.townDensity, 0.3, 3);
     for (const k of ['roadColor', 'riverColor', 'borderColor'])
       if (typeof s[k] === 'string') o[k] = s[k];
     for (const k of ['roadWidth', 'riverWidth', 'borderWidth'])
@@ -120,6 +124,31 @@ function scaleLineWidth(value, mult) {
   }
   return value;
 }
+// Control how many town/place labels the basemap shows. Two levers, applied
+// together so the single "City density" slider reads naturally in both
+// directions:
+//   • text-padding — the collision box around each label. Native styles use ~2px;
+//     inflating it starves neighbouring labels of room so fewer survive (declutter
+//     when density < 1). Shrinking it lets labels sit closer (density > 1).
+//   • minzoom — most styles hide minor places until you zoom in. Lowering each
+//     town layer's minzoom surfaces those extra labels earlier when density > 1.
+// Native zoom range is captured (in townZoom) the first time a layer is seen on a
+// style load so repeated live changes don't compound.
+function applyTownDensity(map, ly, density, townZoom) {
+  const id = ly.id;
+  if (!(id in townZoom)) {
+    townZoom[id] = {
+      min: typeof ly.minzoom === 'number' ? ly.minzoom : 0,
+      max: typeof ly.maxzoom === 'number' ? ly.maxzoom : 24,
+    };
+  }
+  const nz = townZoom[id];
+  const pad = clamp(Math.round(2 + (1 / density - 1) * 22), 0, 140);
+  try { map.setLayoutProperty(id, 'text-padding', pad); } catch (_) {}
+  const min = density > 1 ? Math.max(0, nz.min - (density - 1) * 1.5) : nz.min;
+  try { map.setLayerZoomRange(id, min, nz.max); } catch (_) {}
+}
+
 function isTownLabelLayer(ly) {
   if (ly.type !== 'symbol') return false;
   const sl = ly['source-layer'] || '';
@@ -148,6 +177,10 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
   // repeated live changes (and is re-read fresh on each style load).
   if (fresh || !map.__nativeTextSize) map.__nativeTextSize = {};
   const textNatives = map.__nativeTextSize;
+  // Native zoom range of each town/place layer, captured so the density control
+  // can widen/narrow it without compounding on repeated live changes.
+  if (fresh || !map.__nativeTownZoom) map.__nativeTownZoom = {};
+  const townZoom = map.__nativeTownZoom;
   // Generic boundary widths (MapTiler etc.) are captured the same way; re-read on
   // a fresh style load so a basemap switch doesn't reuse the old style's widths.
   if (fresh || !map.__nativeBorderWidth) map.__nativeBorderWidth = {};
@@ -173,11 +206,13 @@ export function applyMapStyle(map, opts, anchor, { fresh = false } = {}) {
       const f = TOWN_FONTS[opts.townFont];
       if (f && f.stack) map.setLayoutProperty(ly.id, 'text-font', f.stack);
       map.setPaintProperty(ly.id, 'text-halo-width', opts.townThickness);
+      if (o.townColor) map.setPaintProperty(ly.id, 'text-color', o.townColor);
       if (!(ly.id in textNatives)) {
         const ts = map.getLayoutProperty(ly.id, 'text-size');
         textNatives[ly.id] = ts == null ? 16 : ts;
       }
       map.setLayoutProperty(ly.id, 'text-size', scaleLineWidth(textNatives[ly.id], o.townSize));
+      applyTownDensity(map, ly, o.townDensity, townZoom);
     }
   }
 

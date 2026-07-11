@@ -1493,8 +1493,13 @@ input[type='range']::-moz-range-thumb {
   --alert-panel-w: clamp(232px, 26vw, 320px);
 }
 
-.app.alert-mode .sidebar,
-.app.alert-mode .map-hud {
+.app.alert-mode .sidebar {
+  display: none;
+}
+/* The briefing owns the top-left corner, so retire the breadcrumb/clock stack —
+   but the product legend and bottom controls stay put and reposition to the map
+   viewport beside the panel (rules below) rather than vanishing with the HUD. */
+.app.alert-mode .hud-left {
   display: none;
 }
 /* While the briefing is open, the map area yields the panel's width instead of
@@ -1504,6 +1509,25 @@ input[type='range']::-moz-range-thumb {
 @media (min-width: 760px) {
   .app.alert-mode .stage {
     margin-left: var(--alert-panel-w);
+  }
+  /* The legend is a viewport-fixed full-width strip; shift its left edge to the
+     panel boundary so it spans only the visible map, not the briefing panel. */
+  .app.alert-mode .legend:not(.weather-card) {
+    left: var(--alert-panel-w);
+  }
+}
+/* On phones the briefing is a bottom sheet (64% tall). Lift the legend clear of
+   it and retire the mobile dock (the same fade the settings sheet uses) so
+   neither is stranded behind the briefing. */
+@media (max-width: 759.98px) {
+  .app.alert-mode .legend:not(.weather-card) {
+    bottom: calc(64% + 10px);
+  }
+  .app.alert-mode .mobile-dock {
+    opacity: 0;
+    transform: translateY(10px);
+    pointer-events: none;
+    visibility: hidden;
   }
 }
 

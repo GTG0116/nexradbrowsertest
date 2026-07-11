@@ -925,7 +925,6 @@ const state = {
   // combo→action. Built from defaults or storage by initKeybinds().
   keybinds: null,
   _storedKeybinds: null,
-  weather: { active: false, pickerOpen: false, coords: null, data: null, abort: null, timer: null, seq: 0, view: 'current', expanded: false, touchStart: null, touchMove: null, anim: null },
 
   // Source mode: 'radar' | 'satellite' | 'mrms' | 'models' | 'observations' | 'outlooks'.
   mode: 'radar',
@@ -1210,13 +1209,7 @@ function cacheEls() {
   el.toolMeasure = $('#toolMeasure');
   el.toolStorm = $('#toolStorm');
   el.toolInspect = $('#toolInspect');
-  el.toolWeather = $('#toolWeather');
   el.toolLocate = $('#toolLocate');
-  el.weatherPicker = $('#weatherPicker');
-  el.weatherPickerClose = $('#weatherPickerClose');
-  el.weatherCenterPicker = $('#weatherCenterPicker');
-  el.weatherUseCenter = $('#weatherUseCenter');
-  el.weatherPickerStatus = $('#weatherPickerStatus');
   el.toolSplit = $('#toolSplit');
   el.toolExport = $('#toolExport');
   el.toolClear = $('#toolClear');
@@ -1823,10 +1816,7 @@ function markActiveVolume(key, rebuild = buildVolumeList) {
 }
 
 function buildLegend() {
-  if (state.weather && state.weather.active) return renderWeatherLegend();
-  setWeatherHudActive(false);
   el.legend.className = 'legend';
-  clearWeatherSwipe();
   if (state.mode === 'satellite') return buildSatLegend();
   if (state.mode === 'mrms') return buildMrmsLegend();
   if (state.mode === 'models') return buildModelLegend();
@@ -1893,7 +1883,6 @@ function updateSplitPaneChrome() {
   if (!sv) return;
   if (!sv.active) {
     if (sv.setPaneLegends) sv.setPaneLegends('', '', '', '');
-    if (sv.setWeatherPickers) sv.setWeatherPickers(false);
     return;
   }
   const canCompareLegend = state.mode === 'radar' || state.mode === 'mrms' || state.mode === 'models' ||
@@ -1902,7 +1891,6 @@ function updateSplitPaneChrome() {
     ? sv.paneProducts()
     : [sv._mainProduct ? sv._mainProduct() : state.productId, sv.productId];
   sv.setPaneLegends(products.map((id) => (canCompareLegend ? splitPaneLegendHTML(id) : '')));
-  if (sv.setWeatherPickers) sv.setWeatherPickers(!!(state.weather && state.weather.active));
 }
 
 // ---------------------------------------------------------------------------
@@ -5516,13 +5504,12 @@ function toggleInspect(on) {
 }
 
 // ---------------------------------------------------------------------------
-// Single active "modal" map tool at a time. Draw / measure / storm, METARs, the
-// local-weather picker and inspect are mutually exclusive: arming one disarms
-// whatever was running, so a tool is never left enabled after another is picked.
+// Single active "modal" map tool at a time. Draw / measure / storm, METARs and
+// inspect are mutually exclusive: arming one disarms whatever was running, so a
+// tool is never left enabled after another is picked.
 // ---------------------------------------------------------------------------
 function activeModalTool() {
   if (state.mapTools && state.mapTools.tool) return state.mapTools.tool;
-  if (state.weather && state.weather.active) return 'weather';
   if (state.inspect) return 'inspect';
   return null;
 }
@@ -5534,9 +5521,6 @@ function deactivateModalTool(id) {
     case 'storm':
       if (state.mapTools) state.mapTools.setTool(null);
       if (state._syncToolButtons) state._syncToolButtons();
-      break;
-    case 'weather':
-      if (state.weather && state.weather.active) stopWeatherTool();
       break;
     case 'inspect':
       if (state.inspect) toggleInspect(false);
@@ -7815,7 +7799,7 @@ function setupMapTools() {
   state._syncToolButtons = syncToolButtons;
   for (const [btn, name] of toolButtons) {
     btn.addEventListener('click', () => {
-      // Arming this tool? Disarm any other modal tool (METARs, weather, inspect)
+      // Arming this tool? Disarm any other modal tool (METARs, inspect)
       // first so only one is ever active.
       if (state.mapTools.tool !== name) clearOtherTools(name);
       state.mapTools.setTool(name);
@@ -7826,8 +7810,6 @@ function setupMapTools() {
     state.mapTools.clearAll();
     syncToolButtons();
   });
-
-  setupWeatherTool();
 
   // Split screen - synced comparison panes showing different products.
   state.splitView = new SplitView({
@@ -7972,452 +7954,6 @@ function setupMapTools() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Public weather tool — simple current conditions from Open-Meteo. The tool
-// follows the map center and reuses the bottom legend area so non-technical
-// users see plain-language weather instead of product color ramps.
-// ---------------------------------------------------------------------------
-function setupWeatherTool() {
-  if (!el.toolWeather) return;
-  el.toolWeather.addEventListener('click', () => {
-    if (state.weather.active) stopWeatherTool();
-    else { clearOtherTools('weather'); startWeatherTool(); }
-  });
-  if (el.weatherPickerClose) el.weatherPickerClose.addEventListener('click', () => closeWeatherPicker());
-  if (el.weatherUseCenter) el.weatherUseCenter.addEventListener('click', () => updateWeatherFromCenter(true));
-  state.map.on('move', () => {
-    if (state.weather.active) scheduleWeatherCenterUpdate();
-  });
-  state.map.on('moveend', () => {
-    if (state.weather.active) updateWeatherFromCenter();
-  });
-}
-
-function startWeatherTool() {
-  state.weather.active = true;
-  state.weather.pickerOpen = false;
-  state.weather.view = 'current';
-  state.weather.expanded = false;
-  if (el.weatherPicker) el.weatherPicker.hidden = true;
-  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = false;
-  updateSplitPaneChrome();
-  el.toolWeather.classList.add('active');
-  updateWeatherFromCenter(true);
-}
-
-function stopWeatherTool() {
-  state.weather.active = false;
-  state.weather.pickerOpen = false;
-  state.weather.data = null;
-  state.weather.view = 'current';
-  state.weather.expanded = false;
-  if (state.weather.timer) clearTimeout(state.weather.timer);
-  state.weather.timer = null;
-  if (state.weather.abort) state.weather.abort.abort();
-  state.weather.abort = null;
-  if (el.weatherPicker) el.weatherPicker.hidden = true;
-  if (el.weatherCenterPicker) el.weatherCenterPicker.hidden = true;
-  setWeatherHudActive(false);
-  updateSplitPaneChrome();
-  el.toolWeather.classList.remove('active');
-  buildLegend();
-  setStatus('local weather off');
-}
-
-function scheduleWeatherCenterUpdate() {
-  if (state.weather.timer) clearTimeout(state.weather.timer);
-  state.weather.timer = setTimeout(() => updateWeatherFromCenter(), 650);
-}
-
-function updateWeatherFromCenter(force = false) {
-  if (!state.weather.active || !state.map) return;
-  if (state.weather.timer) clearTimeout(state.weather.timer);
-  state.weather.timer = null;
-  const c = state.map.getCenter();
-  const label = 'map center';
-  const prev = state.weather.coords;
-  const moved = !prev || Math.abs(prev.lat - c.lat) > 0.01 || Math.abs(prev.lon - c.lng) > 0.01;
-  if (!force && !moved) return;
-  loadWeatherAt(c.lat, c.lng, label);
-}
-
-function openWeatherPicker() {
-  startWeatherTool();
-}
-
-function closeWeatherPicker() {
-  state.weather.pickerOpen = false;
-  if (el.weatherPicker) el.weatherPicker.hidden = true;
-}
-
-function setWeatherPickerStatus(msg, error = false) {
-  if (!el.weatherPickerStatus) return;
-  el.weatherPickerStatus.textContent = msg;
-  el.weatherPickerStatus.classList.toggle('error', !!error);
-}
-
-async function loadWeatherAt(lat, lon, label) {
-  state.weather.active = true;
-  state.weather.coords = { lat, lon, label };
-  if (!state.weather.data) renderWeatherLegend({ loading: true, label, lat, lon });
-  setStatus(`loading Open-Meteo weather for ${label}`, true);
-  if (state.weather.abort) state.weather.abort.abort();
-  const seq = ++state.weather.seq;
-  state.weather.abort = new AbortController();
-  try {
-    const wx = await openMeteoJson(lat, lon, state.weather.abort.signal);
-    if (seq !== state.weather.seq) return;
-    state.weather.data = { forecast: wx, label, lat, lon };
-    renderWeatherLegend();
-    setStatus(`Open-Meteo weather: ${label}`);
-  } catch (e) {
-    if (e.name === 'AbortError') return;
-    console.error('weather load failed:', e);
-    renderWeatherLegend({ error: e.message || 'Unable to load current weather.' });
-    setStatus('current weather unavailable');
-  }
-}
-
-async function openMeteoJson(lat, lon, signal) {
-  const params = new URLSearchParams({
-    latitude: lat.toFixed(4),
-    longitude: lon.toFixed(4),
-    current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,dew_point_2m,surface_pressure,cloud_cover',
-    hourly: 'temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m',
-    daily: 'weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,uv_index_max',
-    forecast_days: '7',
-    temperature_unit: 'fahrenheit',
-    wind_speed_unit: 'mph',
-    precipitation_unit: 'inch',
-    timezone: 'auto',
-  });
-  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, { signal });
-  if (!res.ok) throw new Error(`Open-Meteo request failed (${res.status})`);
-  return res.json();
-}
-
-function describeWeatherCode(code) {
-  const table = {
-    0: ['☀️', 'Sunny'], 1: ['🌤️', 'Mostly sunny'], 2: ['⛅', 'Partly cloudy'], 3: ['☁️', 'Cloudy'],
-    45: ['🌫️', 'Foggy'], 48: ['🌫️', 'Rime fog'],
-    51: ['🌦️', 'Light drizzle'], 53: ['🌦️', 'Drizzle'], 55: ['🌧️', 'Heavy drizzle'],
-    56: ['🌧️', 'Freezing drizzle'], 57: ['🌧️', 'Freezing drizzle'],
-    61: ['🌧️', 'Light rain'], 63: ['🌧️', 'Rainy'], 65: ['🌧️', 'Heavy rain'],
-    66: ['🌧️', 'Freezing rain'], 67: ['🌧️', 'Freezing rain'],
-    71: ['🌨️', 'Light snow'], 73: ['🌨️', 'Snowy'], 75: ['❄️', 'Heavy snow'], 77: ['🌨️', 'Snow grains'],
-    80: ['🌦️', 'Rain showers'], 81: ['🌦️', 'Rain showers'], 82: ['⛈️', 'Heavy showers'],
-    85: ['🌨️', 'Snow showers'], 86: ['❄️', 'Heavy snow showers'],
-    95: ['⛈️', 'Thunderstorm'], 96: ['⛈️', 'Thunderstorm with hail'], 99: ['⛈️', 'Thunderstorm with hail'],
-  };
-  return table[code] || ['🌡️', 'Current weather'];
-}
-
-function setWeatherHudActive(active) {
-  if (el.mapWrap) {
-    el.mapWrap.classList.toggle('wx-active', !!active);
-    el.mapWrap.classList.toggle('wx-expanded', !!(active && state.weather && state.weather.expanded));
-    if (!active) el.mapWrap.style.removeProperty('--wx-card-h');
-  }
-  if (el.mapHud) el.mapHud.classList.toggle('weather-hud', !!active);
-}
-
-function updateWeatherCardHeight() {
-  if (!el.mapWrap || !el.legend || !state.weather.active) return;
-  requestAnimationFrame(() => {
-    if (!el.legend.classList.contains('weather-card')) return;
-    const h = Math.ceil(el.legend.getBoundingClientRect().height || 0);
-    if (h > 0) el.mapWrap.style.setProperty('--wx-card-h', `${h}px`);
-  });
-}
-
-function renderWeatherLegend(stateOverride = null) {
-  if (!state.weather.active && !stateOverride) return;
-  setWeatherHudActive(true);
-  if (stateOverride && stateOverride.loading) {
-    el.legend.className = 'legend weather-card loading';
-    el.legend.innerHTML = `Loading current conditions near ${escapeHTML(stateOverride.label)}…`;
-    bindWeatherSwipe();
-    updateWeatherCardHeight();
-    return;
-  }
-  if (stateOverride && stateOverride.error) {
-    el.legend.className = 'legend weather-card error';
-    el.legend.innerHTML = `Current conditions unavailable — ${escapeHTML(stateOverride.error)}`;
-    bindWeatherSwipe();
-    updateWeatherCardHeight();
-    return;
-  }
-  const wx = state.weather.data;
-  if (!wx || !wx.forecast) return;
-  const current = wx.forecast.current || {};
-  const units = wx.forecast.current_units || {};
-  const [emoji, text] = describeWeatherCode(current.weather_code);
-  const place = `${wx.lat.toFixed(2)}°, ${wx.lon.toFixed(2)}°`;
-  el.legend.className = `legend weather-card ${state.weather.expanded ? 'wx-expanded' : ''} ${state.weather.view === 'forecast' ? 'forecast' : ''} ${state.weather.anim ? `wx-${state.weather.anim}` : ''}`.trim();
-  setWeatherHudActive(true);
-  if (state.weather.view === 'forecast') {
-    el.legend.innerHTML = weatherForecastHTML(wx.forecast, wx);
-    bindWeatherSwipe();
-    bindWeatherForecastDetails();
-    clearWeatherAnimation();
-    bindWeatherCardToggle();
-    updateWeatherCardHeight();
-    return;
-  }
-  el.legend.innerHTML = `
-    <div class="wx-main" role="button" tabindex="0" aria-expanded="${state.weather.expanded ? 'true' : 'false'}">
-      <div class="wx-summary">
-        <div class="wx-summary-icon" aria-hidden="true">${emoji}</div>
-        <div>
-          <div class="wx-summary-temp">${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '\u00b0F')}</div>
-          <div class="wx-summary-condition">${escapeHTML(text)}</div>
-        </div>
-        <div class="wx-summary-place">
-          <div>${escapeHTML(place)}</div>
-          <div class="wx-summary-feels">Feels ${fmtNumber(current.apparent_temperature)}${escapeHTML(units.apparent_temperature || '\u00b0F')}</div>
-        </div>
-      </div>
-      <div class="wx-expanded-body">
-      <div class="wx-kicker">Current Conditions</div>
-      <div class="wx-temp"><span class="wx-emoji" aria-hidden="true">${emoji}</span>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</div>
-      <div class="wx-condition">${emoji} ${escapeHTML(text)}</div>
-      <div class="wx-place">${escapeHTML(place)}</div>
-      <div class="wx-grid">
-        <div class="wx-metric"><div class="wx-label">Feels</div><div class="wx-value">${fmtNumber(current.apparent_temperature)}${escapeHTML(units.apparent_temperature || '°F')}</div></div>
-        <div class="wx-metric"><div class="wx-label">Humidity</div><div class="wx-value">${fmtNumber(current.relative_humidity_2m)}${escapeHTML(units.relative_humidity_2m || '%')}</div></div>
-        <div class="wx-metric"><div class="wx-label">Wind</div><div class="wx-value">${fmtNumber(current.wind_speed_10m)} ${escapeHTML(units.wind_speed_10m || 'mph')}</div></div>
-        <div class="wx-metric"><div class="wx-label">Dir</div><div class="wx-value">${fmtNumber(current.wind_direction_10m)}${escapeHTML(units.wind_direction_10m || '°')}</div></div>
-        <div class="wx-updated">Updated ${escapeHTML(current.time || 'now')}</div>
-      </div>
-      <div class="wx-footer">
-        <div>Swipe down for forecast</div>
-        <div>Open-Meteo · map center</div>
-      </div>
-      </div>
-      ${state.weather.expanded ? '' : '<div class="wx-expand-hint">Tap for details</div>'}
-    </div>`;
-  clearWeatherAnimation();
-  bindWeatherSwipe();
-  bindWeatherCardToggle();
-  updateWeatherCardHeight();
-}
-
-function weatherForecastHTML(forecast, wx) {
-  const hourly = forecast.hourly || {};
-  const daily = forecast.daily || {};
-  const hTimes = (hourly.time || []).slice(0, 24);
-  const dTimes = (daily.time || []).slice(0, 7);
-  const hourRows = hTimes.map((time, i) => forecastPillHTML({
-    type: 'hour',
-    index: i,
-    label: formatForecastTime(time, 'hour'),
-    temp: hourly.temperature_2m && hourly.temperature_2m[i],
-    precip: hourly.precipitation_probability && hourly.precipitation_probability[i],
-    code: hourly.weather_code && hourly.weather_code[i],
-  })).join('');
-  const dayRows = dTimes.map((time, i) => forecastPillHTML({
-    type: 'day',
-    index: i,
-    label: formatForecastTime(time, 'day'),
-    temp: daily.temperature_2m_max && daily.temperature_2m_min ? `${fmtNumber(daily.temperature_2m_max[i])}°/${fmtNumber(daily.temperature_2m_min[i])}°` : '—',
-    precip: daily.precipitation_probability_max && daily.precipitation_probability_max[i],
-    code: daily.weather_code && daily.weather_code[i],
-  })).join('');
-  return `
-    <div class="wx-kicker">Forecast</div>
-    ${weatherCurrentMiniHTML(wx)}
-    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 24 hours</div><div class="wx-forecast-row">${hourRows}</div></div>
-    <div class="wx-forecast-section"><div class="wx-forecast-title">Next 7 days</div><div class="wx-forecast-row">${dayRows}</div></div>
-    <div class="wx-footer">
-      <div>Swipe up for current · tap a pill for details</div>
-      <div>Open-Meteo forecast</div>
-    </div>`;
-}
-
-function forecastPillHTML(item) {
-  const [emoji, text] = describeWeatherCode(item.code);
-  const temp = typeof item.temp === 'string' ? item.temp : `${fmtNumber(item.temp)}°`;
-  const precip = item.precip == null ? '—' : `${Math.round(item.precip)}%`;
-  const attrs = item.type ? ` tabindex="0" role="button" data-wx-detail="${escapeHTML(item.type)}" data-wx-index="${Number(item.index) || 0}"` : '';
-  return `<div class="wx-forecast-pill"${attrs} title="${escapeHTML(text)}"><div class="wx-forecast-time">${escapeHTML(item.label)}</div><div class="wx-forecast-emoji">${emoji}</div><div class="wx-forecast-temp">${escapeHTML(temp)}</div><div class="wx-forecast-pop">💧 ${escapeHTML(precip)}</div></div>`;
-}
-
-
-function weatherCurrentMiniHTML(wx) {
-  const current = wx.forecast.current || {};
-  const units = wx.forecast.current_units || {};
-  const [emoji, text] = describeWeatherCode(current.weather_code);
-  return `<div class="wx-current-strip">
-    <div class="wx-current-now"><span>${emoji}</span><strong>${fmtNumber(current.temperature_2m)}${escapeHTML(units.temperature_2m || '°F')}</strong><em>${escapeHTML(text)}</em></div>
-    <div class="wx-current-facts">
-      <span>Feels ${fmtNumber(current.apparent_temperature)}${escapeHTML(units.apparent_temperature || '°F')}</span>
-      <span>Humidity ${fmtNumber(current.relative_humidity_2m)}${escapeHTML(units.relative_humidity_2m || '%')}</span>
-      <span>Dew ${fmtNumber(current.dew_point_2m)}${escapeHTML(units.dew_point_2m || '°F')}</span>
-      <span>Wind ${fmtNumber(current.wind_speed_10m)} ${escapeHTML(units.wind_speed_10m || 'mph')}</span>
-    </div>
-  </div>`;
-}
-
-function bindWeatherCardToggle() {
-  if (!el.legend) return;
-  el.legend.onclick = (ev) => {
-    if (state.weather.suppressClickUntil && Date.now() < state.weather.suppressClickUntil) return;
-    if (ev.target.closest('[data-wx-detail], .wx-detail-close, button, a, input, select')) return;
-    if (state.weather.view === 'forecast') {
-      state.weather.view = 'current';
-      state.weather.expanded = false;
-    } else {
-      state.weather.expanded = !state.weather.expanded;
-    }
-    renderWeatherLegend();
-  };
-  el.legend.onkeydown = (ev) => {
-    if (ev.key !== 'Enter' && ev.key !== ' ') return;
-    if (ev.target.closest('[data-wx-detail], button, a, input, select')) return;
-    ev.preventDefault();
-    if (state.weather.view === 'forecast') {
-      state.weather.view = 'current';
-      state.weather.expanded = false;
-    } else {
-      state.weather.expanded = !state.weather.expanded;
-    }
-    renderWeatherLegend();
-  };
-}
-
-function bindWeatherForecastDetails() {
-  el.legend.querySelectorAll('[data-wx-detail]').forEach((node) => {
-    node.addEventListener('click', () => showWeatherDetail(node.dataset.wxDetail, Number(node.dataset.wxIndex || 0)));
-    node.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); showWeatherDetail(node.dataset.wxDetail, Number(node.dataset.wxIndex || 0)); }
-    });
-  });
-}
-
-function showWeatherDetail(type, i) {
-  const wx = state.weather.data && state.weather.data.forecast;
-  if (!wx) return;
-  const src = type === 'day' ? wx.daily || {} : wx.hourly || {};
-  const units = type === 'day' ? wx.daily_units || {} : wx.hourly_units || {};
-  const title = type === 'day' ? formatDetailDate(src.time && src.time[i]) : formatDetailDateTime(src.time && src.time[i]);
-  const [emoji, text] = describeWeatherCode(src.weather_code && src.weather_code[i]);
-  const rows = weatherDetailRows(type, src, units, i);
-  const modal = document.createElement('div');
-  modal.className = 'wx-detail-backdrop';
-  modal.innerHTML = `<div class="wx-detail-dialog" role="dialog" aria-modal="true" aria-label="Weather details">
-    <button class="wx-detail-close" type="button" aria-label="Close weather details">✕</button>
-    <div class="wx-detail-kicker">Open-Meteo ${type === 'day' ? 'daily' : 'hourly'} forecast</div>
-    <h3><span aria-hidden="true">${emoji}</span> ${escapeHTML(title)}</h3>
-    <div class="wx-detail-condition">${escapeHTML(text)}</div>
-    <div class="wx-detail-grid">${rows}</div>
-  </div>`;
-  const close = () => modal.remove();
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-  modal.querySelector('.wx-detail-close').addEventListener('click', close);
-  document.body.appendChild(modal);
-  modal.querySelector('.wx-detail-close').focus();
-}
-
-function weatherDetailRows(type, src, units, i) {
-  if (type === 'day') {
-    const specs = [
-      ['Temperatures', [
-        ['High', src.temperature_2m_max && src.temperature_2m_max[i], units.temperature_2m_max],
-        ['Low', src.temperature_2m_min && src.temperature_2m_min[i], units.temperature_2m_min],
-      ], 'wide'],
-      ['Feels like', [
-        ['High', src.apparent_temperature_max && src.apparent_temperature_max[i], units.apparent_temperature_max],
-        ['Low', src.apparent_temperature_min && src.apparent_temperature_min[i], units.apparent_temperature_min],
-      ], 'wide'],
-      ['Precip chance', 'precipitation_probability_max'], ['Precip total', 'precipitation_sum'], ['Wind max', 'wind_speed_10m_max'], ['Gusts', 'wind_gusts_10m_max'],
-      ['Wind dir', 'wind_direction_10m_dominant'], ['UV index', 'uv_index_max'], ['Sunrise', 'sunrise', 'time'], ['Sunset', 'sunset', 'time'],
-    ];
-    return specs.map(([label, key, kind]) => Array.isArray(key)
-      ? detailCombinedRow(label, key, kind === 'wide')
-      : detailRow(label, src[key] && src[key][i], units[key], kind)).join('');
-  }
-
-  const specs = [
-    ['Temperature', 'temperature_2m'], ['Feels like', 'apparent_temperature'], ['Humidity', 'relative_humidity_2m'],
-    ['Precip chance', 'precipitation_probability'], ['Precip', 'precipitation'], ['Wind', 'wind_speed_10m'],
-  ];
-  return specs.map(([label, key, kind]) => detailRow(label, src[key] && src[key][i], units[key], kind)).join('');
-}
-
-function detailCombinedRow(label, values, wide = false) {
-  const parts = values.map(([name, value, unit]) => `<span><em>${escapeHTML(name)}</em>${formatDetailValue(value, unit)}</span>`).join('');
-  return `<div class="wx-detail-metric wx-detail-combined${wide ? ' wide' : ''}"><div>${escapeHTML(label)}</div><strong>${parts}</strong></div>`;
-}
-
-function detailRow(label, value, unit, kind) {
-  const text = kind === 'time' ? formatDetailTime(value) : formatDetailValue(value, unit);
-  return `<div class="wx-detail-metric"><div>${escapeHTML(label)}</div><strong>${text}</strong></div>`;
-}
-
-function formatDetailValue(value, unit) {
-  return `${fmtNumber(value)}${unit ? ` ${escapeHTML(unit)}` : ''}`;
-}
-
-function formatDetailDateTime(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? (value || 'Forecast') : d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' }); }
-function formatDetailDate(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? (value || 'Forecast day') : d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }); }
-function formatDetailTime(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? escapeHTML(value || '—') : escapeHTML(d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })); }
-
-function formatForecastTime(value, mode) {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value || '';
-  if (mode === 'day') return d.toLocaleDateString([], { weekday: 'short' });
-  return d.toLocaleTimeString([], { hour: 'numeric' });
-}
-
-function clearWeatherSwipe() {
-  el.legend.ontouchstart = null;
-  el.legend.ontouchmove = null;
-  el.legend.ontouchend = null;
-  el.legend.onclick = null;
-  el.legend.onkeydown = null;
-}
-
-function bindWeatherSwipe() {
-  el.legend.ontouchstart = (ev) => {
-    state.weather.touchStart = ev.changedTouches[0].clientY;
-    state.weather.touchMove = state.weather.touchStart;
-  };
-  el.legend.ontouchmove = (ev) => {
-    if (state.weather.touchStart == null) return;
-    state.weather.touchMove = ev.changedTouches[0].clientY;
-    const delta = Math.max(-90, Math.min(90, state.weather.touchMove - state.weather.touchStart));
-    el.legend.style.setProperty('--wx-swipe-y', `${delta * 0.22}px`);
-  };
-  el.legend.ontouchend = (ev) => {
-    const start = state.weather.touchStart;
-    state.weather.touchStart = null;
-    el.legend.style.removeProperty('--wx-swipe-y');
-    if (start == null) return;
-    const delta = ev.changedTouches[0].clientY - start;
-    if (Math.abs(delta) > 12) state.weather.suppressClickUntil = Date.now() + 350;
-    if (delta > 45 && state.weather.view !== 'forecast') {
-      state.weather.view = 'forecast';
-      state.weather.expanded = true;
-      state.weather.anim = 'swipe-down';
-      renderWeatherLegend();
-    }
-    if (delta < -45 && state.weather.view !== 'current') {
-      state.weather.view = 'current';
-      state.weather.anim = 'swipe-up';
-      renderWeatherLegend();
-    }
-  };
-}
-
-function clearWeatherAnimation() {
-  if (state.weather.anim) setTimeout(() => {
-    state.weather.anim = null;
-    if (el.legend) el.legend.classList.remove('wx-swipe-down', 'wx-swipe-up');
-  }, 360);
-}
-
-function fmtNumber(v) { return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : '—'; }
-
 function escapeHTML(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
@@ -8433,7 +7969,6 @@ const DOCK_TOOLS = [
   { id: 'storm', icon: '➤', label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: '📏', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: '✎', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'weather', icon: '☼', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: '📍', label: 'My live location', btn: () => el.toolLocate },
   // The model sounding isn't a slot tool anymore — in models mode you long-press
   // the map (or right-click on desktop) to open a sounding at that point.
@@ -8459,7 +7994,6 @@ const MOBILE_TOOL_DEFS = [
   { id: 'storm', icon: CONE_ICON, label: 'Storm track', btn: () => el.toolStorm },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'weather', icon: 'sun', label: 'Local weather', btn: () => el.toolWeather },
   { id: 'locate', icon: 'navigation', label: 'My live location', btn: () => el.toolLocate },
   { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
 ];
@@ -8715,7 +8249,6 @@ const DEFAULT_KEYBINDS = {
     'KeyM': 'tool:measure',
     'KeyD': 'tool:draw',
     'KeyS': 'tool:metars',
-    'KeyW': 'tool:weather',
     'KeyL': 'tool:locate',
     'KeyE': 'tool:export',
     'Shift+Digit7': 'tool:split',
@@ -8743,13 +8276,13 @@ const DEFAULT_KEYBINDS = {
 const TOOL_ACTION_BTN = {
   inspect: 'inspectBtn',
   storm: 'toolStorm', measure: 'toolMeasure', draw: 'toolDraw',
-  metars: 'metarsToggle', weather: 'toolWeather', locate: 'toolLocate',
+  metars: 'metarsToggle', locate: 'toolLocate',
   split: 'toolSplit', export: 'toolExport', clear: 'toolClear',
 };
 const TOOL_ACTIONS = [
   ['tool:inspect', 'Inspect'],
   ['tool:storm', 'Storm track'], ['tool:measure', 'Measure'], ['tool:draw', 'Draw'],
-  ['tool:metars', 'Surface obs'], ['tool:weather', 'Local weather'], ['tool:locate', 'Live location'],
+  ['tool:metars', 'Surface obs'], ['tool:locate', 'Live location'],
   ['tool:split', 'Split screen'], ['tool:export', 'Export'], ['tool:clear', 'Clear drawings'],
 ];
 const PLAYBACK_ACTIONS = [
@@ -8764,7 +8297,6 @@ const TOOL_KEYBIND_MIGRATIONS = [
   ['Shift+Digit2', 'KeyM', 'tool:measure'],
   ['Shift+Digit3', 'KeyD', 'tool:draw'],
   ['Shift+Digit4', 'KeyS', 'tool:metars'],
-  ['Shift+Digit5', 'KeyW', 'tool:weather'],
   ['Shift+Digit6', 'KeyL', 'tool:locate'],
   ['Shift+Digit8', 'KeyE', 'tool:export'],
 ];
@@ -9106,6 +8638,16 @@ const MAP_LINE_CONTROLS = [
   { key: 'border', label: 'Borders', optionalColor: false },
 ];
 
+// Friendly label for the City-density slider (raw value is a 0.3–3 multiplier on
+// the basemap's native label density).
+function townDensityLabel(d) {
+  if (d <= 0.45) return 'Minimal';
+  if (d < 0.9) return 'Fewer';
+  if (d <= 1.1) return 'Normal';
+  if (d < 2) return 'More';
+  return 'Max';
+}
+
 function setupMapStyleControls() {
   const host = el.mapStyleControls;
   if (!host) return;
@@ -9148,6 +8690,17 @@ function setupMapStyleControls() {
       <span>Town label size <b id="townSizeVal">${ms.townSize.toFixed(1)}×</b></span>
       <input type="range" id="townSize" min="0.5" max="3" step="0.1" value="${ms.townSize}">
     </label>
+    <div class="ms-line">
+      <span class="ms-line-name">Town label color</span>
+      <div class="ms-line-color">
+        <label class="ms-color-on"><input type="checkbox" id="townColorOn"${ms.townColor ? ' checked' : ''}>Custom</label>
+        <input type="color" id="townColor" value="${ms.townColor || '#ffffff'}">
+      </div>
+    </div>
+    <label class="field opacity-field">
+      <span>City density <b id="townDensityVal">${townDensityLabel(ms.townDensity)}</b></span>
+      <input type="range" id="townDensity" min="0.3" max="3" step="0.1" value="${ms.townDensity}">
+    </label>
     ${lineRows}`;
 
   const fontSel = host.querySelector('#townFontSelect');
@@ -9155,6 +8708,7 @@ function setupMapStyleControls() {
   fontSel.addEventListener('change', () => {
     ms.townFont = fontSel.value;
     applyMapStyleLive();
+    saveSettings();
   });
 
   const thick = host.querySelector('#townThick');
@@ -9163,6 +8717,7 @@ function setupMapStyleControls() {
     ms.townThickness = Number(thick.value);
     thickVal.textContent = ms.townThickness.toFixed(1);
     applyMapStyleLive();
+    saveSettings();
   });
 
   const size = host.querySelector('#townSize');
@@ -9171,6 +8726,33 @@ function setupMapStyleControls() {
     ms.townSize = Number(size.value);
     sizeVal.textContent = ms.townSize.toFixed(1) + '×';
     applyMapStyleLive();
+    saveSettings();
+  });
+
+  const townColor = host.querySelector('#townColor');
+  const townColorOn = host.querySelector('#townColorOn');
+  const pushTownColor = () => {
+    ms.townColor = townColorOn.checked ? townColor.value : '';
+    // text-color can't be un-set live once overridden, so a full basemap restyle
+    // (which rebuilds every layer from stock, then re-applies these options) is
+    // needed to return to the basemap's native label colour.
+    if (!ms.townColor) setBasemap(state.basemap);
+    else applyMapStyleLive();
+    saveSettings();
+  };
+  townColor.addEventListener('input', () => {
+    if (!townColorOn.checked) townColorOn.checked = true;
+    pushTownColor();
+  });
+  townColorOn.addEventListener('change', pushTownColor);
+
+  const density = host.querySelector('#townDensity');
+  const densityVal = host.querySelector('#townDensityVal');
+  density.addEventListener('input', () => {
+    ms.townDensity = Number(density.value);
+    densityVal.textContent = townDensityLabel(ms.townDensity);
+    applyMapStyleLive();
+    saveSettings();
   });
 
   for (const { key, optionalColor } of MAP_LINE_CONTROLS) {
