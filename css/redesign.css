@@ -1691,7 +1691,10 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .map-hud {
-    top: calc(10px + env(safe-area-inset-top, 0px));
+    /* iOS PWAs already get the full visual viewport with viewport-fit=cover;
+       keep the primary chrome in that space instead of reserving browser-style
+       safe-area gutters that Chrome/Safari normally cover with their UI. */
+    top: 10px;
     width: calc(100vw - 24px);
     gap: 7px;
   }
@@ -1716,14 +1719,14 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     position: absolute;
     top: auto;
     right: auto;
-    bottom: calc(106px + env(safe-area-inset-bottom, 0px));
+    bottom: 106px;
     left: 0;
     width: min(280px, calc(100vw - 36px));
     padding: 7px 9px;
   }
 
   .map-tools {
-    top: calc(62px + env(safe-area-inset-top, 0px));
+    top: 62px;
     right: 10px;
     display: flex;
     gap: 3px;
@@ -1741,7 +1744,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     width: auto;
     align-items: stretch;
     gap: 8px;
-    padding: 10px 10px calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 10px 12px;
     background: var(--panel);
     border-top: 1px solid var(--panel-edge);
     box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.18);
@@ -1756,7 +1759,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     max-width: none;
     min-height: 92px;
     gap: 7px;
-    padding: 12px 10px calc(14px + env(safe-area-inset-bottom, 0px));
+    padding: 12px 10px 14px;
     background: var(--panel);
     border-top: 1px solid var(--panel-edge);
     box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.18);
@@ -1818,7 +1821,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .dock-tool-menu {
-    bottom: calc(110px + env(safe-area-inset-bottom, 0px));
+    bottom: 110px;
     color: var(--ink);
     background: var(--panel);
     border-color: var(--panel-edge);
@@ -1827,7 +1830,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
   .mobile-sheet {
     max-height: min(76vh, 690px);
-    padding: 0 10px calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: 0 10px 12px;
     background: var(--bg);
   }
 
@@ -1857,7 +1860,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .tool-popover {
-    bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+    bottom: 118px;
   }
 
   .playback-bar,
