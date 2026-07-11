@@ -1492,6 +1492,56 @@ input[type='range']::-moz-range-thumb {
   text-overflow: ellipsis;
 }
 
+/* ---------------- Local storm reports panel ---------------- */
+/* Category filter chips: lit = shown on the map/list. Each carries its
+   bucket colour in --ac (same convention as .alert-row). */
+.lsr-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 6px;
+}
+.lsr-chip {
+  --ac: #6f8aa8;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--ink-dim);
+  border: 1px solid var(--panel-edge);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: transparent;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.lsr-chip.active {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--ac) 65%, transparent);
+  background: color-mix(in srgb, var(--ac) 18%, transparent);
+}
+.lsr-chip:hover {
+  border-color: var(--ac);
+}
+.lsr-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ac);
+  opacity: 0.35;
+}
+.lsr-chip.active .lsr-chip-dot {
+  opacity: 1;
+  box-shadow: 0 0 6px var(--ac);
+}
+.lsr-chip b {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: inherit;
+}
+
 /* ---------------- Alert briefing (full-screen) ---------------- */
 /* One source of truth for the briefing panel's width, so the panel, its close
    button and the map stage (which shifts right to make room) always agree. */
@@ -1680,6 +1730,19 @@ input[type='range']::-moz-range-thumb {
   font-weight: 500;
   color: var(--accent);
   margin-left: 5px;
+}
+/* Free-text LSR remark under the fact rows (spotter narrative, damage notes). */
+.apv-remark {
+  margin: 10px 0 12px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--panel-edge);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--ink-dim) 8%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  max-height: 180px;
+  overflow-y: auto;
 }
 .apv-dots {
   display: flex;
