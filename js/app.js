@@ -7929,6 +7929,10 @@ function setupMapTools() {
     // Storm track takes over the screen: hide the bottom UI (dock, legend,
     // footer) so the track + town list own the view (CSS keys off this class).
     document.body.classList.toggle('storm-active', state.mapTools.tool === 'storm');
+    // Draw and measure are full-screen touch gestures on phones. Let CSS move
+    // their controls out of the dock's way and hide the bottom dock while armed.
+    document.body.classList.toggle('draw-measure-active',
+      state.mapTools.tool === 'draw' || state.mapTools.tool === 'measure');
     syncDrawToolPopup();
   }
   function syncDrawToolPopup() {
