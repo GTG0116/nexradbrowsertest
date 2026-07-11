@@ -1038,7 +1038,7 @@ input[type='range']::-moz-range-thumb {
 }
 .hud-left {
   position: absolute;
-  top: calc(18px + env(safe-area-inset-top, 0px));
+  top: 18px;
   left: 18px;
   z-index: 20;
   display: flex;
@@ -1062,7 +1062,7 @@ input[type='range']::-moz-range-thumb {
 .breadcrumb .lucide { color: var(--accent); }
 .legend {
   position: absolute;
-  top: calc(18px + env(safe-area-inset-top, 0px));
+  top: 18px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 15;
@@ -1771,7 +1771,7 @@ input[type='range']::-moz-range-thumb {
      top:0) sticks just below the inset and the first briefing header isn't hidden
      under the notch — fixing the "all the close/switch UI is in the top safe
      space" report on full-screen mobile. Desktop's inset is 0, so it's a no-op. */
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: 0px;
   pointer-events: auto;
   background: var(--panel);
   border-right: 1px solid var(--panel-edge);
@@ -1831,7 +1831,7 @@ input[type='range']::-moz-range-thumb {
      mobile (it floats over the briefing, outside the padded scroll container).
      Desktop: track the panel's actual width (it varies with the viewport) so
      the button always floats just outside the briefing's right edge. */
-  top: calc(14px + env(safe-area-inset-top, 0px));
+  top: 14px;
   left: calc(var(--alert-panel-w, 360px) + 12px);
   z-index: 1300;
   pointer-events: auto;
@@ -2144,7 +2144,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-hud {
     position: absolute;
-    top: calc(8px + env(safe-area-inset-top, 0px));
+    top: 8px;
     left: 50%;
     transform: translateX(-50%);
     width: min(560px, calc(100vw - 24px));
@@ -2178,7 +2178,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-hud.weather-hud .legend.weather-card {
     position: absolute;
-    top: calc(14px + env(safe-area-inset-top, 0px));
+    top: 14px;
     right: 12px;
     left: auto;
     width: min(338px, calc(100vw - 24px));
@@ -2192,7 +2192,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-wrap.wx-active .map-tools,
   .map-wrap.wx-active .tool-popover {
-    top: calc(14px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
+    top: calc(14px + var(--wx-card-h) + 10px);
   }
   .map-hud .time-bar {
     justify-content: center;
@@ -2204,7 +2204,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-tools,
   .tool-popover {
-    top: calc(116px + env(safe-area-inset-top, 0px));
+    top: 116px;
   }
   /* The on-screen zoom buttons collide with the floating UI / bottom dock;
      pinch-zoom covers it on touch, so drop the control corners entirely
@@ -2301,9 +2301,9 @@ input[type='range']::-moz-range-thumb {
     top: auto;
     right: 12px;
     left: 12px;
-    /* Clear the bottom dock (≈90px tall with the safe-area inset) and sit above it
-       in the stack so its controls are fully tappable. */
-    bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+    /* Clear the bottom dock (≈90px tall) and sit above it in the stack so its
+       controls are fully tappable. */
+    bottom: 104px;
     width: auto;
     max-width: 360px;
     margin: 0 auto;
@@ -2325,7 +2325,7 @@ input[type='range']::-moz-range-thumb {
     gap: 12px;
     max-width: 880px;
     margin: 0 auto;
-    padding: 14px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+    padding: 14px 18px 20px;
     /* The upward fade only reads as a soft vignette on a phone's short viewport;
        on iPad/desktop it becomes a conspicuous dark band across the map, so drop
        it here. Each dock control carries its own background, so legibility over
@@ -2392,7 +2392,7 @@ input[type='range']::-moz-range-thumb {
     margin-right: auto;
     max-height: 78vh;
     border-radius: 22px 22px 0 0;
-    padding: 0 20px calc(20px + env(safe-area-inset-bottom, 0px));
+    padding: 0 20px 20px;
   }
   .sheet-tab {
     font-size: 14px;
@@ -2621,7 +2621,7 @@ input[type='range']::-moz-range-thumb {
      controls no longer need to sit up inside it, so drop the extra bottom
      padding and let the dock settle down toward the edge (the map attribution
      is lifted to bottom:70px, so nothing collides). */
-  padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 10px 10px;
   background: none;
   z-index: 700;
 }
@@ -2821,7 +2821,7 @@ input[type='range']::-moz-range-thumb {
 .dock-tool-menu {
   position: absolute;
   right: 10px;
-  bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+  bottom: 70px;
   min-width: 200px;
   display: flex;
   flex-direction: column;
@@ -2896,7 +2896,7 @@ input[type='range']::-moz-range-thumb {
   position: absolute;
   left: 10px;
   right: 10px;
-  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  bottom: 18px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -3059,7 +3059,7 @@ input[type='range']::-moz-range-thumb {
   border-top: 1px solid var(--panel-edge);
   border-radius: 18px 18px 0 0;
   box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.65);
-  padding: 0 12px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 0 12px 16px;
   will-change: transform;
 }
 .sheet-header {
@@ -3393,7 +3393,7 @@ input[type='range']::-moz-range-thumb {
     border-left: 0;
     border-right: 0;
     border-bottom: 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: 0px;
   }
   .xs-head {
     flex-wrap: wrap;
@@ -3439,7 +3439,7 @@ input[type='range']::-moz-range-thumb {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px calc(12px);
-  padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  padding-top: 12px;
   border-bottom: 1px solid var(--panel-edge);
   background: var(--panel);
   backdrop-filter: blur(6px);
@@ -3477,7 +3477,7 @@ input[type='range']::-moz-range-thumb {
 .snd-body {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 14px 14px calc(20px + env(safe-area-inset-bottom, 0px));
+  padding: 14px 14px 20px;
 }
 .snd-status {
   text-align: center;
@@ -3575,7 +3575,7 @@ input[type='range']::-moz-range-thumb {
 @media (max-width: 819.98px) {
   .snd-head {
     padding: 8px 10px;
-    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    padding-top: 8px;
     gap: 8px;
   }
   .snd-title {
@@ -3601,7 +3601,7 @@ input[type='range']::-moz-range-thumb {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
     gap: 6px;
-    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 6px 6px;
   }
   .snd-charts {
     min-height: 0;
@@ -3764,7 +3764,7 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--glow);
 }
 .map-wrap.wx-active .map-tools {
-  top: calc(22px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
+  top: calc(22px + var(--wx-card-h) + 10px);
 }
 .map-tool {
   width: 40px;
@@ -4242,7 +4242,7 @@ body.storm-active .sidebar {
 .map-wrap.quad #legend.weather-card,
 .map-wrap.split + .legend.weather-card {
   top: auto;
-  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  bottom: 96px;
   left: 50%;
   right: auto;
   transform: translateX(-50%) translateY(var(--wx-swipe-y, 0));
@@ -4303,7 +4303,7 @@ body.storm-active .sidebar {
   color: var(--ink);
 }
 .map-wrap.wx-active .tool-popover {
-  top: calc(22px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
+  top: calc(22px + var(--wx-card-h) + 10px);
 }
 .split-badge .sb-dot {
   font-size: 9px;
@@ -4346,7 +4346,7 @@ body.storm-active .sidebar {
   /* The card drops to the very bottom (the dock/playback UI is hidden while it
      is open, so there's nothing to clear) to save vertical space. */
   .alert-preview {
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    bottom: 14px;
   }
   /* Hide the bottom dock + playback bar while an alert preview card is open. */
   .app.alert-preview-open .mobile-dock,
@@ -4356,7 +4356,7 @@ body.storm-active .sidebar {
   /* Storm track hides the bottom dock while active, so the card can sit low and
      centered; just enlarge the touch targets for phones. */
   .storm-panel {
-    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    bottom: 16px;
   }
   .storm-inputs {
     gap: 12px;
@@ -4378,7 +4378,7 @@ body.storm-active .sidebar {
   /* The top (stacked) pane's legend must clear the device status bar / notch;
      the bottom pane's legend sits at the seam and needs no inset. */
   .map-wrap.split #map2 .split-pane-legend {
-    top: calc(10px + env(safe-area-inset-top, 0px));
+    top: 10px;
   }
 }
 
@@ -4406,7 +4406,7 @@ body.storm-active .sidebar {
      status bar / notch. */
   .map-wrap.split #map .split-pane-legend,
   .map-wrap.split #map2 .split-pane-legend {
-    top: calc(10px + env(safe-area-inset-top, 0px));
+    top: 10px;
   }
 
   /* Four-quadrant split: four equal panes, each its own product over the same
@@ -4420,7 +4420,7 @@ body.storm-active .sidebar {
      quadrants sit at mid-screen and need no inset. */
   .map-wrap.quad #map .split-pane-legend,
   .map-wrap.quad #map2 .split-pane-legend {
-    top: calc(10px + env(safe-area-inset-top, 0px));
+    top: 10px;
   }
 }
 
@@ -4803,7 +4803,7 @@ body.storm-active .sidebar {
 
 .legend.weather-card {
   display: block;
-  top: calc(22px + env(safe-area-inset-top, 0px));
+  top: 22px;
   right: 26px;
   left: auto;
   transform: translateY(var(--wx-swipe-y, 0));
@@ -5488,7 +5488,7 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
     top: auto;
     right: 12px;
     left: 12px;
-    bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+    bottom: 104px;
     width: auto;
     max-width: 360px;
     margin: 0 auto;
@@ -5498,7 +5498,7 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
   .metar-panel {
     left: 14px;
     right: auto;
-    bottom: calc(124px + env(safe-area-inset-bottom, 0px));
+    bottom: 124px;
     max-width: min(210px, calc(100vw - 28px));
   }
 }
