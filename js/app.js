@@ -27,6 +27,7 @@ import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
+import { CrossSectionTool } from './xsect.js';
 import { SplitView } from './splitview.js';
 import { ExportTool } from './export.js';
 
@@ -774,20 +775,49 @@ function lruPut(cache, key, value, max) {
 }
 
 // Synchronous lookup: the LRU first, then a frame the background playback warm
-// already decoded (radar playback payloads *are* decoded volumes, keyed by the
-// same S3 key).
+// already decoded. Playback frames are *slim* volumes (only the looping
+// product's moment — see slimVolumeForMoment), so they can never be promoted
+// into the full-volume LRU: another product would find its moment missing.
 function peekDecodedVolume(key) {
   const hit = lruGet(volumeCache, key);
   if (hit) return hit;
   const pb = state.playback;
   if (pb && pb.cache) {
     const warm = pb.cache.get(key);
-    if (warm && warm.sweeps) {
+    if (warm && warm.sweeps && !warm.slim) {
       lruPut(volumeCache, key, warm, VOLUME_CACHE_MAX);
       return warm;
     }
   }
   return null;
+}
+
+// A view of a decoded volume keeping only one moment's data blocks (all tilts).
+// The gate arrays are shared with the source volume — nothing is copied — so a
+// slim frame retains ~1/6th of the full decode once the source volume ages out
+// of the LRU. This is what radar playback caches per frame: a loop only ever
+// draws one product, and a product switch tears the loop down anyway, so the
+// other five moments were pure dead weight (hundreds of MB across a loop).
+function slimVolumeForMoment(volume, moment) {
+  if (!volume || !volume.sweeps) return volume;
+  const sweeps = [];
+  for (const sw of volume.sweeps) {
+    const radials = [];
+    for (const r of sw.radials) {
+      const m = r.moments && r.moments[moment];
+      if (!m) continue;
+      radials.push({ azimuth: r.azimuth, elevation: r.elevation, nyquist: r.nyquist, moments: { [moment]: m } });
+    }
+    if (!radials.length) continue;
+    sweeps.push({
+      elevationNumber: sw.elevationNumber,
+      elevation: sw.elevation,
+      time: sw.time,
+      moments: [moment],
+      radials,
+    });
+  }
+  return { icao: volume.icao, site: volume.site, sweeps, slim: true };
 }
 
 function getDecodedVolume(key, onProgress) {
@@ -813,7 +843,9 @@ function prefetchAdjacentVolumes(key) {
   if (mqSmallScreen.matches || isL3Product(state.productId)) return;
   const i = state.volumes.findIndex((v) => v.key === key);
   if (i < 0) return;
-  for (const j of [i - 1, i + 1, i - 2]) {
+  // Immediate neighbours only: the LRU holds three volumes, so warming a third
+  // neighbour just evicted something still useful (and pinned an extra ~100 MB).
+  for (const j of [i - 1, i + 1]) {
     const v = state.volumes[j];
     if (!v || volumeCache.has(v.key) || volumeInflight.has(v.key)) continue;
     getDecodedVolume(v.key).catch(() => {});
@@ -879,6 +911,9 @@ const state = {
   radarOverlay: false,
   modelCityValues: true,
   cityValuesProducts: {},
+  // Appearance of the city data readouts (the value labels drawn above town
+  // names): font key (see CITY_READOUT_FONTS), size in px at zoom 12, and color.
+  cityReadout: { font: 'default', size: 24, color: '#ffffff' },
   layers: { enabled: false, activeId: null, items: [], seq: 1, renderSeq: 0, renderedIds: [], custom: {}, cache: new Map() },
   styleReady: false,
   geo: null,
@@ -1025,6 +1060,11 @@ function cacheEls() {
   el.modelCityValuesField = $('#modelCityValuesField');
   el.modelCityValuesToggle = $('#modelCityValuesToggle');
   el.cityValuesProducts = $('#cityValuesProducts');
+  el.cityReadoutStyle = $('#cityReadoutStyle');
+  el.cityFontSelect = $('#cityFontSelect');
+  el.citySize = $('#citySize');
+  el.citySizeVal = $('#citySizeVal');
+  el.cityColor = $('#cityColor');
   el.layerPanel = $('#layerPanel');
   el.layeringToggle = $('#layeringToggle');
   el.layerControls = $('#layerControls');
@@ -1208,6 +1248,7 @@ function cacheEls() {
   el.toolDraw = $('#toolDraw');
   el.toolMeasure = $('#toolMeasure');
   el.toolStorm = $('#toolStorm');
+  el.toolXsect = $('#toolXsect');
   el.toolInspect = $('#toolInspect');
   el.toolLocate = $('#toolLocate');
   el.toolSplit = $('#toolSplit');
@@ -1358,9 +1399,12 @@ function initMap() {
     setStatus(`nearest radar: ${r[0]} — ${r[1]}`);
   });
 
-  // Click / hover for the radar-site markers.
+  // Click / hover for the radar-site markers. Clicks belong to an armed
+  // click-consuming tool (cross-section endpoints in particular land near
+  // radar dots all the time) rather than switching sites.
   for (const siteLayer of ['sites', 'site-pills']) {
     map.on('click', siteLayer, (e) => {
+      if (clickConsumingToolActive()) return;
       const f = e.features && e.features[0];
       if (f) selectSite(f.properties.icao, f.properties.name);
     });
@@ -2424,6 +2468,8 @@ async function loadVolume(key) {
     buildTiltList();
     updateMeta();
     renderRadar();
+    // An open cross section tracks the live volume as new scans arrive.
+    if (state.xsect) state.xsect.refresh();
     setStatus(`loaded · ${volume.radialCount} radials`);
     prefetchAdjacentVolumes(key);
   } catch (e) {
@@ -2667,6 +2713,8 @@ function setMode(mode) {
     state.observations.grid = null;
   }
   if (state.layers && !state.layers.enabled) state.layers.cache.clear();
+  // Cross sections are radar-only; leaving radar mode closes an open section.
+  if (mode !== 'radar' && state.xsect && state.xsect.active()) state.xsect.close();
   // Each source keeps its own smoothing level — restore this mode's.
   applySmooth(state.smoothByMode[mode] ?? 0);
   if (mode !== 'satellite') clearSatellite();
@@ -3650,7 +3698,11 @@ function renderObservations() {
 function drawObservationPayload(payload) {
   const map = state.map;
   if (!map || !state.styleReady) return;
-  if (payload && payload.grid) state.observations.displayGrid = payload.grid;
+  // Loop frames carry packed codes only; decode the displayed frame's readout
+  // grid from them (memoised per payload) instead of pinning a full Float32
+  // grid on every cached frame.
+  const grid = payload && (payload.grid || gridFromPackedPayload(payload));
+  if (grid) state.observations.displayGrid = grid;
   setObservationSource(map);
   state.observations.layer.showPrepared(payload);
   state.observations.layer.setOpacity(state.opacity);
@@ -4047,6 +4099,28 @@ function clearModels() {
   clearModelCityValues();
 }
 
+// Font choices for the city readouts. 'default' keeps the original bold look;
+// the rest reuse the basemap glyph stacks offered for town labels.
+const CITY_READOUT_FONTS = {
+  default: { label: 'Open Sans Bold (default)', stack: ['Open Sans Bold', 'Arial Unicode MS Bold'] },
+  ...Object.fromEntries(Object.entries(TOWN_FONTS)
+    .filter(([, v]) => v.stack)
+    .map(([k, v]) => [k, { label: v.label, stack: v.stack }])),
+};
+
+function cityReadoutFontStack() {
+  const f = CITY_READOUT_FONTS[state.cityReadout.font] || CITY_READOUT_FONTS.default;
+  return f.stack;
+}
+
+// Zoom curve for the readout text, anchored so the user-chosen size applies at
+// zoom 12 and scales down at lower zooms (matches the original 16/20/24 curve).
+function cityReadoutTextSize() {
+  const s = state.cityReadout.size || 24;
+  return ['interpolate', ['linear'], ['zoom'],
+    4, Math.round(s * (16 / 24)), 8, Math.round(s * (20 / 24)), 12, s];
+}
+
 function setupModelCityValueLayer(map) {
   if (!map.getSource(MODEL_CITY_VALUE_SOURCE))
     map.addSource(MODEL_CITY_VALUE_SOURCE, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
@@ -4059,19 +4133,32 @@ function setupModelCityValueLayer(map) {
       layout: {
         visibility: 'none',
         'text-field': ['get', 'label'],
-        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-        'text-size': ['interpolate', ['linear'], ['zoom'], 4, 16, 8, 20, 12, 24],
+        'text-font': cityReadoutFontStack(),
+        'text-size': cityReadoutTextSize(),
         'text-offset': [0, -1.2],
         'text-anchor': 'bottom',
         'text-allow-overlap': true,
         'text-ignore-placement': true,
       },
       paint: {
-        'text-color': '#ffffff',
+        'text-color': state.cityReadout.color || '#ffffff',
         'text-halo-color': 'rgba(4,10,18,0.92)',
         'text-halo-width': 2.4,
       },
     });
+  }
+}
+
+// Re-apply the user's readout font/size/color to every pane's live city-value
+// layer (the main map and any split panes).
+function applyCityReadoutStyle() {
+  for (const { map } of cityValueEntries()) {
+    if (!map || !map.getLayer || !map.getLayer(MODEL_CITY_VALUE_LAYER)) continue;
+    try {
+      map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'text-font', cityReadoutFontStack());
+      map.setLayoutProperty(MODEL_CITY_VALUE_LAYER, 'text-size', cityReadoutTextSize());
+      map.setPaintProperty(MODEL_CITY_VALUE_LAYER, 'text-color', state.cityReadout.color || '#ffffff');
+    } catch (_) { /* style mid-reload — the next setup pass reapplies */ }
   }
 }
 
@@ -4111,6 +4198,7 @@ function buildCityValueProductControls() {
   const products = cityValueProductsForMode();
   const show = GRID_CITY_VALUE_MODES.has(state.mode) && state.modelCityValues && products.length;
   el.cityValuesProducts.hidden = !show;
+  if (el.cityReadoutStyle) el.cityReadoutStyle.hidden = !show;
   el.cityValuesProducts.innerHTML = '';
   if (!show) return;
   for (const [id, product] of products) {
@@ -4772,7 +4860,9 @@ async function loadLayerRadarVolume(siteId, seq) {
   } catch (_) { return hit ? hit.volume : null; }
   if (!volume) return hit ? hit.volume : null;
   cache.set(siteId, { volume, key, ts: Date.now() });
-  while (cache.size > (CONSTRAINED_DEVICE ? 1 : 4)) cache.delete(cache.keys().next().value);
+  // Two sites of layer-stack radar are plenty; each entry is a full decoded
+  // volume, so a wider cache quietly pinned several hundred MB.
+  while (cache.size > (CONSTRAINED_DEVICE ? 1 : 2)) cache.delete(cache.keys().next().value);
   return volume;
 }
 
@@ -5510,8 +5600,16 @@ function toggleInspect(on) {
 // ---------------------------------------------------------------------------
 function activeModalTool() {
   if (state.mapTools && state.mapTools.tool) return state.mapTools.tool;
+  if (state.xsect && state.xsect.active()) return 'xsect';
   if (state.inspect) return 'inspect';
   return null;
+}
+
+// True while a tool that consumes map clicks is armed — used to keep those
+// clicks from also opening alert briefings / storm cards / outlook popups or
+// switching radar sites.
+function clickConsumingToolActive() {
+  return !!((state.mapTools && state.mapTools.tool) || (state.xsect && state.xsect.armed));
 }
 
 function deactivateModalTool(id) {
@@ -5521,6 +5619,9 @@ function deactivateModalTool(id) {
     case 'storm':
       if (state.mapTools) state.mapTools.setTool(null);
       if (state._syncToolButtons) state._syncToolButtons();
+      break;
+    case 'xsect':
+      if (state.xsect) state.xsect.close();
       break;
     case 'inspect':
       if (state.inspect) toggleInspect(false);
@@ -6303,7 +6404,7 @@ function setupSpcOutlook() {
     },
     // Keep MD and alert views mutually exclusive (they share the same chrome).
     closeAlerts: () => { if (state.alerts) { state.alerts.closePreview(); state.alerts.closeDetail(); } },
-    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
+    suppressClick: () => clickConsumingToolActive(),
   });
   state.spc.wireMap();
   // Restore saved product/detail before building the pickers and applying state.
@@ -6804,7 +6905,12 @@ function compactGridForConstrainedDevice(grid) {
 // product, run, sector…) the cached frames are no longer valid and are dropped.
 function playbackContextKey() {
   const m = state.mode;
-  if (m === 'radar') return `radar:${state.site}`;
+  // Radar frames are cached slim (one moment), so the moment is part of the
+  // context: a REF loop's frames are useless to a VEL loop.
+  if (m === 'radar') {
+    const moment = (PRODUCTS[state.productId] && PRODUCTS[state.productId].moment) || state.productId;
+    return `radar:${state.site}:${moment}`;
+  }
   if (m === 'mrms') return `mrms:${state.mrms.productId}`;
   if (m === 'satellite')
     return `sat:${state.sat.satKey}:${state.sat.sectorKey}:${state.sat.conusView}:${state.sat.productId}:${state.sat.enhanceIR}`;
@@ -6852,9 +6958,14 @@ async function buildPlaybackProvider(opts = {}) {
       };
     }
     const frames = allFrames ? state.volumes : await buildRadarPlaybackFrames(n);
+    // Cache slim per-product volumes, not full decodes: a loop draws exactly one
+    // product, and holding every moment of every frame is what used to pin
+    // hundreds of MB per loop. The full decode still passes through the shared
+    // volume LRU (getDecodedVolume), so arrow-key stepping stays warm.
+    const moment = (PRODUCTS[state.productId] && PRODUCTS[state.productId].moment) || 'REF';
     return {
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
-      async load(f) { return await getDecodedVolume(f.key); },
+      async load(f) { return slimVolumeForMoment(await getDecodedVolume(f.key), moment); },
       render(vol) { displaySweep(pickSweep(vol.sweeps), vol.site); },
       idle() { displaySweep(currentSweep(), state.volume && state.volume.site); },
     };
@@ -6865,7 +6976,10 @@ async function buildPlaybackProvider(opts = {}) {
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
         const grid = await loadMrms(state.mrms.productId, f.key);
-        return prepareGridTexture(grid, resolveGridProduct(grid.product));
+        // Packed 16-bit codes (2 bytes/cell) instead of the RGBA upload buffer
+        // (4 bytes/cell): halves every resident loop frame; the RGBA is expanded
+        // into a shared scratch at upload time.
+        return prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
       },
       render(payload) { drawMrmsPayload(payload); },
       idle() { renderMrms(); },
@@ -6879,13 +6993,23 @@ async function buildPlaybackProvider(opts = {}) {
         frames: frames.map((v) => ({ label: v.label, time: v.time, ck: `${state.sat.satKey}:${v.key}`, key: v.key })),
         async load(f) {
           const grid = await loadMirsGrid(state.sat.satKey, f.key, state.sat.productId);
-          return prepareGridTexture(grid, resolveGridProduct(grid.product));
+          return prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
         },
         render(payload) { drawMirsPayload(payload); },
         idle() { renderSatellite(); },
       };
     }
+    // A CONUS frame's prebuilt RGBA is ~15 MB, a full-disk frame ~118 MB — a
+    // resident full-disk loop used to pin over half a GB. Budget the resident
+    // RGBA bytes instead: once the first frame reveals the real frame size, the
+    // window is sized to the budget and the loop streams through it (a window
+    // at least as long as the loop behaves exactly like the old resident path,
+    // so CONUS/meso loops are unchanged; only oversized loops start recycling).
+    const satLoopBudget = CONSTRAINED_DEVICE ? 64e6 : 320e6;
     return {
+      streaming: true,
+      maxCachedFrames: 3, // conservative until the first frame sizes the budget
+      prefetchAhead: 3,
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
         const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
@@ -6893,6 +7017,12 @@ async function buildPlaybackProvider(opts = {}) {
         // Playback only needs the prebuilt RGBA per frame, not the channels — drop
         // the worker's cached decode so a long loop can't pin many full-disk files.
         if (f.key !== state.sat.sceneKey) evictScene(f.key);
+        if (!this._sized && payload.rgba && payload.rgba.byteLength) {
+          this._sized = true;
+          const fit = Math.floor(satLoopBudget / payload.rgba.byteLength);
+          this.maxCachedFrames = Math.max(2, Math.min(this.frames ? this.frames.length : fit, fit));
+          this.prefetchAhead = Math.max(1, Math.min(3, this.maxCachedFrames - 1));
+        }
         return payload;
       },
       render(payload) { drawSatScene(payload.meta, payload.rgba, payload.bbox); },
@@ -6966,8 +7096,12 @@ async function buildPlaybackProvider(opts = {}) {
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
         const grid = await loadObservation(state.observations.productId, f.key);
-        const payload = prepareGridTexture(grid, resolveGridProduct(grid.product));
-        payload.grid = grid;
+        // Packed codes only — retaining each frame's full Float32 grid for the
+        // readouts pinned ~15 MB per loop frame. The readout grid for the
+        // displayed frame is decoded from the codes on demand instead (see
+        // drawObservationPayload / gridFromPackedPayload).
+        const payload = prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
+        payload.meta = { product: grid.product, time: grid.time };
         return payload;
       },
       render(payload) { drawObservationPayload(payload); },
@@ -7773,6 +7907,16 @@ function setupMapTools() {
   // Storm track hands its ordered town list here; show it in the side briefing.
   state.mapTools.onTowns = (data) => renderStormBriefing(data);
 
+  // Vertical cross sections through the loaded Level II volume (all products).
+  state.xsect = new CrossSectionTool({
+    map: state.map,
+    getVolume: () => state.volume,
+    getProductId: () => state.productId,
+    getDealias: () => state.dealias,
+    onStatus: (msg) => setStatus(msg),
+    onToolEnd: () => syncToolButtons(),
+  });
+
   const toolButtons = [
     [el.toolDraw, 'draw'],
     [el.toolMeasure, 'measure'],
@@ -7781,6 +7925,7 @@ function setupMapTools() {
   function syncToolButtons() {
     for (const [btn, name] of toolButtons)
       btn.classList.toggle('active', state.mapTools.tool === name);
+    if (el.toolXsect) el.toolXsect.classList.toggle('active', !!(state.xsect && state.xsect.active()));
     // Storm track takes over the screen: hide the bottom UI (dock, legend,
     // footer) so the track + town list own the view (CSS keys off this class).
     document.body.classList.toggle('storm-active', state.mapTools.tool === 'storm');
@@ -7810,6 +7955,18 @@ function setupMapTools() {
     state.mapTools.clearAll();
     syncToolButtons();
   });
+
+  if (el.toolXsect) {
+    el.toolXsect.addEventListener('click', () => {
+      if (state.mode !== 'radar') {
+        setStatus('cross sections read the Level II volume — switch to RADAR');
+        return;
+      }
+      if (!state.xsect.active()) clearOtherTools('xsect');
+      state.xsect.toggle();
+      syncToolButtons();
+    });
+  }
 
   // Split screen - synced comparison panes showing different products.
   state.splitView = new SplitView({
@@ -7989,9 +8146,13 @@ function toolIconMarkup(icon) {
 
 // The tools offered in the mobile dock slot. Kept as a function (rather than the
 // constant list) so source-specific filtering can be reintroduced if needed.
+const XSECT_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><path d="M3 20h18"/><path d="M4 20c2.2-7 3.8-10.5 5.5-10.5S12.4 15 14 15s3-9 6-9"/><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/></svg>';
+
 const MOBILE_TOOL_DEFS = [
   { id: 'inspect', icon: 'crosshair', label: 'Inspect a pixel', btn: () => el.inspectBtn },
   { id: 'storm', icon: CONE_ICON, label: 'Storm track', btn: () => el.toolStorm },
+  { id: 'xsect', icon: XSECT_ICON, label: 'Cross section', btn: () => el.toolXsect },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
   { id: 'locate', icon: 'navigation', label: 'My live location', btn: () => el.toolLocate },
@@ -8276,7 +8437,7 @@ const DEFAULT_KEYBINDS = {
 const TOOL_ACTION_BTN = {
   inspect: 'inspectBtn',
   storm: 'toolStorm', measure: 'toolMeasure', draw: 'toolDraw',
-  metars: 'metarsToggle', locate: 'toolLocate',
+  metars: 'metarsToggle', locate: 'toolLocate', xsect: 'toolXsect',
   split: 'toolSplit', export: 'toolExport', clear: 'toolClear',
 };
 const TOOL_ACTIONS = [
@@ -8972,6 +9133,7 @@ function saveSettings() {
         metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
         modelCityValues: state.modelCityValues,
         cityValuesProducts: state.cityValuesProducts,
+        cityReadout: state.cityReadout,
         layers: {
           enabled: !!state.layers.enabled,
           activeId: state.layers.activeId,
@@ -9081,6 +9243,12 @@ function applyStoredSettings(s) {
     for (const [key, val] of Object.entries(s.cityValuesProducts)) {
       if (typeof val === 'boolean') state.cityValuesProducts[key] = val;
     }
+  }
+  if (s.cityReadout && typeof s.cityReadout === 'object') {
+    if (typeof s.cityReadout.font === 'string') state.cityReadout.font = s.cityReadout.font;
+    if (typeof s.cityReadout.size === 'number')
+      state.cityReadout.size = Math.max(8, Math.min(48, s.cityReadout.size | 0));
+    if (typeof s.cityReadout.color === 'string') state.cityReadout.color = s.cityReadout.color;
   }
   if (s.layers && typeof s.layers === 'object') {
     state.layers.enabled = !!s.layers.enabled;
@@ -9483,6 +9651,37 @@ function init() {
     });
   }
 
+  // City readout appearance: font / size / color.
+  if (el.cityFontSelect) {
+    el.cityFontSelect.innerHTML = Object.entries(CITY_READOUT_FONTS)
+      .map(([k, v]) => `<option value="${k}">${v.label}</option>`)
+      .join('');
+    el.cityFontSelect.value = CITY_READOUT_FONTS[state.cityReadout.font] ? state.cityReadout.font : 'default';
+    el.cityFontSelect.addEventListener('change', () => {
+      state.cityReadout.font = CITY_READOUT_FONTS[el.cityFontSelect.value] ? el.cityFontSelect.value : 'default';
+      applyCityReadoutStyle();
+      saveSettings();
+    });
+  }
+  if (el.citySize) {
+    el.citySize.value = String(state.cityReadout.size);
+    if (el.citySizeVal) el.citySizeVal.textContent = String(state.cityReadout.size);
+    el.citySize.addEventListener('input', () => {
+      state.cityReadout.size = Math.max(8, Math.min(48, Number(el.citySize.value) || 24));
+      if (el.citySizeVal) el.citySizeVal.textContent = String(state.cityReadout.size);
+      applyCityReadoutStyle();
+      saveSettings();
+    });
+  }
+  if (el.cityColor) {
+    el.cityColor.value = state.cityReadout.color || '#ffffff';
+    el.cityColor.addEventListener('input', () => {
+      state.cityReadout.color = el.cityColor.value || '#ffffff';
+      applyCityReadoutStyle();
+      saveSettings();
+    });
+  }
+
   // Desktop playback trigger (mobile uses the dock's ▶ button).
   if (el.loopBtn) {
     el.loopBtn.addEventListener('click', () => {
@@ -9531,7 +9730,7 @@ function init() {
     previewCard: el.alertPreviewCard,
     // Suppress alert briefings while a click-consuming map tool is active, so
     // placing storm-track points / measure vertices doesn't also pop an alert.
-    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
+    suppressClick: () => clickConsumingToolActive(),
   });
   state.alerts.start();
   // Apply the restored alerts on/off preference (default on).
@@ -9552,7 +9751,7 @@ function init() {
     previewCard: el.cyclonePreviewCard,
     // Same guard as alerts: while a click-consuming map tool is active, taps
     // belong to the tool, not to opening a storm card.
-    suppressClick: () => !!(state.mapTools && state.mapTools.tool),
+    suppressClick: () => clickConsumingToolActive(),
     onViewSatellite: (storm) => viewCycloneOnSatellite(storm),
     // A new storm set changes the satellite sector picker's cyclone options.
     onStormsChanged: () => rebuildSectorSelect(),

@@ -141,11 +141,17 @@ function parseMomentBlock(r, o) {
   const offset = r.f32(o + 24);
   const dataStart = o + 28;
 
-  // Decode raw codes to physical units lazily-friendly typed arrays.
-  const raw = new Uint16Array(gateCount);
+  // Decode raw codes into the narrowest typed array that fits the word size.
+  // Most moments (REF/VEL/SW/ZDR/RHO…) are 8-bit; storing them as Uint8Array
+  // instead of Uint16Array halves the resident size of every decoded volume,
+  // which dominates the app's memory in radar mode. Consumers index `raw[i]`
+  // generically, so the element type is transparent to them.
+  let raw;
   if (wordSize === 16) {
+    raw = new Uint16Array(gateCount);
     for (let i = 0; i < gateCount; i++) raw[i] = r.u16(dataStart + i * 2);
   } else {
+    raw = new Uint8Array(gateCount);
     for (let i = 0; i < gateCount; i++) raw[i] = r.u8(dataStart + i);
   }
 

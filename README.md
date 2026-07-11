@@ -426,6 +426,14 @@ that draw straight onto the scope:
 - **Storm track** (`js/maptools.js`) — mark a storm's position and heading,
   project its path forward at an adjustable speed/time, and label the **towns in
   its path with ETAs** (town names from the `api.weather.gov` point endpoint).
+- **Cross section** (`js/xsect.js`) — click two points (A → B) in radar mode to
+  slice the loaded Level II volume vertically. Every elevation sweep carrying
+  the selected product's moment is sampled along the line (nearest radial +
+  gate, 4/3-earth beam heights) and painted RHI-style with the product's own
+  color table — works for **all Level II products** (REF, VEL, SRV, SW, RHO,
+  ZDR, PHI), with velocity dealiased the same way the map shows it. The panel
+  has height (kft) and distance (mi) axes, a hover readout (value · height ·
+  distance · tilt), in-panel product switching, and tracks live volume updates.
 - **Split screen** (`js/splitview.js`) — a second, camera-synced pane showing a
   **different product** over the exact same view: side-by-side on desktop,
   stacked (chosen product on top) on mobile. For radar, any moment from the

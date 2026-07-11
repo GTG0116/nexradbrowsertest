@@ -150,6 +150,18 @@ function compile(gl, type, src) {
   return sh;
 }
 
+// Shared scratch for the resampled polar grid. A super-res sweep's grid is
+// ~10 MB; allocating a fresh one for every rendered frame (each playback tick,
+// tilt/product change, split-pane repaint) produced constant multi-MB garbage.
+// The GL driver copies texels out of the buffer synchronously inside
+// texImage2D, so one reusable buffer can serve every radar layer — it is only
+// retained (cloned) in the rare pre-GL "pending" path (see setSweep).
+let gridScratch = null;
+function gridScratchFor(bytes) {
+  if (!gridScratch || gridScratch.length < bytes) gridScratch = new Uint8Array(bytes);
+  return gridScratch;
+}
+
 // Resample a sweep's radials into a regular [NAZ x gateCount] grid of gate codes,
 // encoded as RG bytes (low, high). Returns { data, w, h } or null if empty.
 function buildGrid(sweep, moment) {
@@ -168,7 +180,9 @@ function buildGrid(sweep, moment) {
 
   const w = gateCount;
   const h = NAZ;
-  const data = new Uint8Array(w * h * 4);
+  const bytes = w * h * 4;
+  const data = gridScratchFor(bytes);
+  data.fill(0, 0, bytes);
   const nb = beams.length;
   // Beams are sorted by azimuth; as the bin centre sweeps upward, the first beam
   // past the centre only moves forward, so a single advancing cursor finds it.
@@ -312,6 +326,10 @@ export function createRadarLayer(id = 'radar') {
         this._upload(payload);
         this.pending = null;
       } else {
+        // No GL yet (style still loading): the grid points at the shared
+        // scratch, which the next buildGrid call will overwrite — keep a
+        // private copy for the deferred upload.
+        payload.grid = { ...grid, data: grid.data.slice(0, grid.w * grid.h * 4) };
         this.pending = payload;
       }
       this.has = true;

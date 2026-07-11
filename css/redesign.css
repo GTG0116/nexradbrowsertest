@@ -2025,6 +2025,12 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   .app.sidebar-hidden .sidebar-resize { left: 0; }
   .app.sidebar-hidden .sidebar-collapse { left: 8px; }
   .app.sidebar-hidden .sidebar-collapse .lucide { transform: rotate(180deg); }
+  /* While the Settings drawer covers the sidebar, its title occupies the
+     top-left corner the collapse control normally sits in. Park the button
+     just outside the drawer's right edge so neither overlaps the other. */
+  .app:not(.mobile).sheet-open .sidebar-collapse {
+    left: calc(var(--sidebar-w) + 10px);
+  }
   /* The open/close control occupies the sidebar's top-left corner. Give the
      first control group its own row so the button never covers Source. */
   .app:not(.sidebar-hidden) .sidebar > #sourcePanel {
