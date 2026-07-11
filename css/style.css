@@ -857,6 +857,21 @@ input[type='range']::-moz-range-thumb {
   font-weight: 700;
 }
 
+/* Appearance controls for the city data readouts (font / size / color). */
+.city-readout-style {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.14);
+}
+.city-readout-style .field {
+  margin: 0;
+}
+
 /* Layer stack: a framed editor with a clear toolbar and top-to-bottom draw-order
    list. Each entry is a small card; the active one gets a coral rail down its
    left edge so the current selection is obvious at a glance. */
@@ -1510,10 +1525,13 @@ input[type='range']::-moz-range-thumb {
   .app.alert-mode .stage {
     margin-left: var(--alert-panel-w);
   }
-  /* The legend is a viewport-fixed full-width strip; shift its left edge to the
-     panel boundary so it spans only the visible map, not the briefing panel. */
+  /* The legend strip is positioned inside the map stage, and in alert mode the
+     stage itself already starts at the briefing panel's right edge (see
+     `.app.alert-mode .stage`). Anchoring the legend at 0 makes it span the whole
+     visible map; offsetting it by the panel width again (the old rule) left a
+     dead panel-wide gap on its left side. */
   .app.alert-mode .legend:not(.weather-card) {
-    left: var(--alert-panel-w);
+    left: 0;
   }
 }
 /* On phones the briefing is a bottom sheet (64% tall). Lift the legend clear of
@@ -1810,9 +1828,11 @@ input[type='range']::-moz-range-thumb {
 .alert-close {
   position: absolute;
   /* Clear the status bar / notch so the close button is tappable on full-screen
-     mobile (it floats over the briefing, outside the padded scroll container). */
+     mobile (it floats over the briefing, outside the padded scroll container).
+     Desktop: track the panel's actual width (it varies with the viewport) so
+     the button always floats just outside the briefing's right edge. */
   top: calc(14px + env(safe-area-inset-top, 0px));
-  left: 372px;
+  left: calc(var(--alert-panel-w, 360px) + 12px);
   z-index: 1300;
   pointer-events: auto;
   width: 34px;
@@ -2224,16 +2244,21 @@ input[type='range']::-moz-range-thumb {
     width: 100%;
     max-width: 100%;
   }
+  /* On phones the briefing is a bottom sheet (lower 64% of the screen), so a
+     close button pinned to the top of the viewport floats over the map, far
+     from the panel it closes, and is easy to miss. Dock it to the sheet's top
+     right corner instead — riding just above the sheet edge, over the visible
+     map — where it clearly belongs to the briefing and is thumb-reachable. */
   .alert-close {
+    top: auto;
+    bottom: calc(64% + 12px);
     left: auto;
     right: 12px;
-    width: 40px;
-    height: 40px;
-  }
-  /* On full-screen mobile the close button floats over the (full-width) cycle
-     bar; keep the next-alert arrow clear of it so both stay tappable. */
-  .alert-nav {
-    padding-right: 60px;
+    width: 44px;
+    height: 44px;
+    font-size: 18px;
+    border-color: var(--accent-border, var(--panel-edge));
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   }
 }
 
@@ -3246,6 +3271,142 @@ input[type='range']::-moz-range-thumb {
 .dock-tool[hidden],
 .map-tool[hidden] {
   display: none !important;
+}
+
+/* ---------------- Cross section (Level II vertical slice) ---------------- */
+/* Floating console over the lower map: header (title + product switch + close)
+   above the section canvas. Desktop centres it over the map stage (right of the
+   sidebar); mobile docks it as a bottom sheet. */
+.xsect {
+  position: fixed;
+  z-index: 1240;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  width: min(980px, calc(100vw - 32px));
+  border: 1px solid var(--panel-edge);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
+}
+.app:not(.mobile) .xsect {
+  left: calc(var(--sidebar-w, 284px) + (100vw - var(--sidebar-w, 284px)) / 2);
+  width: min(980px, calc(100vw - var(--sidebar-w, 284px) - 32px));
+}
+.app.sidebar-hidden .xsect {
+  left: 50%;
+  width: min(980px, calc(100vw - 32px));
+}
+.xs-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 8px;
+}
+.xs-title h2 {
+  margin: 0;
+  font: 700 13px 'JetBrains Mono', monospace;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.xs-meta {
+  margin-top: 2px;
+  font: 600 10px 'JetBrains Mono', monospace;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xs-products {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+.xs-products button {
+  border: 1px solid var(--panel-edge);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--ink-dim);
+  padding: 5px 8px;
+  font: 700 10px 'JetBrains Mono', monospace;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.xs-products button:hover {
+  border-color: var(--accent-border);
+  color: var(--ink);
+}
+.xs-products button.active {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+.xs-close {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-edge);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+.xs-close:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.xs-body {
+  position: relative;
+  padding: 0 12px 12px;
+}
+.xs-canvas {
+  display: block;
+  width: 100%;
+  height: min(300px, 34vh);
+  border-radius: 9px;
+}
+.xs-read {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  padding: 3px 8px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 600 10px 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+@media (max-width: 759.98px) {
+  .xsect {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
+    width: 100%;
+    border-radius: 16px 16px 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .xs-head {
+    flex-wrap: wrap;
+  }
+  .xs-products {
+    order: 3;
+    flex-basis: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+  .xs-canvas {
+    height: 36vh;
+  }
 }
 
 .sounding {

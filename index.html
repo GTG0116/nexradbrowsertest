@@ -391,6 +391,9 @@
                    forecast cone fanning out from it, echoing the wedge the
                    storm-track tool draws on the map. -->
               <button id="toolStorm" class="map-tool" title="Storm track (towns &amp; ETAs)"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><circle cx="5" cy="19" r="1"/><path d="M6.6 15.1L11.3 4.3A16 16 0 0 1 19.7 12.8L8.9 17.4A4.2 4.2 0 0 0 6.6 15.1Z"/></svg></button>
+              <!-- Custom slice glyph: a terrain/echo profile with a dashed
+                   vertical cut, matching the cross-section tool's function. -->
+              <button id="toolXsect" class="map-tool" title="Cross section (click two points, radar Level II)"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><path d="M3 20h18"/><path d="M4 20c2.2-7 3.8-10.5 5.5-10.5S12.4 15 14 15s3-9 6-9"/><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/></svg></button>
               <button id="toolInspect" class="map-tool" title="Inspect a pixel"><i data-lucide="crosshair" class="lucide sm"></i></button>
               <button id="toolLocate" class="map-tool" title="Show my live location"><i data-lucide="navigation" class="lucide sm"></i></button>
               <button id="toolExport" class="map-tool" title="Export / share image"><i data-lucide="download" class="lucide sm"></i></button>
@@ -450,6 +453,24 @@
             <button id="modelCityValuesToggle" class="alerts-toggle active" title="Show sampled grid values above city labels">ON</button>
           </div>
           <div id="cityValuesProducts" class="city-product-list" hidden></div>
+          <!-- Appearance of the city data readouts (font / size / color),
+               shown alongside the City values toggle when it applies. -->
+          <div id="cityReadoutStyle" class="city-readout-style" hidden>
+            <label class="field">
+              <span>Readout font</span>
+              <select id="cityFontSelect"></select>
+            </label>
+            <label class="field opacity-field">
+              <span>Readout size <b id="citySizeVal">24</b></span>
+              <input type="range" id="citySize" min="12" max="40" step="1" value="24" title="Text size of the city data readouts" />
+            </label>
+            <div class="ms-line">
+              <span class="ms-line-name">Readout color</span>
+              <div class="ms-line-color">
+                <input type="color" id="cityColor" value="#ffffff" />
+              </div>
+            </div>
+          </div>
           <div class="group-label">Overlays</div>
           <div class="toggle-field" id="metarsField">
             <span>METAR overlay</span>
