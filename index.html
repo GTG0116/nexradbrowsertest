@@ -5,7 +5,9 @@
     <!-- maximum-scale=1 stops iPad/iOS Safari from zooming the page when a form
          control is focused (the map provides its own zoom, so page zoom isn't
          needed); viewport-fit=cover lets the page extend edge-to-edge on
-         devices with a notch/home indicator (no safe-area padding is reserved). -->
+         devices with a notch/home indicator. The map reserves no safe-area
+         space; only the floating top chrome is offset below the Dynamic
+         Island (see the env(safe-area-inset-top) rules in the stylesheets). -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
