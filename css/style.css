@@ -1038,7 +1038,7 @@ input[type='range']::-moz-range-thumb {
 }
 .hud-left {
   position: absolute;
-  top: 18px;
+  top: calc(18px + env(safe-area-inset-top, 0px));
   left: 18px;
   z-index: 20;
   display: flex;
@@ -1062,7 +1062,7 @@ input[type='range']::-moz-range-thumb {
 .breadcrumb .lucide { color: var(--accent); }
 .legend {
   position: absolute;
-  top: 18px;
+  top: calc(18px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 15;
@@ -1771,7 +1771,7 @@ input[type='range']::-moz-range-thumb {
      top:0) sticks just below the inset and the first briefing header isn't hidden
      under the notch — fixing the "all the close/switch UI is in the top safe
      space" report on full-screen mobile. Desktop's inset is 0, so it's a no-op. */
-  padding-top: 0px;
+  padding-top: env(safe-area-inset-top, 0px);
   pointer-events: auto;
   background: var(--panel);
   border-right: 1px solid var(--panel-edge);
@@ -1831,7 +1831,7 @@ input[type='range']::-moz-range-thumb {
      mobile (it floats over the briefing, outside the padded scroll container).
      Desktop: track the panel's actual width (it varies with the viewport) so
      the button always floats just outside the briefing's right edge. */
-  top: 14px;
+  top: calc(14px + env(safe-area-inset-top, 0px));
   left: calc(var(--alert-panel-w, 360px) + 12px);
   z-index: 1300;
   pointer-events: auto;
@@ -2144,7 +2144,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-hud {
     position: absolute;
-    top: 8px;
+    top: calc(8px + env(safe-area-inset-top, 0px));
     left: 50%;
     transform: translateX(-50%);
     width: min(560px, calc(100vw - 24px));
@@ -2178,7 +2178,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-hud.weather-hud .legend.weather-card {
     position: absolute;
-    top: 14px;
+    top: calc(14px + env(safe-area-inset-top, 0px));
     right: 12px;
     left: auto;
     width: min(338px, calc(100vw - 24px));
@@ -2192,7 +2192,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-wrap.wx-active .map-tools,
   .map-wrap.wx-active .tool-popover {
-    top: calc(14px + var(--wx-card-h) + 10px);
+    top: calc(14px + env(safe-area-inset-top, 0px) + var(--wx-card-h) + 10px);
   }
   .map-hud .time-bar {
     justify-content: center;
@@ -2204,7 +2204,7 @@ input[type='range']::-moz-range-thumb {
   }
   .map-tools,
   .tool-popover {
-    top: 116px;
+    top: calc(116px + env(safe-area-inset-top, 0px));
   }
   /* The on-screen zoom buttons collide with the floating UI / bottom dock;
      pinch-zoom covers it on touch, so drop the control corners entirely
@@ -3439,7 +3439,7 @@ input[type='range']::-moz-range-thumb {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px calc(12px);
-  padding-top: 12px;
+  padding-top: calc(12px + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid var(--panel-edge);
   background: var(--panel);
   backdrop-filter: blur(6px);

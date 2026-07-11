@@ -1169,6 +1169,9 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 .snd-head {
   min-height: 58px;
   padding: 9px 16px;
+  /* Keep the ✕ below the status bar / Dynamic Island when iOS lays the page
+     out edge-to-edge; collapses to the plain 9px when the inset is 0. */
+  padding-top: calc(9px + env(safe-area-inset-top, 0px));
   background: var(--panel);
   border-bottom-color: var(--panel-edge);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -1687,10 +1690,11 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .map-hud {
-    /* iOS PWAs already get the full visual viewport with viewport-fit=cover;
-       keep the primary chrome in that space instead of reserving browser-style
-       safe-area gutters that Chrome/Safari normally cover with their UI. */
-    top: 10px;
+    /* The map runs edge-to-edge (no reserved gutters); only the floating top
+       chrome is offset by the top inset so it sits below the Dynamic Island /
+       status bar instead of underneath it. env() is 0 wherever the browser
+       doesn't extend the page under the island, so this is a no-op there. */
+    top: calc(10px + env(safe-area-inset-top, 0px));
     width: calc(100vw - 24px);
     gap: 7px;
   }
@@ -1722,7 +1726,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
 
   .map-tools {
-    top: 62px;
+    top: calc(62px + env(safe-area-inset-top, 0px));
     right: 10px;
     display: flex;
     gap: 3px;
@@ -1877,7 +1881,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   .snd-head {
     min-height: 52px;
     padding: 8px 12px;
-    padding-top: 8px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
   }
 
   .snd-title h2 {
@@ -2185,7 +2189,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   /* ---- Floating top bar: site chip + LIVE + theme toggle ---- */
   .mobile-topbar {
     position: absolute;
-    top: 10px;
+    top: calc(10px + env(safe-area-inset-top, 0px));
     left: 12px;
     right: 12px;
     z-index: 16;
@@ -2318,7 +2322,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
   /* ---- Right-side rail: a single swappable tool slot ---- */
   .map-tools {
-    top: 68px;
+    top: calc(68px + env(safe-area-inset-top, 0px));
     right: 12px;
     display: flex;
     flex-direction: column;
@@ -2380,7 +2384,7 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   }
   /* The chooser opens from the rail toward the map (down + left of the slot). */
   .dock-tool-menu {
-    top: 72px;
+    top: calc(72px + env(safe-area-inset-top, 0px));
     right: 64px;
     bottom: auto;
     transform-origin: top right;
@@ -2416,19 +2420,19 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
    Mobile overlap/safe-area corrections
    -------------------------------------------------------------------------- */
 @media (max-width: 759.98px) {
-  /* Use the full visual viewport on iOS: the app already runs under a
-     translucent status bar, so do not reserve extra notch/home-indicator space
-     that turns into unusable bands around the map. */
+  /* The page itself stays edge-to-edge (no reserved bands around the map).
+     Only the floating top chrome is pushed down by the top inset so it clears
+     the Dynamic Island / status bar; bottom controls keep fixed offsets. */
   .mobile-topbar {
-    top: 10px;
+    top: calc(10px + env(safe-area-inset-top, 0px));
   }
 
   .map-tools {
-    top: 62px;
+    top: calc(62px + env(safe-area-inset-top, 0px));
   }
 
   .dock-tool-menu {
-    top: 72px;
+    top: calc(72px + env(safe-area-inset-top, 0px));
   }
 
   .mobile-dock,
