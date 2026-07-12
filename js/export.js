@@ -41,7 +41,10 @@ export class ExportTool {
   _compose(scene) {
     const maps = scene.canvases;
     const cap = scene.caption || {};
-    const legend = readLegend(scene.legendEl);
+    const legends = (scene.legendEls && scene.legendEls.length
+      ? scene.legendEls
+      : [scene.legendEl]).map(readLegend);
+    const legend = legends.find(Boolean) || null;
     const theme = normalizeTheme(scene.theme);
 
     // Pane grid: 4 panes compose as a 2×2 grid (matching the on-screen quad
@@ -66,11 +69,16 @@ export class ExportTool {
     maps.forEach((c, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const px = col * (cellW + gap) + Math.round((cellW - c.width) / 2);
-      const py = row * (cellH + gap) + Math.round((cellH - c.height) / 2);
-      cleanCtx.drawImage(c, px, py, c.width, c.height);
+      const px = col * (cellW + gap);
+      const py = row * (cellH + gap);
+      // Pane canvases can differ by a pixel (borders/rounding) or briefly retain
+      // a pre-layout buffer size. Normalize every capture into the exact same
+      // export cell so all two/four panel images have equal quadrants.
+      cleanCtx.drawImage(c, 0, 0, c.width, c.height, px, py, cellW, cellH);
     });
     const cleanUnit = clamp(mapW / 58, 16, 38);
+    const paneUnit = clamp(cellW / 38, 10, 24);
+    const perPaneLegends = maps.length > 1 && legends.some(Boolean);
     const mobile = typeof window !== 'undefined' && typeof window.matchMedia === 'function' &&
       window.matchMedia('(max-width: 759.98px)').matches;
 
@@ -88,8 +96,24 @@ export class ExportTool {
     const stormOnRight = !!(scene.briefing && scene.stormBriefing);
 
     drawExportInfo(cleanCtx, cap, mapW, cleanUnit, theme, leftPanelW);
-    drawExportWatermark(cleanCtx, mapW, mapH, cleanUnit, legend ? Math.round(cleanUnit * 2.75) : 0, leftPanelW);
-    if (legend) drawExportLegend(cleanCtx, legend, mapW, mapH, cleanUnit, theme, leftPanelW);
+    const legendReserve = perPaneLegends
+      ? Math.round(paneUnit * 2.75)
+      : (legend ? Math.round(cleanUnit * 2.75) : 0);
+    drawExportWatermark(cleanCtx, mapW, mapH, cleanUnit, legendReserve, leftPanelW);
+    if (perPaneLegends) {
+      maps.forEach((_, i) => {
+        const paneLegend = legends[i];
+        if (!paneLegend) return;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        cleanCtx.save();
+        cleanCtx.translate(col * (cellW + gap), row * (cellH + gap));
+        drawExportLegend(cleanCtx, paneLegend, cellW, cellH, paneUnit, theme, 0);
+        cleanCtx.restore();
+      });
+    } else if (legend) {
+      drawExportLegend(cleanCtx, legend, mapW, mapH, cleanUnit, theme, leftPanelW);
+    }
 
     // Alert overlays, stamped over the scope. A full briefing takes precedence
     // over the compact preview card (only one is ever passed anyway).

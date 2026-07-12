@@ -21,10 +21,10 @@ import { loadScene, ensureBands } from './goes.js';
 const scenes = new Map();
 const order = [];
 let cacheEpoch = 0;
-// Full-disk source files are very large. Two scenes preserve fast product/band
-// switches while preventing an idle satellite session from pinning six files
-// and their parser state in the worker heap.
-const MAX_SCENES = 2;
+// Full-disk source files are very large. Keep only the active scene: product
+// switches still reuse it, while scan changes cannot leave a second parsed
+// NetCDF/Himawari scene resident during the next decode.
+const MAX_SCENES = 1;
 
 function remember(key, scene) {
   scenes.set(key, scene);
@@ -36,20 +36,35 @@ function remember(key, scene) {
 
 // The cloneable view of a scene the page needs (geometry + projection + the
 // requested channel arrays), plus the channel buffers to transfer.
-function slimScene(scene, bands) {
+function slimScene(scene, bands, maxDim = 0) {
   const channels = {};
   const transfer = [];
+  const stride = maxDim > 0 ? Math.max(1, Math.ceil(Math.max(scene.width, scene.height) / maxDim)) : 1;
+  const width = Math.ceil(scene.width / stride);
+  const height = Math.ceil(scene.height / stride);
   for (const b of bands) {
     const arr = scene.channels[b];
     if (!arr) continue;
-    channels[b] = arr;
-    transfer.push(arr.buffer);
+    if (stride === 1) {
+      channels[b] = arr;
+      transfer.push(arr.buffer);
+    } else {
+      const sampled = new Float32Array(width * height);
+      for (let y = 0; y < height; y++) {
+        const srcY = Math.min(scene.height - 1, y * stride);
+        for (let x = 0; x < width; x++)
+          sampled[y * width + x] = arr[srcY * scene.width + Math.min(scene.width - 1, x * stride)];
+      }
+      channels[b] = sampled;
+      transfer.push(sampled.buffer);
+    }
   }
   const slim = {
-    width: scene.width, height: scene.height,
-    xScale: scene.xScale, xOffset: scene.xOffset,
-    yScale: scene.yScale, yOffset: scene.yOffset,
+    width, height,
+    xScale: scene.xScale * stride, xOffset: scene.xOffset,
+    yScale: scene.yScale * stride, yOffset: scene.yOffset,
     proj: scene.proj, time: scene.time, key: scene.key, channels,
+    maxDim: maxDim || 0,
   };
   return { slim, transfer };
 }
@@ -78,7 +93,7 @@ self.onmessage = async (e) => {
       const epoch = cacheEpoch;
       const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress);
       if (epoch === cacheEpoch) remember(msg.key, scene);
-      const { slim, transfer } = slimScene(scene, msg.bands);
+      const { slim, transfer } = slimScene(scene, msg.bands, msg.maxDim);
       self.postMessage({ id, ok: true, scene: slim }, transfer);
       return;
     }
@@ -95,7 +110,7 @@ self.onmessage = async (e) => {
         await ensureBands(scene, msg.bands);
         added = msg.bands.filter((b) => !before.has(String(b)));
       }
-      const { slim, transfer } = slimScene(scene, added);
+      const { slim, transfer } = slimScene(scene, added, msg.maxDim);
       self.postMessage({ id, ok: true, channels: slim.channels }, transfer);
       return;
     }

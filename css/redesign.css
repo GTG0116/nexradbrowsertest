@@ -823,9 +823,9 @@ body.theme-dark .mapboxgl-map {
   bottom: 0;
   left: 0;
   height: env(safe-area-inset-bottom, 0px);
-  background: var(--panel);
+  background: var(--map-bg);
   pointer-events: none;
-  z-index: 699;
+  z-index: 0;
 }
 
 /* SPC Mesoanalysis static-image view: covers the interactive map while a
@@ -1849,6 +1849,58 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   font-size: 8px;
 }
 
+/* Pane legends live inside #map/#map2/#map3/#map4, not in .map-hud. Keep this
+   after the generic redesign legend rules so those full-stage bottom offsets
+   and viewport widths cannot inflate or displace quadrant legends. */
+.map-wrap.split .split-pane-legend {
+  top: 8px;
+  right: auto;
+  bottom: auto;
+  left: 50%;
+  width: min(260px, calc(100% - 20px));
+  max-width: calc(100% - 20px);
+  padding: 5px 8px 6px;
+  border-radius: 7px;
+  transform: translateX(-50%);
+}
+
+.map-wrap.split .split-pane-legend .legend-title {
+  margin-bottom: 3px;
+  font-size: 8px;
+  line-height: 1.15;
+}
+
+.map-wrap.split .split-pane-legend .legend-bar {
+  height: 6px;
+}
+
+.map-wrap.split .split-pane-legend .legend-ticks,
+.map-wrap.split .split-pane-legend .legend-groups {
+  margin-top: 2px;
+  font-size: 7px;
+  line-height: 1.1;
+}
+
+/* Four-panel geometry must remain a true 2x2 grid at every viewport after it
+   has been enabled (including when the window is subsequently resized). */
+.map-wrap.split.quad #map {
+  inset: 0 50% 50% 0;
+}
+.map-wrap.split.quad #map2 {
+  inset: 0 0 50% 50%;
+  border-left: 1px solid var(--panel-edge);
+  border-bottom: 0;
+}
+.map-wrap.split.quad #map3 {
+  inset: 50% 50% 0 0;
+  border-top: 1px solid var(--panel-edge);
+}
+.map-wrap.split.quad #map4 {
+  inset: 50% 0 0 50%;
+  border-top: 1px solid var(--panel-edge);
+  border-left: 1px solid var(--panel-edge);
+}
+
 /* Compact alert cards must not turn their full-width positioning container
    into a blurred band across the map. */
 .alert-preview {
@@ -2646,11 +2698,27 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
   .mobile-dock,
   .app:not(.mobile) .mobile-dock {
-    padding-bottom: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
   }
 
   .mobile-sheet {
-    padding-bottom: 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .dock-nav {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .dock-nav-btn {
+    gap: 3px;
+    padding-inline: 4px;
+    font-size: 9px;
+  }
+
+  #dockLocate,
+  #dockExport {
+    display: flex;
   }
 
   /* Draw and measure need the gesture area more than the playback/product dock.
@@ -2665,6 +2733,51 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
 
   body.draw-measure-active .tool-popover {
     bottom: 14px;
+  }
+}
+
+@media (min-width: 760px) {
+  #dockLocate,
+  #dockExport {
+    display: none !important;
+  }
+
+  .app:not(.mobile) #toolLocate {
+    display: none !important;
+  }
+}
+
+@media (max-width: 759.98px) {
+  .desktop-location-field {
+    display: none !important;
+  }
+}
+
+.city-readout-details {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-edge);
+}
+
+.city-readout-details > summary {
+  cursor: pointer;
+  color: var(--ink-dim);
+  font: 700 10px/1.3 'IBM Plex Mono', ui-monospace, monospace;
+  list-style-position: inside;
+}
+
+.city-readout-details[open] > summary {
+  margin-bottom: 7px;
+  color: var(--accent-ink);
+}
+
+/* Give the hodograph enough physical space to keep rings, km markers and storm
+   motion labels distinct on phones instead of squeezing it beside the Skew-T. */
+@media (max-width: 819.98px) {
+  .snd-hodo canvas {
+    width: min(100%, 520px);
+    min-height: 300px;
+    margin-inline: auto;
   }
 }
 

@@ -1218,6 +1218,7 @@ function cacheEls() {
   el.modelCityValuesField = $('#modelCityValuesField');
   el.modelCityValuesToggle = $('#modelCityValuesToggle');
   el.cityValuesProducts = $('#cityValuesProducts');
+  el.cityReadoutDetails = $('#cityReadoutDetails');
   el.cityReadoutStyle = $('#cityReadoutStyle');
   el.cityFontSelect = $('#cityFontSelect');
   el.citySize = $('#citySize');
@@ -1253,6 +1254,7 @@ function cacheEls() {
   el.lsrPreviewCard = $('#lsrPreviewCard');
   el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
   el.metarControls = $('#metarControls');
+  el.locationToggle = $('#locationToggle');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
   el.playFramesField = $('#playFramesField');
@@ -1374,6 +1376,8 @@ function cacheEls() {
   el.playBtn = $('#playBtn');
   el.inspectBtn = $('#inspectBtn');
   el.dockSettings = $('#dockSettings');
+  el.dockLocate = $('#dockLocate');
+  el.dockExport = $('#dockExport');
   el.dockMain = $('#dockMain');
   el.dockNav = $('#dockNav');
   el.dockBack = $('#dockBack');
@@ -4828,8 +4832,8 @@ function buildCityValueProductControls() {
   if (!el.cityValuesProducts) return;
   const products = cityValueProductsForMode();
   const show = GRID_CITY_VALUE_MODES.has(state.mode) && state.modelCityValues && products.length;
-  el.cityValuesProducts.hidden = !show;
-  if (el.cityReadoutStyle) el.cityReadoutStyle.hidden = !show;
+  if (el.cityReadoutDetails) el.cityReadoutDetails.hidden = !show;
+  else el.cityValuesProducts.hidden = !show;
   el.cityValuesProducts.innerHTML = '';
   if (!show) return;
   for (const [id, product] of products) {
@@ -4935,7 +4939,11 @@ function cityValueGeoJSON(map, pane) {
   const features = [];
   for (const { name, lat, lon } of visibleTownPoints(map)) {
     const r = sampleActive(lat, lon, pane);
-    if (!r || r.out || !r.main) continue;
+    // Cursor inspection can use an explicit "no echo" / "no data" message,
+    // but stamping that message over every town makes the map look like it has
+    // data there. City readouts are value-only: omit the feature entirely when
+    // the active grid/radar has no sample at that location.
+    if (!r || r.out || !r.main || /^(?:no echo|no data)$/i.test(String(r.main).trim())) continue;
     features.push({
       type: 'Feature',
       properties: { name, label: String(r.main) },
@@ -7714,9 +7722,14 @@ async function buildPlaybackProvider(opts = {}) {
     // slam through the decoder at once.
     const hours = forecastHours(run);
     const frameCount = hours.length;
+    // A forecast run can exceed 200 hours. Keep a small rolling window instead
+    // of pinning every packed texture and contour bundle for the life of the
+    // loop. The full timeline remains seekable; evicted hours reload on demand.
+    const residentFrames = CONSTRAINED_DEVICE ? 3 : 10;
     return {
-      // Keep every decoded forecast hour resident. Per-run pooling bounds total
-      // memory without discarding frames the user has already loaded.
+      streaming: true,
+      maxCachedFrames: Math.min(frameCount, residentFrames),
+      prefetchAhead: Math.min(3, Math.max(1, residentFrames - 1)),
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
@@ -7731,7 +7744,7 @@ async function buildPlaybackProvider(opts = {}) {
       })),
       async load(f) {
         const sourceGrid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
-        const grid = poolGridForLoop(sourceGrid, frameCount);
+        const grid = poolGridForLoop(sourceGrid, Math.min(frameCount, residentFrames));
         const payload = prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
         payload.meta = { product: grid.product, time: grid.time, fhour: f.fhour };
         // Barb/contour overlays only when the whole run can afford them: bounded
@@ -7744,14 +7757,10 @@ async function buildPlaybackProvider(opts = {}) {
             payload.overlays = overlays;
           }
         } else if (grid.overlays) {
-          // Keep contours on long runs without retaining hundreds of deep
-          // GeoJSON object graphs. Only the displayed frame is materialized.
+          // Streaming bounds the resident set, so contour GeoJSON can stay with
+          // every cached frame instead of disappearing during long playback.
           const contours = prepareModelPlaybackContours(grid);
-          if (contours && countOverlayFeatures(contours) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
-            const json = JSON.stringify(contours);
-            const reserve = isSmallScreenNow() ? MODEL_LOOP_CONTOUR_RESERVE_MOBILE : MODEL_LOOP_CONTOUR_RESERVE;
-            if (json.length * 2 <= reserve / Math.max(1, frameCount)) payload.contoursJson = json;
-          }
+          if (contours) payload.overlays = contours;
         }
         return payload;
       },
@@ -8714,6 +8723,10 @@ function setupMapTools() {
 
   if (el.toolXsect) {
     el.toolXsect.addEventListener('click', async () => {
+      // Ignore a second tap only while the first is preparing the volume. The
+      // old handler launched overlapping async prepares, whose eventual toggles
+      // could cancel each other and made the mobile proxy appear unresponsive.
+      if (state._xsectTogglePending) return;
       if (state.mode !== 'radar') {
         setStatus('cross sections read the Level II volume — switch to RADAR');
         return;
@@ -8724,8 +8737,10 @@ function setupMapTools() {
       // this, a rejected prepare left the tool (and the mobile dock slot that
       // proxies to it) looking like it simply refused to enable.
       if (!state.xsect.active()) {
+        state._xsectTogglePending = true;
         try { await prepareCrossSectionVolume(); }
         catch (e) { console.warn('cross-section volume prep failed', e); }
+        finally { state._xsectTogglePending = false; }
       }
       state.xsect.toggle();
       syncToolButtons();
@@ -8762,6 +8777,14 @@ function setupMapTools() {
       buildOutlookDetailList();
       buildLegend();
       buildCityValueProductControls();
+    },
+    // SplitView owns the real layout state, so reflect every enable/disable
+    // path back into the sidebar instead of relying on the initiating button's
+    // click handler to remember to do it.
+    onLayoutChange: () => {
+      setToggleBtn(el.toolSplit, !!state.splitView.active);
+      updateLayoutSwitchUI();
+      updateSplitPaneChrome();
     },
     onSplitProductsChange: () => {
       updateSplitPaneChrome();
@@ -8919,8 +8942,6 @@ const MOBILE_TOOL_DEFS = [
   { id: 'xsect', icon: XSECT_ICON, label: 'Cross section', btn: () => el.toolXsect },
   { id: 'measure', icon: 'ruler', label: 'Measure', btn: () => el.toolMeasure },
   { id: 'draw', icon: 'pencil', label: 'Draw', btn: () => el.toolDraw },
-  { id: 'locate', icon: 'navigation', label: 'My live location', btn: () => el.toolLocate },
-  { id: 'export', icon: 'download', label: 'Export image', btn: () => el.toolExport },
 ];
 
 function dockToolsForMode() {
@@ -9055,6 +9076,9 @@ function buildExportScene() {
   const paneLabels = state.splitView && state.splitView.active && state.splitView.paneProducts
     ? state.splitView.paneProducts()
     : null;
+  const legendEls = state.splitView && state.splitView.active && state.splitView.paneLegendElements
+    ? state.splitView.paneLegendElements()
+    : [el.legend];
   // Storm-track briefing (town list + motion) reproduced as an alert-style side
   // panel on the export, when the storm tool has an active track.
   const stormBriefing = state.mapTools ? state.mapTools.stormBriefing() : null;
@@ -9063,6 +9087,7 @@ function buildExportScene() {
     paneLabels,
     caption: buildExportCaption(),
     legendEl: el.legend,
+    legendEls,
     alert,
     briefing,
     stormBriefing,
@@ -10191,7 +10216,13 @@ function updateLayoutSwitchUI() {
       (split && paneCount === 2 && b.dataset.layout === 'split2') ||
       (split && paneCount === 4 && b.dataset.layout === 'quad4');
     b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  // Keep a plain-text state indicator in the sidebar as well as the selected
+  // icon. This remains unambiguous in themes where the active button color is
+  // subtle and when the panel is restored from saved settings.
+  const title = el.layoutPanel && el.layoutPanel.querySelector('.panel-title');
+  if (title) title.textContent = paneCount === 1 ? 'Layout' : `Layout · ${paneCount} panels`;
 }
 
 // (Re)render any Lucide icon placeholders (<i data-lucide="...">) added to the
@@ -10398,13 +10429,28 @@ function init() {
   // Live-location tool: triggers the Mapbox GeolocateControl, which prompts for
   // permission, drops a tracking dot at the user's position and follows it.
   if (el.toolLocate) {
-    el.toolLocate.addEventListener('click', () => {
+    const syncLocationUi = (on) => {
+      el.toolLocate.classList.toggle('active', on);
+      if (el.locationToggle) {
+        el.locationToggle.classList.toggle('active', on);
+        el.locationToggle.textContent = on ? 'ON' : 'OFF';
+        el.locationToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+      if (el.dockLocate) el.dockLocate.classList.toggle('active', on);
+    };
+    const triggerLocation = () => {
       if (state.geolocate && state.geolocate.trigger) state.geolocate.trigger();
+    };
+    el.toolLocate.addEventListener('click', () => {
+      triggerLocation();
     });
+    if (el.locationToggle) el.locationToggle.addEventListener('click', triggerLocation);
+    if (el.dockLocate) el.dockLocate.addEventListener('click', triggerLocation);
+    if (el.dockExport) el.dockExport.addEventListener('click', () => el.toolExport && el.toolExport.click());
     if (state.geolocate && state.geolocate.on) {
-      state.geolocate.on('trackuserlocationstart', () => el.toolLocate.classList.add('active'));
-      state.geolocate.on('trackuserlocationend', () => el.toolLocate.classList.remove('active'));
-      state.geolocate.on('error', () => el.toolLocate.classList.remove('active'));
+      state.geolocate.on('trackuserlocationstart', () => syncLocationUi(true));
+      state.geolocate.on('trackuserlocationend', () => syncLocationUi(false));
+      state.geolocate.on('error', () => syncLocationUi(false));
     }
   }
   el.opacity.addEventListener('input', () => {

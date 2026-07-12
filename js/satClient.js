@@ -67,6 +67,14 @@ function call(msg, onProgress) {
   });
 }
 
+function constrainedSatelliteMaxDim() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return 0;
+  const phone = window.matchMedia && window.matchMedia('(max-width: 759.98px)').matches;
+  const touchTablet = navigator.maxTouchPoints > 0 && Math.min(window.innerWidth, window.innerHeight) <= 1024;
+  const lowMemory = Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4;
+  return phone || touchTablet || lowMemory ? 1800 : 0;
+}
+
 function postControl(message) {
   const target = worker;
   if (!target) return;
@@ -80,7 +88,8 @@ function postControl(message) {
 }
 
 export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress) {
-  return call({ type: 'load', satKey, sectorKey, key, bands }, onProgress).then((m) => m.scene);
+  return call({ type: 'load', satKey, sectorKey, key, bands, maxDim: constrainedSatelliteMaxDim() }, onProgress)
+    .then((m) => m.scene);
 }
 
 // Decode any of `bands` not already on the scene, merging the new channel arrays
@@ -92,7 +101,7 @@ export async function ensureBandsAsync(scene, satKey, sectorKey, bands) {
   const need = [...new Set(bands)].filter((b) => !scene.channels[b]);
   if (!need.length) return scene;
   const request = (want) =>
-    call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: want })
+    call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: want, maxDim: scene.maxDim || 0 })
       .then((m) => { Object.assign(scene.channels, m.channels); });
 
   let lastError = null;

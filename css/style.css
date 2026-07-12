@@ -3940,7 +3940,7 @@ input[type='range']::-moz-range-thumb {
 .metar-canvas {
   position: absolute;
   inset: 0;
-  z-index: 520;
+  z-index: 510;
   pointer-events: none;
 }
 .metar-panel {

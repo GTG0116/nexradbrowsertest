@@ -218,8 +218,18 @@ export class SplitView {
     this._buildPaneChrome();
     this._bindPaneSelect();
     this._updatePaneUI();
+    if (this.ctx.onLayoutChange) this.ctx.onLayoutChange(count);
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
-    setTimeout(() => this._allMaps().forEach((m) => m.resize()), 60);
+    // Mapbox can resize on a different frame from the CSS quadrant layout.
+    // Resize and then re-copy the authoritative main camera after each layout
+    // settle so no pane keeps the pre-split center/zoom.
+    for (const delay of [0, 60, 180]) {
+      setTimeout(() => {
+        if (!this.active || this.paneCount !== count) return;
+        this._allMaps().forEach((m) => m.resize());
+        this._resyncCamera();
+      }, delay);
+    }
   }
 
   disable() {
@@ -255,6 +265,7 @@ export class SplitView {
     this.activePane = 1;
     this._gridCache.clear();
 
+    if (this.ctx.onLayoutChange) this.ctx.onLayoutChange(1);
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
     setTimeout(() => this.ctx.state.map && this.ctx.state.map.resize(), 60);
@@ -652,17 +663,35 @@ export class SplitView {
     for (const n of this._paneNums()) {
       const host = paneContainer(n);
       if (!host) continue;
-      const handler = () => this.setActivePane(n);
-      host.addEventListener('mousedown', handler, true);
-      host.addEventListener('touchstart', handler, true);
-      this._paneSelectHandlers.push([host, handler]);
+      let suppressClick = false;
+      const activate = (e) => {
+        if (this.activePane === n) return;
+        // The first gesture on an inactive pane is selection only. Consume it
+        // in capture phase before Mapbox, alerts, or drawing tools can pan,
+        // inspect, select, or add a point underneath it.
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        suppressClick = true;
+        this.setActivePane(n);
+      };
+      const click = (e) => {
+        if (!suppressClick) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        suppressClick = false;
+      };
+      host.addEventListener('mousedown', activate, true);
+      host.addEventListener('touchstart', activate, { capture: true, passive: false });
+      host.addEventListener('click', click, true);
+      this._paneSelectHandlers.push([host, activate, click]);
     }
   }
 
   _unbindPaneSelect() {
-    for (const [host, handler] of this._paneSelectHandlers) {
-      host.removeEventListener('mousedown', handler, true);
-      host.removeEventListener('touchstart', handler, true);
+    for (const [host, activate, click] of this._paneSelectHandlers) {
+      host.removeEventListener('mousedown', activate, true);
+      host.removeEventListener('touchstart', activate, true);
+      host.removeEventListener('click', click, true);
     }
     this._paneSelectHandlers = [];
   }
@@ -671,6 +700,7 @@ export class SplitView {
     if (!this.active || this.activePane === n || n < 1 || n > this.paneCount) return;
     this.activePane = n;
     this._updatePaneUI();
+    this._resyncCamera();
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
   }
 
@@ -708,6 +738,10 @@ export class SplitView {
       node.innerHTML = vals[i] || '';
       node.hidden = !vals[i];
     });
+  }
+
+  paneLegendElements() {
+    return this._paneLegends.slice(0, this.paneCount);
   }
 
   _buildBadges() {

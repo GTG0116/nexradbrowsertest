@@ -4,7 +4,6 @@
 // Buckets (NOAA Open Data Dissemination, CORS-enabled like the radar bucket):
 //   noaa-goes19  GOES-East   (operational East, replaced GOES-16 in 2025)
 //   noaa-goes18  GOES-West
-//   noaa-goes16  GOES-East legacy archive
 //
 // We use the multi-band cloud/moisture product (ABI-L2-MCMIP*) because a single
 // file carries all 16 ABI channels (CMI_C01…CMI_C16) — so every channel *and*
@@ -21,7 +20,6 @@ import { decodeBzip2 } from './bzip2.js';
 export const SATELLITES = {
   'goes19': { bucket: 'https://noaa-goes19.s3.amazonaws.com', label: 'GOES-19 (East)', lon0: -75.2, family: 'goes' },
   'goes18': { bucket: 'https://noaa-goes18.s3.amazonaws.com', label: 'GOES-18 (West)', lon0: -137.0, family: 'goes' },
-  'goes16': { bucket: 'https://noaa-goes16.s3.amazonaws.com', label: 'GOES-16 (East, legacy)', lon0: -75.0, family: 'goes' },
   // Himawari-9 (operational since Dec 2022) lives in its own bucket; the
   // noaa-himawari8 bucket is the retired Himawari-8 archive and no longer
   // updates. Imagery is the L1b Full Disk product (Himawari Standard Data).

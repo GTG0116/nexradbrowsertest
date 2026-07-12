@@ -39,7 +39,7 @@ const SIZE_CHOICES = [0.7, 0.85, 1, 1.25, 1.5, 1.8];
 const DEFAULT_SIZE = 1;
 // Plots are kept out of the top strip of the map so they never crowd or peek
 // out from behind the breadcrumb/clock/legend HUD that overlays the top edge.
-const TOP_UI_INSET = 56;
+const TOP_UI_INSET = 64;
 const IN_HG_TO_HPA = 33.8639;
 // When the view clips more US states than this, one bulk country=US request
 // replaces the per-state fan-out (~3 MB gzipped, a second or two).
@@ -550,6 +550,20 @@ export class MetarController {
     const margin = 74;
     const grid = new Map();
     let visible = 0;
+    const containerRect = this.map.getContainer().getBoundingClientRect();
+    // Station plots have long wind barbs/labels, so exclude a padded rectangle
+    // around every map HUD surface rather than testing only the station center.
+    const uiRects = Array.from(document.querySelectorAll(
+      '.map-hud > *, .legend:not([hidden]), .mobile-topbar:not([hidden]), .map-tools:not([hidden])'
+    )).map((node) => {
+      const r = node.getBoundingClientRect();
+      return {
+        left: r.left - containerRect.left - 42,
+        right: r.right - containerRect.left + 42,
+        top: r.top - containerRect.top - 42,
+        bottom: r.bottom - containerRect.top + 42,
+      };
+    }).filter((r) => r.right > 0 && r.left < w && r.bottom > 0 && r.top < h);
 
     for (const ob of this.obs) {
       if (ob.lat < south || ob.lat > north || !inLngRange(ob.lon, west, east)) continue;
@@ -558,6 +572,7 @@ export class MetarController {
       // Keep station plots clear of the top HUD strip (breadcrumb/clock/legend)
       // so they never render up over the top UI.
       if (pt.y < TOP_UI_INSET) continue;
+      if (uiRects.some((r) => pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom)) continue;
       visible++;
       const gx = Math.floor(pt.x / cell);
       const gy = Math.floor(pt.y / cell);

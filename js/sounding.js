@@ -581,7 +581,7 @@ export function drawHodograph(canvas, profile) {
   const sm = profile.params.stormMotion;
   maxKt = Math.max(maxKt, Math.hypot(sm.rm[0], sm.rm[1]) * MS2KT);
   const ring = Math.ceil((maxKt + 5) / 10) * 10;
-  const R = Math.min(w, h) / 2 - 14;
+  const R = Math.max(40, Math.min(w, h) / 2 - 25);
   const sc = R / ring; // px per kt
 
   // Every annotation size scales with the plot radius. The old fixed sizes
@@ -609,7 +609,7 @@ export function drawHodograph(canvas, profile) {
   ctx.textBaseline = 'middle';
   for (let r = ringStep; r <= ring; r += ringStep) {
     ctx.beginPath(); ctx.arc(cx, cy, r * sc, 0, 7); ctx.stroke();
-    ctx.fillText(String(r), cx + r * sc + 8, cy - 4);
+    ctx.fillText(String(r), cx + r * sc - Math.max(9, ringFont), cy - ringFont);
   }
   // Axes.
   ctx.strokeStyle = 'rgba(147,161,176,0.42)';
@@ -617,6 +617,15 @@ export function drawHodograph(canvas, profile) {
   ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
   ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
   ctx.stroke();
+  // Cardinal component labels make the wind-vector orientation obvious, and
+  // the dark halo keeps them readable over either sounding theme.
+  ctx.font = `700 ${Math.max(8, ringFont)}px "IBM Plex Mono", monospace`;
+  ctx.fillStyle = '#cbd5e1';
+  ctx.textAlign = 'center';
+  ctx.fillText('N', cx, cy - R - 10);
+  ctx.fillText('S', cx, cy + R + 10);
+  ctx.fillText('W', cx - R - 10, cy);
+  ctx.fillText('E', cx + R + 10, cy);
 
   // ---- Storm-relative helicity area shading ----------------------------------
   // The signed area swept out by the storm-relative wind vectors between the
@@ -646,6 +655,17 @@ export function drawHodograph(canvas, profile) {
   ctx.setLineDash([]);
 
   // Hodograph curve, coloured by height band.
+  // Lay down a contrasting under-stroke first so tightly packed height bands
+  // remain distinct over rings and SRH shading.
+  ctx.lineWidth = traceW + 2.4;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(4,8,12,0.82)';
+  ctx.beginPath();
+  for (let i = 0; i < L.length && L[i].zAGL <= 12000; i++) {
+    const x = px(L[i].u), y = py(L[i].v);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
   ctx.lineWidth = traceW;
   ctx.lineJoin = 'round';
   for (let i = 1; i < L.length; i++) {
