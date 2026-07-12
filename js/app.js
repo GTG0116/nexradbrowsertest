@@ -955,11 +955,13 @@ const state = {
   // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
   // off to inspect the raw folded field.
   dealias: true,
-  // Opt-in legacy-resolution rendering for every Level II moment. The source
-  // capability remains separate: pre-super-resolution Message-1 archives are
-  // detected from their decoded radial metadata and already draw natively at
-  // legacy resolution even when this preference is off.
-  radarLegacy: false,
+  // Opt-in legacy-resolution rendering, tracked per radar product so the user
+  // can, say, view REF at legacy resolution while VEL stays super-res. Keys are
+  // product ids (REF, VEL, …); a truthy value means "render this product at
+  // legacy resolution". The source capability remains separate: pre-super-
+  // resolution Message-1 archives are detected from their decoded radial
+  // metadata and already draw natively at legacy resolution regardless.
+  radarLegacyProducts: {},
   live: false,
   // Radar is pinned to live; archive mode is the only way to browse past scans
   // without the 60 s refresh snapping the view forward. Off ⇒ live.
@@ -1187,6 +1189,7 @@ function cacheEls() {
   el.lsrPreview = $('#lsrPreview');
   el.lsrPreviewCard = $('#lsrPreviewCard');
   el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
+  el.metarControls = $('#metarControls');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
   el.playFramesField = $('#playFramesField');
@@ -1863,6 +1866,9 @@ function makeRadarProductButton(id, active) {
     buildTiltList();
     buildLegend();
     updateMeta();
+    // The legacy-resolution toggle is scoped per product, so refresh it to show
+    // the newly selected product's setting.
+    updateRadarResolutionUI();
     // Level III products and Level II moments come from different sources (a
     // per-product L3 file vs. the shared volume), so a switch across that
     // boundary — or between two L3 products — reloads the frame list; switching
@@ -2662,8 +2668,18 @@ function resolveSweepForProduct(sweep, productId) {
   if (productId === 'SRV') sweep = stormRelativeSweep(dealiasSweep(sweep));
   else if (state.dealias && productId === 'VEL') sweep = dealiasSweep(sweep);
   const product = PRODUCTS[productId];
-  if (state.radarLegacy && product) sweep = legacyResolutionSweep(sweep, product.moment);
+  if (product && isLegacyResolution(productId)) sweep = legacyResolutionSweep(sweep, product.moment);
   return sweep;
+}
+
+// Whether the given radar product is set to render at legacy resolution.
+function isLegacyResolution(productId = state.productId) {
+  return !!state.radarLegacyProducts[productId];
+}
+
+function setLegacyResolution(productId, on) {
+  if (on) state.radarLegacyProducts[productId] = true;
+  else delete state.radarLegacyProducts[productId];
 }
 
 function resolveSweep(sweep) {
@@ -6691,6 +6707,9 @@ function layoutQuickSettings() {
     el.dealiasField,
     el.radarResolutionField,
     el.metarsField,
+    // The METAR overlay's controls (station limit / size / category key) sit
+    // directly under their toggle, in Settings, rather than floating on the map.
+    el.metarControls,
     el.ringsField
   );
 }
@@ -7710,7 +7729,7 @@ function updateMeta() {
   const product = PRODUCTS[state.productId];
   const resolution = product ? describeSweepResolution(sw, product.moment) : null;
   const resolutionText = resolution && resolution.available
-    ? (state.radarLegacy && resolution.superResolution
+    ? (isLegacyResolution(state.productId) && resolution.superResolution
       ? `Legacy view ${resolutionLabel(resolution.targetAzimuthSpacing, resolution.targetGateSpacing)}`
       : `${resolution.legacyEnough ? 'Native legacy' : 'Native super-res'} ${resolutionLabel(
         resolution.azimuthSpacing, resolution.gateSpacing
@@ -8094,7 +8113,7 @@ async function prepareCrossSectionVolume() {
 
 function setupMapTools() {
   // Surface observations (METAR station plots).
-  state.metars = new MetarController(state.map);
+  state.metars = new MetarController(state.map, { panelHost: el.metarControls });
   state.metars.onStatus = (msg) => setStatus(msg);
   const setMetars = (on, quiet = false) => {
     on = !!on;
@@ -8111,26 +8130,12 @@ function setupMapTools() {
   }
   if (state._metarsOn) setMetars(true, true);
 
-  state.lsr = new LsrController(state.map, {
-    list:el.lsrList, status:el.lsrStatus, filters:el.lsrFilters,
-    hoursSelect:el.lsrHours, preview:el.lsrPreview, previewCard:el.lsrPreviewCard,
-    suppressClick:() => clickConsumingToolActive(),
-    onPrefsChanged:() => saveSettings(),
-  });
-  state.lsr.hours = state._lsr.hours;
-  state.lsr.cats = { ...state._lsr.cats };
-  if (el.lsrHours) el.lsrHours.value = String(state._lsr.hours);
-  if (el.lsrToggle) {
-    setToggleBtn(el.lsrToggle, state._lsr.on);
-    el.lsrToggle.addEventListener('click', () => {
-      const on = !state.lsr.enabled;
-      state.lsr.setEnabled(on);
-      setToggleBtn(el.lsrToggle, on);
-      setStatus(on ? 'storm reports on' : 'storm reports off');
-      saveSettings();
-    });
-  }
-  state.lsr.setEnabled(state._lsr.on);
+  // NOTE: the local storm reports (LSR) overlay controller and its toggle are
+  // wired once in init(), alongside the other overlay controllers. A second
+  // setup here previously attached a competing click handler to the same
+  // #lsrToggle element, so each press toggled the layer on and then straight
+  // back off — the button never appeared to turn on. Keep LSR out of this
+  // function so there is a single owner.
 
   // Draw / measure / storm-track annotations.
   state.mapTools = new MapTools(state.map);
@@ -9372,7 +9377,7 @@ function saveSettings() {
         timeSource: state.timeSource,
         mapProvider: state.mapProvider,
         dealias: state.dealias,
-        radarLegacy: state.radarLegacy,
+        radarLegacyProducts: { ...state.radarLegacyProducts },
         radarOverlay: state.radarOverlay,
         metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
         lsr: state.lsr
@@ -9481,7 +9486,17 @@ function applyStoredSettings(s) {
   if (s.timeSource === 'now' || s.timeSource === 'product') state.timeSource = s.timeSource;
   if (s.mapProvider === 'mapbox' || s.mapProvider === 'maptiler') state.mapProvider = s.mapProvider;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
-  if (typeof s.radarLegacy === 'boolean') state.radarLegacy = s.radarLegacy;
+  // New per-product form; also accept the old global boolean so a saved
+  // "legacy on" preference carries over to every product.
+  if (s.radarLegacyProducts && typeof s.radarLegacyProducts === 'object') {
+    const next = {};
+    for (const id of Object.keys(PRODUCTS))
+      if (s.radarLegacyProducts[id]) next[id] = true;
+    state.radarLegacyProducts = next;
+  } else if (typeof s.radarLegacy === 'boolean') {
+    state.radarLegacyProducts = {};
+    if (s.radarLegacy) for (const id of Object.keys(PRODUCTS)) state.radarLegacyProducts[id] = true;
+  }
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
   if (s.lsr && typeof s.lsr === 'object') {
     if (typeof s.lsr.on === 'boolean') state._lsr.on = s.lsr.on;
@@ -9611,25 +9626,26 @@ function resolutionLabel(azimuthSpacing, gateSpacing) {
 function updateRadarResolutionUI() {
   const isLevel2 = state.mode === 'radar' && !isL3Product(state.productId) && !!PRODUCTS[state.productId];
   if (el.radarResolutionField) el.radarResolutionField.hidden = !isLevel2;
-  setToggleBtn(el.radarResolutionToggle, state.radarLegacy);
+  const legacyHere = isLegacyResolution(state.productId);
+  setToggleBtn(el.radarResolutionToggle, legacyHere);
   if (!el.radarResolutionHint || !isLevel2) return;
   const product = PRODUCTS[state.productId];
   const sourceSweep = pickSweep(state.sweeps, state.productId);
   const info = describeSweepResolution(sourceSweep, product.moment);
   if (!info.available) {
-    el.radarResolutionHint.textContent = 'Resolution detected when a scan loads';
+    el.radarResolutionHint.textContent = `${product.name}: resolution detected when a scan loads`;
     return;
   }
-  if (state.radarLegacy && info.superResolution) {
+  if (legacyHere && info.superResolution) {
     el.radarResolutionHint.textContent =
-      `Displaying legacy view: ${resolutionLabel(info.targetAzimuthSpacing, info.targetGateSpacing)}`;
+      `${product.name}: legacy view ${resolutionLabel(info.targetAzimuthSpacing, info.targetGateSpacing)}`;
   } else if (info.legacyEnough) {
     const archive = state.volume && state.volume.messageType === 1 ? 'Archive auto-detected' : 'Native source';
     el.radarResolutionHint.textContent =
-      `${archive}: legacy ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
+      `${product.name} — ${archive}: legacy ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
   } else {
     el.radarResolutionHint.textContent =
-      `Native super-res: ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
+      `${product.name}: native super-res ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
   }
 }
 
@@ -9910,13 +9926,21 @@ function init() {
 
   if (el.radarResolutionToggle) {
     el.radarResolutionToggle.addEventListener('click', () => {
-      state.radarLegacy = !state.radarLegacy;
+      // The toggle scopes to the currently selected product, so different
+      // products can independently sit at legacy or native resolution.
+      const productId = state.productId;
+      const product = PRODUCTS[productId];
+      if (!product) return;
+      const on = !isLegacyResolution(productId);
+      setLegacyResolution(productId, on);
       updateRadarResolutionUI();
       renderRadar();
       updateInspect();
       renderLayerStack();
       if (state.xsect) state.xsect.refresh(true);
-      setStatus(state.radarLegacy ? 'legacy-resolution view on' : 'native radar resolution');
+      setStatus(on
+        ? `${product.name}: legacy-resolution view on`
+        : `${product.name}: native radar resolution`);
       saveSettings();
     });
   }

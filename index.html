@@ -471,7 +471,7 @@
           </div>
           <div class="toggle-field" id="radarResolutionField">
             <span>Legacy-resolution view <small id="radarResolutionHint" class="resolution-hint">1&deg; beams; auto-detects older scans</small></span>
-            <button id="radarResolutionToggle" class="alerts-toggle" type="button" aria-pressed="false" title="Render every Level II product at legacy resolution">OFF</button>
+            <button id="radarResolutionToggle" class="alerts-toggle" type="button" aria-pressed="false" title="Render the selected Level II product at legacy resolution (set per product)">OFF</button>
           </div>
           <label class="field opacity-field" id="smoothField">
             <span>Smoothing <b id="smoothVal">None</b></span>
@@ -515,6 +515,11 @@
             <span>METAR overlay</span>
             <button id="metarsToggle" class="alerts-toggle" title="Show surface observation station plots">OFF</button>
           </div>
+          <!-- Host for the METAR station-limit / plot-size / flight-category
+               controls. The MetarController renders its panel in here (instead
+               of floating over the map) so the controls live in Settings; it is
+               revealed only while the overlay is enabled. -->
+          <div id="metarControls" class="metar-controls" hidden></div>
           <div class="toggle-field">
             <span>Cyclone path</span>
             <button id="cyclonesPathToggle" class="alerts-toggle active" title="Show the forecast track and points (past track dashed)">ON</button>
