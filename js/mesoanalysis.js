@@ -277,3 +277,48 @@ export function mesoImageUrl(sector, code, bust) {
   const url = `${BASE}/s${sector}/${code}/${code}.gif`;
   return bust ? `${url}?${typeof bust === 'number' ? bust : Date.now()}` : url;
 }
+
+// ---------------------------------------------------------------------------
+// Playback / archive frames
+//
+// SPC keeps an hourly archive of every product: the current hour is the plain
+// {code}.gif, and each earlier top-of-hour is {code}_{YYMMDDHH}.gif (UTC). We
+// synthesize the recent frame list client-side from the wall clock rather than
+// scraping the archive page — the stamps are just consecutive UTC hours.
+// ---------------------------------------------------------------------------
+const p2 = (n) => String(n).padStart(2, '0');
+
+// SPC archive stamp (YYMMDDHH, UTC) for a Date.
+function mesoStamp(d) {
+  return `${p2(d.getUTCFullYear() % 100)}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}${p2(d.getUTCHours())}`;
+}
+
+export const MESO_FRAME_COUNTS = [6, 12, 18, 24];
+export const MESO_DEFAULT_FRAMES = 12;
+
+// The last `count` hourly frames, oldest first, ending at the most recent
+// top-of-hour. The newest frame is flagged `latest` (served as the realtime
+// {code}.gif); older frames carry their archive stamp and a UTC hour label.
+export function mesoFrames(count = MESO_DEFAULT_FRAMES, now = new Date()) {
+  const anchor = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours());
+  const out = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(anchor - i * 3600000);
+    out.push({
+      dt: mesoStamp(d),
+      time: d,
+      label: i === 0 ? 'Latest' : `${p2(d.getUTCHours())}Z`,
+      latest: i === 0,
+    });
+  }
+  return out;
+}
+
+// Archive image URL for one frame. The newest hour uses the plain realtime GIF
+// (always the freshest posted image); earlier hours use the timestamped file.
+export function mesoFrameUrl(sector, code, frame, bust) {
+  const path = frame.latest
+    ? `${BASE}/s${sector}/${code}/${code}.gif`
+    : `${BASE}/s${sector}/${code}/${code}_${frame.dt}.gif`;
+  return bust ? `${path}?${typeof bust === 'number' ? bust : Date.now()}` : path;
+}

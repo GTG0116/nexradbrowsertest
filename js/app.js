@@ -26,7 +26,9 @@ import { OBS_PRODUCTS, OBS_CATEGORIES, listObservations, loadObservation } from 
 import {
   MESO_SECTORS, MESO_CATEGORIES, MESO_PRODUCTS,
   MESO_DEFAULT_SECTOR, MESO_DEFAULT_CODE,
+  MESO_FRAME_COUNTS, MESO_DEFAULT_FRAMES,
   mesoImageUrl, mesoProductName, mesoSectorName,
+  mesoFrames, mesoFrameUrl,
 } from './mesoanalysis.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
@@ -1118,6 +1120,12 @@ const state = {
     active: false,
     sector: MESO_DEFAULT_SECTOR,
     code: MESO_DEFAULT_CODE,
+    frameCount: MESO_DEFAULT_FRAMES,
+    frames: [],       // recent hourly archive frames (oldest first)
+    frameIndex: 0,    // which frame is on screen
+    playing: false,
+    _timer: null,
+    _preload: null,
   },
 };
 
@@ -1278,6 +1286,7 @@ function cacheEls() {
   el.mesoPanel = $('#mesoPanel');
   el.mesoProductSelect = $('#mesoProductSelect');
   el.mesoSectorSelect = $('#mesoSectorSelect');
+  el.mesoFramesSelect = $('#mesoFramesSelect');
   el.mesoView = $('#mesoView');
   el.mesoViewTitle = $('#mesoViewTitle');
   el.mesoImg = $('#mesoImg');
@@ -1285,6 +1294,11 @@ function cacheEls() {
   el.mesoError = $('#mesoError');
   el.mesoRefresh = $('#mesoRefresh');
   el.mesoOpen = $('#mesoOpen');
+  el.mesoPrev = $('#mesoPrev');
+  el.mesoPlay = $('#mesoPlay');
+  el.mesoNext = $('#mesoNext');
+  el.mesoScrub = $('#mesoScrub');
+  el.mesoTime = $('#mesoTime');
   el.modelFields = $('#modelFields');
   el.modelSelect = $('#modelSelect');
   el.stormFields = $('#stormFields');
@@ -3904,6 +3918,22 @@ function initMesoControls() {
     if (s.id === state.meso.sector) o.selected = true;
     el.mesoSectorSelect.appendChild(o);
   }
+  // Loop length (how many recent hourly frames playback cycles through).
+  if (el.mesoFramesSelect) {
+    el.mesoFramesSelect.innerHTML = '';
+    for (const n of MESO_FRAME_COUNTS) {
+      const o = document.createElement('option');
+      o.value = String(n);
+      o.textContent = `${n} frames`;
+      if (n === state.meso.frameCount) o.selected = true;
+      el.mesoFramesSelect.appendChild(o);
+    }
+    el.mesoFramesSelect.addEventListener('change', () => {
+      state.meso.frameCount = Number(el.mesoFramesSelect.value) || MESO_DEFAULT_FRAMES;
+      loadMesoImage();
+      saveSettings();
+    });
+  }
 
   el.mesoProductSelect.addEventListener('change', () => {
     state.meso.code = el.mesoProductSelect.value;
@@ -3916,6 +3946,13 @@ function initMesoControls() {
     saveSettings();
   });
   if (el.mesoRefresh) el.mesoRefresh.addEventListener('click', () => loadMesoImage(true));
+  if (el.mesoPrev) el.mesoPrev.addEventListener('click', () => stepMesoFrame(-1));
+  if (el.mesoNext) el.mesoNext.addEventListener('click', () => stepMesoFrame(1));
+  if (el.mesoPlay) el.mesoPlay.addEventListener('click', toggleMesoPlay);
+  if (el.mesoScrub) el.mesoScrub.addEventListener('input', () => {
+    stopMesoPlay();
+    showMesoFrame(Number(el.mesoScrub.value), { smooth: true });
+  });
 
   if (el.mesoImg) {
     el.mesoImg.addEventListener('load', () => {
@@ -3931,19 +3968,90 @@ function initMesoControls() {
   }
 }
 
-// Point the <img> at the current product/sector. `force` busts the cache so a
-// manual refresh or a live tick pulls the freshest analysis.
+// Rebuild the recent-frame list for the current product/sector and warm the
+// browser cache so playback and scrubbing are smooth.
+function rebuildMesoFrames() {
+  state.meso.frames = mesoFrames(state.meso.frameCount);
+  state.meso.frameIndex = state.meso.frames.length - 1; // newest
+  if (el.mesoScrub) {
+    el.mesoScrub.max = String(Math.max(0, state.meso.frames.length - 1));
+    el.mesoScrub.value = String(state.meso.frameIndex);
+  }
+  const { sector, code, frames } = state.meso;
+  // Keep the Image refs alive so the preloaded frames aren't garbage-collected.
+  state.meso._preload = frames.map((f) => {
+    const im = new Image();
+    im.src = mesoFrameUrl(sector, code, f);
+    return im;
+  });
+}
+
+// Show one frame by index. `smooth` (playback/scrub/step) swaps the src in place
+// without the loading flash; the default (product/sector change) shows loading.
+function showMesoFrame(index, { smooth = false, bust = false } = {}) {
+  const { sector, code, frames } = state.meso;
+  if (!el.mesoImg || !frames.length) return;
+  index = Math.max(0, Math.min(frames.length - 1, index));
+  state.meso.frameIndex = index;
+  const frame = frames[index];
+  const url = mesoFrameUrl(sector, code, frame, bust ? Date.now() : false);
+  if (el.mesoViewTitle) el.mesoViewTitle.textContent = `${mesoProductName(code)} — ${mesoSectorName(sector)}`;
+  if (el.mesoTime) el.mesoTime.textContent = frame.label;
+  if (el.mesoOpen) el.mesoOpen.href = mesoFrameUrl(sector, code, frame);
+  if (el.mesoScrub && el.mesoScrub.value !== String(index)) el.mesoScrub.value = String(index);
+  if (el.mesoError) el.mesoError.hidden = true;
+  if (!smooth) {
+    if (el.mesoLoading) el.mesoLoading.hidden = false;
+    el.mesoImg.hidden = true;
+  }
+  el.mesoImg.src = url;
+}
+
+function stepMesoFrame(dir) {
+  if (!state.meso.frames.length) return false;
+  stopMesoPlay();
+  let i = state.meso.frameIndex + (dir > 0 ? 1 : -1);
+  if (i < 0) i = state.meso.frames.length - 1;
+  if (i >= state.meso.frames.length) i = 0;
+  showMesoFrame(i, { smooth: true });
+  return true;
+}
+
+function updateMesoPlayBtn() {
+  if (!el.mesoPlay) return;
+  el.mesoPlay.classList.toggle('active', state.meso.playing);
+  el.mesoPlay.innerHTML = `<i data-lucide="${state.meso.playing ? 'pause' : 'play'}" class="lucide sm" aria-hidden="true"></i>`;
+  el.mesoPlay.title = state.meso.playing ? 'Pause loop' : 'Play loop';
+  refreshIcons();
+}
+
+function startMesoPlay() {
+  if (state.meso.playing || state.meso.frames.length < 2) return;
+  state.meso.playing = true;
+  updateMesoPlayBtn();
+  state.meso._timer = setInterval(() => {
+    let i = state.meso.frameIndex + 1;
+    if (i >= state.meso.frames.length) i = 0;
+    showMesoFrame(i, { smooth: true });
+  }, 500);
+}
+
+function stopMesoPlay() {
+  if (state.meso._timer) { clearInterval(state.meso._timer); state.meso._timer = null; }
+  if (state.meso.playing) { state.meso.playing = false; updateMesoPlayBtn(); }
+}
+
+function toggleMesoPlay() {
+  state.meso.playing ? stopMesoPlay() : startMesoPlay();
+}
+
+// (Re)load the current product/sector: rebuild the frame list and show the
+// latest. `force` busts the cache so a manual refresh / live tick re-fetches.
 function loadMesoImage(force) {
   if (!el.mesoImg) return;
-  const { sector, code } = state.meso;
-  const name = mesoProductName(code);
-  const url = mesoImageUrl(sector, code, force ? Date.now() : true);
-  if (el.mesoViewTitle) el.mesoViewTitle.textContent = `${name} — ${mesoSectorName(sector)}`;
-  if (el.mesoOpen) el.mesoOpen.href = mesoImageUrl(sector, code);
-  if (el.mesoError) el.mesoError.hidden = true;
-  if (el.mesoLoading) el.mesoLoading.hidden = false;
-  el.mesoImg.hidden = true;
-  el.mesoImg.src = url;
+  stopMesoPlay();
+  rebuildMesoFrames();
+  showMesoFrame(state.meso.frameIndex, { bust: force });
 }
 
 // Reflect the current mesoanalysis state onto the DOM: show/hide the static
@@ -3954,7 +4062,7 @@ function applyMesoUi() {
   if (app) app.classList.toggle('meso-active', active);
   if (el.mesoPanel) el.mesoPanel.hidden = !active;
   if (el.mesoView) el.mesoView.hidden = !active;
-  if (!active) return;
+  if (!active) { stopMesoPlay(); return; }
   // The static plot stands in for the map, so the RTMA product grid, scan-frame
   // list, opacity and city-value controls have nothing to act on — hide them.
   if (el.productPanel) el.productPanel.hidden = true;
@@ -3962,6 +4070,12 @@ function applyMesoUi() {
   if (el.overlayOpacityField) el.overlayOpacityField.hidden = true;
   if (el.playFramesField) el.playFramesField.hidden = true;
   if (el.modelCityValuesField) el.modelCityValuesField.hidden = true;
+  // On mobile the dock rides above the plot; reserve exactly its height at the
+  // bottom of the view so the image never hides behind it.
+  if (app && app.classList.contains('mobile') && el.mobileDock) {
+    const h = el.mobileDock.offsetHeight;
+    if (h) app.style.setProperty('--meso-dock-gap', `${h + 8}px`);
+  }
 }
 
 // Enter/leave the mesoanalysis sub-mode (driven by the Analysis picker). On
@@ -9018,6 +9132,7 @@ function runPlaybackAction(which) {
   const pb = state.playback;
   if (!pb) return false;
   if (which === 'loop') {
+    if (mesoActive()) { toggleMesoPlay(); return true; }
     if (!pb.active) pb.start();
     else pb.toggle();
     return true;
@@ -9031,6 +9146,8 @@ function runPlaybackAction(which) {
 // the active source's scan/scene/frame (or model forecast-hour) list. dir is +1
 // for "later in time", −1 for "earlier".
 function stepFrame(dir) {
+  // Mesoanalysis runs its own image-frame loop (no decoded grids).
+  if (mesoActive()) return stepMesoFrame(dir);
   const pb = state.playback;
   if (pb && pb.active && pb.frames.length) { pb.seek(pb.idx + dir); return true; }
   // Radar is pinned live; stepping back is what flips on archive browsing so the
@@ -9607,7 +9724,7 @@ function saveSettings() {
         mrms: { productId: state.mrms.productId },
         models: { modelKey: state.models.modelKey, productId: state.models.productId, stormId: state.models.stormId },
         observations: { productId: state.observations.productId },
-        meso: { active: state.meso.active, sector: state.meso.sector, code: state.meso.code },
+        meso: { active: state.meso.active, sector: state.meso.sector, code: state.meso.code, frameCount: state.meso.frameCount },
         map: c && isFinite(c.lng) ? { lng: c.lng, lat: c.lat, zoom: m.getZoom() } : null,
       };
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
@@ -9789,6 +9906,7 @@ function applyStoredSettings(s) {
     if (typeof s.meso.active === 'boolean') state.meso.active = s.meso.active;
     if (MESO_SECTORS.some((x) => x.id === s.meso.sector)) state.meso.sector = s.meso.sector;
     if (MESO_PRODUCTS[s.meso.code]) state.meso.code = s.meso.code;
+    if (MESO_FRAME_COUNTS.includes(s.meso.frameCount)) state.meso.frameCount = s.meso.frameCount;
   }
   if (s.map && isFinite(s.map.lng) && isFinite(s.map.lat)) state._restoreView = s.map;
 }
@@ -10484,6 +10602,7 @@ function init() {
   });
 
   el.playBtn.addEventListener('click', () => {
+    if (mesoActive()) { toggleMesoPlay(); return; }
     if (state.playback.active) state.playback.stop();
     else state.playback.start();
   });
