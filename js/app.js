@@ -8,8 +8,10 @@ import { PRODUCTS, PRODUCT_ORDER, makeScale, parsePal, palTargetProduct, dispVal
 import { sampleAt, sweepMaxRange } from './renderer.js';
 import { createRadarLayer } from './radarLayer.js';
 import { dealiasSweep, stormRelativeSweep } from './dealias.js';
+import { describeSweepResolution, legacyResolutionSweep } from './radarResolution.js';
 import { AlertsController, setAlertStyle, styleableAlertKinds, DEFAULT_ALERT_FILL_OPACITY, DEFAULT_ALERT_OUTLINE_WIDTH } from './alerts.js';
 import { CyclonesController } from './cyclones.js';
+import { LsrController, LSR_HOURS_CHOICES, LSR_DEFAULT_HOURS, defaultLsrCats } from './lsr.js';
 import { applyMapStyle, liftBoundaryLayers, normalizeMapStyle, DEFAULT_MAP_STYLE, TOWN_FONTS } from './mapStyle.js';
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
@@ -26,7 +28,6 @@ import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
   prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
-import { LsrController, LSR_HOURS_CHOICES, LSR_DEFAULT_HOURS, defaultLsrCats } from './lsr.js';
 import { MapTools } from './maptools.js';
 import { CrossSectionTool } from './xsect.js';
 import { SplitView } from './splitview.js';
@@ -597,6 +598,25 @@ function setupOverlays(map) {
     },
     anchor
   );
+  // Local storm reports — point markers coloured by report category (feature
+  // `color`), at the label anchor so they read over the radar. The controller
+  // re-applies the category filter (setFilter) and visibility in reapply().
+  map.addLayer(
+    {
+      id: 'lsr-points',
+      type: 'circle',
+      source: 'lsr',
+      layout: { visibility: (state.lsr ? state.lsr.enabled : state._lsr.on) ? 'visible' : 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 7, 5.5, 10, 7],
+        'circle-color': ['get', 'color'],
+        'circle-stroke-color': 'rgba(10,20,35,0.9)',
+        'circle-stroke-width': 1.2,
+        'circle-opacity': 0.92,
+      },
+    },
+    anchor
+  );
   map.addLayer(
     {
       id: 'rings',
@@ -686,6 +706,7 @@ function setupOverlays(map) {
   if (state.alerts) state.alerts.refreshVisible();
   if (state.spc) state.spc.reapply();
   if (state.cyclones) state.cyclones.reapply();
+  if (state.lsr) state.lsr.reapply();
   renderLayerStack();
 }
 
@@ -819,18 +840,63 @@ function slimVolumeForMoment(volume, moment) {
     for (const r of sw.radials) {
       const m = r.moments && r.moments[moment];
       if (!m) continue;
-      radials.push({ azimuth: r.azimuth, elevation: r.elevation, nyquist: r.nyquist, moments: { [moment]: m } });
+      radials.push({
+        azimuth: r.azimuth,
+        elevation: r.elevation,
+        azimuthResolution: r.azimuthResolution,
+        messageType: r.messageType,
+        nyquist: r.nyquist,
+        moments: { [moment]: m },
+      });
     }
     if (!radials.length) continue;
     sweeps.push({
       elevationNumber: sw.elevationNumber,
       elevation: sw.elevation,
       time: sw.time,
+      supportsSuperRes: sw.supportsSuperRes,
       moments: [moment],
       radials,
     });
   }
-  return { icao: volume.icao, site: volume.site, sweeps, slim: true };
+  return {
+    icao: volume.icao,
+    site: volume.site,
+    messageType: volume.messageType,
+    supportsSuperRes: volume.supportsSuperRes,
+    radialCount: volume.radialCount,
+    sweeps,
+    slim: true,
+  };
+}
+
+function radarSiteGeometry(icao) {
+  const code = String(icao || '').trim().toUpperCase();
+  const row = RADARS.find((r) => r[0] === code);
+  return row ? { lat: row[2], lon: row[3], height: 0, inferred: true } : null;
+}
+
+function siteIdFromVolumeKey(key) {
+  const parts = String(key || '').split('/');
+  for (const part of parts) {
+    if (/^[A-Z0-9]{4}$/i.test(part) && RADARS.some((r) => r[0] === part.toUpperCase()))
+      return part.toUpperCase();
+  }
+  const name = parts[parts.length - 1] || '';
+  const match = name.match(/^([A-Z0-9]{4})/i);
+  return match ? match[1].toUpperCase() : '';
+}
+
+// Message-1 files predate the generic VOL block and therefore contain no tower
+// coordinates. Fill them from the app's radar catalog so historical scans draw,
+// inspect, export and cross-section exactly like modern Message-31 volumes.
+function ensureVolumeSite(volume, fallbackIcao) {
+  if (!volume) return volume;
+  const headerIcao = String(volume.icao || '').trim().toUpperCase();
+  const icao = headerIcao || String(fallbackIcao || '').trim().toUpperCase();
+  if (icao) volume.icao = icao;
+  if (!volume.site) volume.site = radarSiteGeometry(icao || fallbackIcao);
+  return volume;
 }
 
 function getDecodedVolume(key, onProgress) {
@@ -840,7 +906,7 @@ function getDecodedVolume(key, onProgress) {
   if (inflight) return inflight;
   const job = (async () => {
     const bytes = await fetchVolume(key, onProgress);
-    const volume = await decodeVolume(bytes);
+    const volume = ensureVolumeSite(await decodeVolume(bytes), siteIdFromVolumeKey(key));
     lruPut(volumeCache, key, volume, VOLUME_CACHE_MAX);
     return volume;
   })();
@@ -889,6 +955,11 @@ const state = {
   // than dealiased sources (RadarScope, GR2Analyst, NWS). The toggle can turn it
   // off to inspect the raw folded field.
   dealias: true,
+  // Opt-in legacy-resolution rendering for every Level II moment. The source
+  // capability remains separate: pre-super-resolution Message-1 archives are
+  // detected from their decoded radial metadata and already draw natively at
+  // legacy resolution even when this preference is off.
+  radarLegacy: false,
   live: false,
   // Radar is pinned to live; archive mode is the only way to browse past scans
   // without the 60 s refresh snapping the view forward. Off ⇒ live.
@@ -932,13 +1003,16 @@ const state = {
   styleReady: false,
   geo: null,
   alerts: null,
-  lsr: null,
-  _lsr: { on:false, hours:LSR_DEFAULT_HOURS, cats:defaultLsrCats() },
   // Tropical cyclones overlay (NHC + JTWC). `_cyclones` holds the restored
   // prefs (master + per-part toggles) applied when the controller is built at
   // init — the same pattern as `spc`/`_spc` below.
   cyclones: null,
   _cyclones: { on: false, path: true, current: true, cone: true },
+  // Local storm reports overlay (IEM LSR feed — all report types, flooding
+  // included). `_lsr` holds the restored prefs (master toggle, time window,
+  // per-category filters) applied when the controller is built at init.
+  lsr: null,
+  _lsr: { on: false, hours: LSR_DEFAULT_HOURS, cats: defaultLsrCats() },
   // ICAO codes of radars judged "down" (no scan in the past hour, or none found)
   // by the background scan kicked off on load; their map dots are drawn red.
   downSites: new Set(),
@@ -1071,6 +1145,9 @@ function cacheEls() {
   el.persistToggle = $('#persistToggle');
   el.dealiasToggle = $('#dealiasToggle');
   el.dealiasField = $('#dealiasField');
+  el.radarResolutionToggle = $('#radarResolutionToggle');
+  el.radarResolutionField = $('#radarResolutionField');
+  el.radarResolutionHint = $('#radarResolutionHint');
   el.radarOverlayField = $('#radarOverlayField');
   el.radarOverlayToggle = $('#radarOverlayToggle');
   el.modelCityValuesField = $('#modelCityValuesField');
@@ -1143,6 +1220,14 @@ function cacheEls() {
   el.cycloneList = $('#cycloneList');
   el.cyclonePreview = $('#cyclonePreview');
   el.cyclonePreviewCard = $('#cyclonePreviewCard');
+  el.lsrPanel = $('#lsrPanel');
+  el.lsrToggle = $('#lsrToggle');
+  el.lsrHours = $('#lsrHours');
+  el.lsrFilters = $('#lsrFilters');
+  el.lsrStatus = $('#lsrStatus');
+  el.lsrList = $('#lsrList');
+  el.lsrPreview = $('#lsrPreview');
+  el.lsrPreviewCard = $('#lsrPreviewCard');
   el.mapStyleControls = $('#mapStyleControls');
   el.alertOpacity = $('#alertOpacity');
   el.alertOpacityVal = $('#alertOpacityVal');
@@ -1721,10 +1806,20 @@ const DUAL_POL = new Set(['RHO', 'ZDR', 'PHI', 'KDP']);
 // Product ids offered for the current radar site — the full set, minus dual-pol
 // for TDWR towers.
 function availableProductOrder() {
+  let level2 = PRODUCT_ORDER;
+  // Archive volumes can predate super resolution and dual polarization. Once a
+  // volume is decoded, offer only the Level II moments actually present (SRV
+  // follows VEL through its shared moment) instead of leaving dead product
+  // buttons that can never render for that scan.
+  if (state.sweeps && state.sweeps.length &&
+      String(state.volume && state.volume.icao || '').trim().toUpperCase() === state.site) {
+    const moments = new Set(state.sweeps.flatMap((sw) => sw.moments || []));
+    level2 = PRODUCT_ORDER.filter((id) => PRODUCTS[id] && moments.has(PRODUCTS[id].moment));
+  }
   // TDWR terminal radars scan to Doppler only and don't carry the WSR-88D Level
   // III QPE/echo-top products, so they get neither dual-pol nor the L3 set.
-  if (isTDWR(state.site)) return PRODUCT_ORDER.filter((id) => !DUAL_POL.has(id));
-  return [...PRODUCT_ORDER, ...L3_ORDER];
+  if (isTDWR(state.site)) return level2.filter((id) => !DUAL_POL.has(id));
+  return [...level2, ...L3_ORDER];
 }
 
 // The product object for a radar product id — a Level II moment (PRODUCTS) or a
@@ -2496,6 +2591,19 @@ async function loadVolume(key) {
     state.volume = volume;
     state.sweeps = volume.sweeps;
 
+    const availableMoments = new Set(volume.sweeps.flatMap((sw) => sw.moments || []));
+    const selectedMoment = PRODUCTS[state.productId] && PRODUCTS[state.productId].moment;
+    if (selectedMoment && !availableMoments.has(selectedMoment)) {
+      const fallback = PRODUCT_ORDER.find((id) =>
+        PRODUCTS[id] && availableMoments.has(PRODUCTS[id].moment)
+      );
+      if (fallback) state.productId = fallback;
+    }
+    // The product catalog is volume-aware: old Message-1 scans expose only
+    // REF/VEL/SRV/SW, while modern scans restore the dual-pol products.
+    buildProductButtons();
+    buildLegend();
+
     // Default to the lowest available tilt of the current product.
     const list = sweepsForProduct();
     if (list.length) state.selectedElevation = list[0].elevation;
@@ -2547,24 +2655,26 @@ function renderRadar() {
 
 // Resolve the sweep actually shown: apply velocity dealiasing when enabled and
 // the velocity product is selected. Memoised in dealias.js, so this is cheap.
-function resolveSweep(sweep) {
+function resolveSweepForProduct(sweep, productId) {
   if (!sweep) return sweep;
   // SRV is derived from the (always-dealiased) velocity field — folded gates would
   // bias the mean-wind fit, so it's unfolded regardless of the VEL dealias toggle.
-  if (state.productId === 'SRV') return stormRelativeSweep(dealiasSweep(sweep));
-  if (state.dealias && state.productId === 'VEL') return dealiasSweep(sweep);
+  if (productId === 'SRV') sweep = stormRelativeSweep(dealiasSweep(sweep));
+  else if (state.dealias && productId === 'VEL') sweep = dealiasSweep(sweep);
+  const product = PRODUCTS[productId];
+  if (state.radarLegacy && product) sweep = legacyResolutionSweep(sweep, product.moment);
   return sweep;
+}
+
+function resolveSweep(sweep) {
+  return resolveSweepForProduct(sweep, state.productId);
 }
 
 // Resolve the sweep for an arbitrary radar product at the current elevation,
 // applying velocity dealiasing for VEL. Used by the split-screen pane to draw a
 // different moment from the same loaded volume.
 function radarSweepFor(productId) {
-  let sweep = pickSweep(state.sweeps, productId);
-  if (!sweep) return sweep;
-  if (productId === 'SRV') return stormRelativeSweep(dealiasSweep(sweep));
-  if (state.dealias && productId === 'VEL') sweep = dealiasSweep(sweep);
-  return sweep;
+  return resolveSweepForProduct(pickSweep(state.sweeps, productId), productId);
 }
 
 // Mirror the current view into the second split-screen pane (no-op when off).
@@ -2702,6 +2812,7 @@ function applyModePanels() {
   // Keep the dock tool slot in sync with the active source.
   if (state._refreshDockTools) state._refreshDockTools();
   if (el.dealiasField) el.dealiasField.hidden = state.mode !== 'radar';
+  updateRadarResolutionUI();
   // The single-site radar overlay control only makes sense outside radar mode.
   if (el.radarOverlayField) el.radarOverlayField.hidden = state.mode === 'radar' || state.mode === 'outlooks';
   if (el.modelCityValuesField) el.modelCityValuesField.hidden = !GRID_CITY_VALUE_MODES.has(state.mode);
@@ -4901,7 +5012,7 @@ async function loadLayerRadarVolume(siteId, seq) {
   try {
     const bytes = await fetchVolume(key);
     if (seq !== state.layers.renderSeq) return hit ? hit.volume : null;
-    volume = await decodeVolume(bytes);
+    volume = ensureVolumeSite(await decodeVolume(bytes), siteId);
   } catch (_) { return hit ? hit.volume : null; }
   if (!volume) return hit ? hit.volume : null;
   cache.set(siteId, { volume, key, ts: Date.now() });
@@ -4927,10 +5038,7 @@ async function renderRadarUserLayer(layer, seq) {
     const volume = await loadLayerRadarVolume(siteId, seq);
     if (seq !== state.layers.renderSeq || !volume) return;
     sweep = pickSweep(volume.sweeps, layer.productId);
-    if (sweep) {
-      if (layer.productId === 'SRV') sweep = stormRelativeSweep(dealiasSweep(sweep));
-      else if (state.dealias && layer.productId === 'VEL') sweep = dealiasSweep(sweep);
-    }
+    sweep = resolveSweepForProduct(sweep, layer.productId);
     site = volume.site;
   }
   if (!sweep || !site || seq !== state.layers.renderSeq) return;
@@ -6577,7 +6685,14 @@ function setupCollapsiblePanels() {
 // so nothing needs to be re-wired here.
 function layoutQuickSettings() {
   if (!el.quickSettings) return;
-  el.quickSettings.append(el.overlayOpacityField, el.smoothField, el.dealiasField, el.metarsField, el.ringsField);
+  el.quickSettings.append(
+    el.overlayOpacityField,
+    el.smoothField,
+    el.dealiasField,
+    el.radarResolutionField,
+    el.metarsField,
+    el.ringsField
+  );
 }
 
 // Mobile: distribute the control panels into the two single-scroll popups.
@@ -7571,6 +7686,7 @@ function createPlayback() {
 
 function updateMeta() {
   updateDock();
+  updateRadarResolutionUI();
   if (isL3Product(state.productId)) {
     const d = state.l3.decoded;
     const t = state.volumes.find((x) => x.key === state.volumeKey);
@@ -7591,8 +7707,19 @@ function updateMeta() {
   }
   const t = state.volumes.find((x) => x.key === state.volumeKey);
   const site = v.site;
+  const product = PRODUCTS[state.productId];
+  const resolution = product ? describeSweepResolution(sw, product.moment) : null;
+  const resolutionText = resolution && resolution.available
+    ? (state.radarLegacy && resolution.superResolution
+      ? `Legacy view ${resolutionLabel(resolution.targetAzimuthSpacing, resolution.targetGateSpacing)}`
+      : `${resolution.legacyEnough ? 'Native legacy' : 'Native super-res'} ${resolutionLabel(
+        resolution.azimuthSpacing, resolution.gateSpacing
+      )}`)
+    : 'n/a';
   el.meta.innerHTML = `
     <div class="meta-row"><span>Radar</span><b>${v.icao || state.site}</b></div>
+    <div class="meta-row"><span>Level II format</span><b>Message ${v.messageType || 'n/a'}</b></div>
+    <div class="meta-row"><span>Resolution</span><b>${resolutionText}</b></div>
     <div class="meta-row"><span>Scan time</span><b>${t ? t.label : '—'}</b></div>
     <div class="meta-row"><span>Tilt (this product)</span><b>${
       sw ? sw.elevation.toFixed(2) + '°' : 'n/a'
@@ -9245,6 +9372,7 @@ function saveSettings() {
         timeSource: state.timeSource,
         mapProvider: state.mapProvider,
         dealias: state.dealias,
+        radarLegacy: state.radarLegacy,
         radarOverlay: state.radarOverlay,
         metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
         lsr: state.lsr
@@ -9263,6 +9391,9 @@ function saveSettings() {
         cyclones: state.cyclones
           ? { on: state.cyclones.enabled, ...state.cyclones.show }
           : { ...state._cyclones },
+        lsr: state.lsr
+          ? { on: state.lsr.enabled, hours: state.lsr.hours, cats: { ...state.lsr.cats } }
+          : { ...state._lsr, cats: { ...state._lsr.cats } },
         spc: state.spc
           ? {
               on: state._outlookSourceForced && typeof state._outlookSourcePrevOn === 'boolean'
@@ -9350,6 +9481,7 @@ function applyStoredSettings(s) {
   if (s.timeSource === 'now' || s.timeSource === 'product') state.timeSource = s.timeSource;
   if (s.mapProvider === 'mapbox' || s.mapProvider === 'maptiler') state.mapProvider = s.mapProvider;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
+  if (typeof s.radarLegacy === 'boolean') state.radarLegacy = s.radarLegacy;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
   if (s.lsr && typeof s.lsr === 'object') {
     if (typeof s.lsr.on === 'boolean') state._lsr.on = s.lsr.on;
@@ -9415,6 +9547,14 @@ function applyStoredSettings(s) {
       if (typeof s.cyclones[key] === 'boolean') state._cyclones[key] = s.cyclones[key];
     }
   }
+  if (s.lsr && typeof s.lsr === 'object') {
+    if (typeof s.lsr.on === 'boolean') state._lsr.on = s.lsr.on;
+    if (LSR_HOURS_CHOICES.includes(s.lsr.hours)) state._lsr.hours = s.lsr.hours;
+    if (s.lsr.cats && typeof s.lsr.cats === 'object') {
+      for (const key of Object.keys(state._lsr.cats))
+        if (typeof s.lsr.cats[key] === 'boolean') state._lsr.cats[key] = s.lsr.cats[key];
+    }
+  }
   if (s.spc && typeof s.spc === 'object') {
     if (typeof s.spc.on === 'boolean') state._spc.on = s.spc.on;
     if (typeof s.spc.opacity === 'number' && isFinite(s.spc.opacity))
@@ -9456,6 +9596,41 @@ function setToggleBtn(btn, on) {
   btn.classList.toggle('active', !!on);
   btn.setAttribute('aria-pressed', String(!!on));
   btn.textContent = on ? 'ON' : 'OFF';
+}
+
+function resolutionLabel(azimuthSpacing, gateSpacing) {
+  const az = Number.isFinite(azimuthSpacing)
+    ? `${azimuthSpacing.toFixed(azimuthSpacing < 1 ? 1 : 0)}\u00b0`
+    : '?\u00b0';
+  const gate = Number.isFinite(gateSpacing)
+    ? (gateSpacing >= 1000 ? `${gateSpacing / 1000} km` : `${Math.round(gateSpacing)} m`)
+    : '? m';
+  return `${az} \u00d7 ${gate}`;
+}
+
+function updateRadarResolutionUI() {
+  const isLevel2 = state.mode === 'radar' && !isL3Product(state.productId) && !!PRODUCTS[state.productId];
+  if (el.radarResolutionField) el.radarResolutionField.hidden = !isLevel2;
+  setToggleBtn(el.radarResolutionToggle, state.radarLegacy);
+  if (!el.radarResolutionHint || !isLevel2) return;
+  const product = PRODUCTS[state.productId];
+  const sourceSweep = pickSweep(state.sweeps, state.productId);
+  const info = describeSweepResolution(sourceSweep, product.moment);
+  if (!info.available) {
+    el.radarResolutionHint.textContent = 'Resolution detected when a scan loads';
+    return;
+  }
+  if (state.radarLegacy && info.superResolution) {
+    el.radarResolutionHint.textContent =
+      `Displaying legacy view: ${resolutionLabel(info.targetAzimuthSpacing, info.targetGateSpacing)}`;
+  } else if (info.legacyEnough) {
+    const archive = state.volume && state.volume.messageType === 1 ? 'Archive auto-detected' : 'Native source';
+    el.radarResolutionHint.textContent =
+      `${archive}: legacy ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
+  } else {
+    el.radarResolutionHint.textContent =
+      `Native super-res: ${resolutionLabel(info.azimuthSpacing, info.gateSpacing)}`;
+  }
 }
 
 // Reflect the real split-view state onto the sidebar's Layout switch buttons.
@@ -9515,6 +9690,7 @@ function reflectStoredControls() {
   }
   setToggleBtn(el.ringsToggle, state.showRings);
   setToggleBtn(el.dealiasToggle, state.dealias);
+  updateRadarResolutionUI();
   if (el.smooth) { el.smooth.value = String(state.smooth); el.smoothVal.textContent = SMOOTH_LABELS[state.smooth]; }
   if (el.alertOpacity) {
     el.alertOpacity.value = String(Math.round(state.alertOpacity * 100));
@@ -9732,6 +9908,19 @@ function init() {
     saveSettings();
   });
 
+  if (el.radarResolutionToggle) {
+    el.radarResolutionToggle.addEventListener('click', () => {
+      state.radarLegacy = !state.radarLegacy;
+      updateRadarResolutionUI();
+      renderRadar();
+      updateInspect();
+      renderLayerStack();
+      if (state.xsect) state.xsect.refresh(true);
+      setStatus(state.radarLegacy ? 'legacy-resolution view on' : 'native radar resolution');
+      saveSettings();
+    });
+  }
+
   // Data smoothing — a Gaussian low-pass on the plotted radar / satellite /
   // model / MRMS field, none → high. It only changes a shader uniform on the
   // live layers, so there's nothing to recompute or reload.
@@ -9930,6 +10119,37 @@ function init() {
   wireCyclonePart(el.cyclonesPathToggle, 'path');
   wireCyclonePart(el.cyclonesCurrentToggle, 'current');
   wireCyclonePart(el.cyclonesConeToggle, 'cone');
+
+  // ---- NWS local storm reports overlay (IEM feed — all LSR types) ----
+  state.lsr = new LsrController(state.map, {
+    list: el.lsrList,
+    status: el.lsrStatus,
+    filters: el.lsrFilters,
+    hoursSelect: el.lsrHours,
+    preview: el.lsrPreview,
+    previewCard: el.lsrPreviewCard,
+    // Same guard as alerts/cyclones: while a click-consuming map tool is
+    // active, taps belong to the tool, not to opening a report card.
+    suppressClick: () => clickConsumingToolActive(),
+    // Time-window / category-chip changes are user prefs — persist them.
+    onPrefsChanged: () => saveSettings(),
+  });
+  // Apply the restored master toggle + time window + category filters before
+  // the first load.
+  state.lsr.hours = state._lsr.hours;
+  state.lsr.cats = { ...state._lsr.cats };
+  if (el.lsrHours) el.lsrHours.value = String(state._lsr.hours);
+  setToggleBtn(el.lsrToggle, state._lsr.on);
+  state.lsr.setEnabled(state._lsr.on);
+  if (el.lsrToggle) {
+    el.lsrToggle.addEventListener('click', () => {
+      const on = !el.lsrToggle.classList.contains('active');
+      setToggleBtn(el.lsrToggle, on);
+      state.lsr.setEnabled(on);
+      setStatus(on ? 'storm reports on' : 'storm reports off');
+      saveSettings();
+    });
+  }
 
   // ---- Basemap layer customisation (town labels, roads, rivers, borders) ----
   setupMapStyleControls();

@@ -7,10 +7,20 @@
 
 import { parseLevel2, buildSweeps } from './level2.js';
 
-self.onmessage = (e) => {
+async function gunzipIfNeeded(bytes) {
+  if (!(bytes[0] === 0x1f && bytes[1] === 0x8b)) return bytes;
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('this browser cannot decompress gzip radar archives');
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+self.onmessage = async (e) => {
   const { id, bytes } = e.data;
   try {
-    const volume = parseLevel2(bytes);
+    const fileBytes = await gunzipIfNeeded(bytes);
+    const volume = parseLevel2(fileBytes);
     const sweeps = buildSweeps(volume);
 
     // Strip the per-gate value() closures (not structured-cloneable) and gather
@@ -20,6 +30,7 @@ self.onmessage = (e) => {
       elevationNumber: sw.elevationNumber,
       elevation: sw.elevation,
       time: sw.time,
+      supportsSuperRes: sw.supportsSuperRes,
       moments: [...sw.moments],
       radials: sw.radials.map((r) => {
         const moments = {};
@@ -34,7 +45,14 @@ self.onmessage = (e) => {
             raw: m.raw,
           };
         }
-        return { azimuth: r.azimuth, elevation: r.elevation, nyquist: r.nyquist, moments };
+        return {
+          azimuth: r.azimuth,
+          elevation: r.elevation,
+          azimuthResolution: r.azimuthResolution,
+          messageType: r.messageType,
+          nyquist: r.nyquist,
+          moments,
+        };
       }),
     }));
 
@@ -45,6 +63,8 @@ self.onmessage = (e) => {
         result: {
           icao: volume.icao,
           site: volume.site,
+          messageType: volume.messageType,
+          supportsSuperRes: volume.supportsSuperRes,
           radialCount: volume.radials.length,
           sweeps: slimSweeps,
         },

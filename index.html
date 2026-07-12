@@ -297,16 +297,25 @@
             <div id="cycloneList" class="alert-list scroll"></div>
           </section>
 
+          <!-- NWS Local Storm Reports (via the IEM GeoJSON feed, which carries
+               the full LSR event set — flooding, heavy rain, winter and marine
+               reports included, not just tornado/wind/hail). The chips filter
+               by category; the select picks the trailing time window. -->
           <section class="panel" id="lsrPanel">
             <h2 class="panel-title alerts-title">
               Storm reports
               <button id="lsrToggle" class="alerts-toggle" title="Toggle NWS local storm reports">OFF</button>
             </h2>
-            <label class="field"><span>Time window</span><select id="lsrHours">
-              <option value="1">Past hour</option><option value="3">Past 3 hours</option>
-              <option value="6" selected>Past 6 hours</option><option value="12">Past 12 hours</option>
-              <option value="24">Past 24 hours</option>
-            </select></label>
+            <label class="field">
+              <span>Time window</span>
+              <select id="lsrHours">
+                <option value="1">Past hour</option>
+                <option value="3">Past 3 hours</option>
+                <option value="6" selected>Past 6 hours</option>
+                <option value="12">Past 12 hours</option>
+                <option value="24">Past 24 hours</option>
+              </select>
+            </label>
             <div id="lsrFilters" class="lsr-filters"></div>
             <div id="lsrStatus" class="spc-status"></div>
             <div id="lsrList" class="alert-list scroll"></div>
@@ -459,6 +468,10 @@
           <div class="toggle-field" id="dealiasField">
             <span>Dealias velocity</span>
             <button id="dealiasToggle" class="alerts-toggle active" title="Unfold aliased velocities (VEL product)">ON</button>
+          </div>
+          <div class="toggle-field" id="radarResolutionField">
+            <span>Legacy-resolution view <small id="radarResolutionHint" class="resolution-hint">1&deg; beams; auto-detects older scans</small></span>
+            <button id="radarResolutionToggle" class="alerts-toggle" type="button" aria-pressed="false" title="Render every Level II product at legacy resolution">OFF</button>
           </div>
           <label class="field opacity-field" id="smoothField">
             <span>Smoothing <b id="smoothVal">None</b></span>
@@ -799,6 +812,8 @@
         <div id="cyclonePreviewCard" class="alert-preview-card"></div>
       </div>
 
+      <!-- Compact local-storm-report card (same chrome as the alert preview),
+           shown when a report marker or list row is clicked. -->
       <div id="lsrPreview" class="alert-preview" hidden>
         <div id="lsrPreviewCard" class="alert-preview-card"></div>
       </div>

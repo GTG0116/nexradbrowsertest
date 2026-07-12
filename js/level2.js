@@ -8,11 +8,13 @@
 //       byte[] bzip2 stream (begins with "BZh")
 //   Each decompressed record is a stream of messages. Every message is preceded
 //   by a 12-byte legacy "CTM" header, followed by a 16-byte Message Header.
-//   Most message types occupy a fixed 2432-byte slot; the digital radar data we
-//   care about is Message Type 31, which is variable length.
+//   Most message types occupy a fixed 2432-byte slot. Modern digital radar data
+//   uses Message Type 31 (variable length); pre-Build-10 archive volumes use the
+//   fixed-size Message Type 1 layout instead.
 //
-// We only fully decode Message 31 (the generic "digital radar data" message),
-// which carries the moment data: REF, VEL, SW, ZDR, PHI, RHO (and CFP).
+// We decode both generations. Message 31 carries REF, VEL, SW, ZDR, PHI, RHO
+// (and CFP); legacy Message 1 carries REF, VEL and SW. NCEI's historical `.gz`
+// files are gunzipped in decoder.worker.js before they reach this parser.
 
 import { decodeBzip2 } from './bzip2.js';
 
@@ -42,8 +44,21 @@ class Reader {
   }
 }
 
-// Decompress all LDM records and concatenate the message stream.
+// Return the message stream while preserving its leading 12-byte CTM/compression
+// record. Realtime Archive-II files contain bzip2-compressed LDM records, while
+// NCEI historical files are already an uncompressed sequence of 2432-byte
+// records after their outer gzip wrapper has been removed.
 function inflateRecords(buffer) {
+  if (buffer.length < 36) return new Uint8Array(0);
+
+  // A realtime file starts at byte 24 with a four-byte LDM control word whose
+  // payload begins "BZh". Historical NCEI files instead have their 12-byte
+  // CTM/compression record here; passing that raw tail through gives the parser
+  // the same leading-12-byte coordinate system used for realtime files.
+  const ldmCompressed =
+    buffer[28] === 0x42 && buffer[29] === 0x5a && buffer[30] === 0x68;
+  if (!ldmCompressed) return buffer.subarray(24);
+
   const r = new Reader(buffer);
   const parts = [];
   let pos = 24; // skip the volume header record
@@ -84,6 +99,79 @@ function inflateRecords(buffer) {
   return out;
 }
 
+const LEGACY_ANGLE_SCALE = 180 / (4096 * 8);
+
+// A moment block in legacy Message 1. The original codes use the same 0/1
+// missing-value convention as Message 31, so the rest of the app can consume
+// both generations through one moment contract.
+function legacyMoment(r, dataStart, gateCount, firstGate, gateSpacing, scale, offset, limit) {
+  if (!dataStart || gateCount <= 0 || dataStart >= limit) return null;
+  const count = Math.min(gateCount, Math.max(0, limit - dataStart));
+  if (!count) return null;
+  const raw = new Uint8Array(count);
+  raw.set(r.bytes.subarray(dataStart, dataStart + count));
+  return {
+    gateCount: count,
+    firstGate,
+    gateSpacing,
+    scale,
+    offset,
+    raw,
+    value(i) {
+      const code = raw[i];
+      return code < 2 ? NaN : (code - offset) / scale;
+    },
+  };
+}
+
+// Parse the pre-2008 fixed-layout Digital Radar Data message (Message Type 1).
+// Offsets follow ROC ICD 2620002 Table III and are relative to the start of the
+// Message-1 body (immediately after the ordinary 16-byte message header).
+function parseMessage1(r, base, recordEnd) {
+  const dopplerFirstRaw = r.u16(base + 20);
+  const dopplerFirst = dopplerFirstRaw > 0x7fff ? dopplerFirstRaw - 0x10000 : dopplerFirstRaw;
+  const reflectivityGates = r.u16(base + 26);
+  const dopplerGates = r.u16(base + 28);
+  const reflectivityPointer = r.u16(base + 36);
+  const velocityPointer = r.u16(base + 38);
+  const widthPointer = r.u16(base + 40);
+  const velocityResolution = r.u16(base + 42);
+  let elevation = r.u16(base + 14) * LEGACY_ANGLE_SCALE;
+  if (elevation > 180) elevation -= 360;
+  const radial = {
+    collectTimeMs: r.u32(base),
+    julianDate: r.u16(base + 4),
+    unambiguousRange: r.i16(base + 6) * 100,
+    azimuth: r.u16(base + 8) * LEGACY_ANGLE_SCALE,
+    azimuthNumber: r.u16(base + 10),
+    radialStatus: r.u16(base + 12),
+    elevation,
+    elevationNumber: r.u16(base + 16),
+    cutSector: r.u16(base + 30),
+    azimuthResolution: 2, // Message 1 is the native 1.0-degree legacy format.
+    nyquist: r.i16(base + 60) * 0.01,
+    messageType: 1,
+    moments: {},
+  };
+
+  const ref = legacyMoment(
+    r, base + reflectivityPointer, reflectivityGates,
+    r.i16(base + 18), r.u16(base + 22), 2, 66, recordEnd
+  );
+  const vel = legacyMoment(
+    r, base + velocityPointer, dopplerGates,
+    dopplerFirst, r.u16(base + 24), velocityResolution === 4 ? 1 : 2, 129, recordEnd
+  );
+  const sw = legacyMoment(
+    r, base + widthPointer, dopplerGates,
+    dopplerFirst, r.u16(base + 24), 2, 129, recordEnd
+  );
+  if (ref) radial.moments.REF = ref;
+  if (vel) radial.moments.VEL = vel;
+  if (sw) radial.moments.SW = sw;
+  return radial;
+}
+
 // Parse one Message 31 body (starting at the radar identifier) into a radial.
 function parseMessage31(r, base, bodyLen) {
   const radial = {
@@ -102,6 +190,7 @@ function parseMessage31(r, base, bodyLen) {
     spotBlanking: r.u8(base + 28),
     azimuthIndexing: r.u8(base + 29),
     blockCount: r.u16(base + 30),
+    messageType: 31,
     moments: {},
   };
 
@@ -206,12 +295,16 @@ function parseMomentBlock(r, o) {
 
 // Decode an entire Archive II file (Uint8Array) into a structured volume.
 export function parseLevel2(fileBytes) {
+  if (!(fileBytes instanceof Uint8Array)) fileBytes = new Uint8Array(fileBytes);
+  if (fileBytes.length < 36) throw new Error('Level II file is too short');
   const header = new Reader(fileBytes);
   const volume = {
     version: header.str(0, 9),
     icao: header.str(20, 4),
     radials: [],
     site: null,
+    messageType: null,
+    supportsSuperRes: false,
   };
 
   const stream = inflateRecords(fileBytes);
@@ -244,10 +337,32 @@ export function parseLevel2(fileBytes) {
       }
       // Variable advance; guard against a malformed zero-size message.
       pos += msgSize > 0 ? CTM_HEADER + msgSize * 2 : RECORD_SIZE;
+    } else if (type === 1) {
+      // Legacy Digital Radar Data occupies one fixed 2432-byte record. The
+      // stream keeps its initial 12-byte CTM record, so `pos + 12` is the
+      // ordinary message header and the body begins another 16 bytes later.
+      const bodyBase = pos + CTM_HEADER + MSG_HEADER;
+      const recordEnd = Math.min(len, pos + CTM_HEADER + RECORD_SIZE);
+      try {
+        const radial = parseMessage1(r, bodyBase, recordEnd);
+        if (Object.keys(radial.moments).length) volume.radials.push(radial);
+      } catch (_) {
+        // Tolerate a malformed/truncated radial and continue with the volume.
+      }
+      pos += RECORD_SIZE;
     } else {
       pos += RECORD_SIZE;
     }
   }
+
+  if (!volume.radials.length) throw new Error('Level II file contains no supported radial data');
+  volume.messageType = volume.radials.some((r) => r.messageType === 31) ? 31 : 1;
+  // Message 31 can contain both 0.5-degree super-resolution cuts and ordinary
+  // 1-degree cuts. A single half-degree radial means the volume supports the
+  // modern product; Message 1 is intrinsically legacy-only.
+  volume.supportsSuperRes = volume.radials.some(
+    (r) => r.messageType === 31 && r.azimuthResolution === 1
+  );
 
   return volume;
 }
@@ -264,10 +379,12 @@ export function buildSweeps(volume) {
         elevation: rad.elevation,
         radials: [],
         moments: new Set(),
+        supportsSuperRes: false,
       });
     }
     const sw = sweeps.get(key);
     sw.radials.push(rad);
+    if (rad.azimuthResolution === 1) sw.supportsSuperRes = true;
     for (const m of Object.keys(rad.moments)) sw.moments.add(m);
   }
   const list = [...sweeps.values()].sort((a, b) => a.elevation - b.elevation);
