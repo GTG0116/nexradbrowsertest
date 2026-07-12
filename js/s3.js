@@ -82,24 +82,48 @@ async function listVolumesAws(site, date) {
   const m = pad(date.getUTCMonth() + 1);
   const d = pad(date.getUTCDate());
   const prefix = `${y}/${m}/${d}/${site.toUpperCase()}/`;
-  const listUrl = viaProxy(
-    `${BUCKET}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`
-  );
 
-  const res = await fetch(listUrl);
-  if (!res.ok) throw new Error(`S3 list failed: ${res.status}`);
-  const xml = await res.text();
-
+  // S3 ListObjectsV2 caps each response at 1000 keys. A busy archive day can
+  // hold more than that once the MDM (metadata) sidecars and partial ".001"
+  // chunk objects are counted — and because keys sort by scan time, a single
+  // un-paginated page silently drops the *end* of the day (the evening scans).
+  // Follow the continuation token to the last page so every scan is listed.
   const keys = [];
-  const re = /<Key>([^<]+)<\/Key>/g;
-  let match;
-  while ((match = re.exec(xml)) !== null) {
-    const key = match[1];
-    // Ignore MDM (metadata) sidecars and partial chunk objects (".001" etc.).
-    if (key.endsWith('_MDM')) continue;
-    if (/\.\d+$/.test(key)) continue;
-    keys.push(key);
+  let token = '';
+  // Hard cap the page count so a malformed/looping response can never spin
+  // forever; ~20k objects is far more than any real single-site day.
+  for (let page = 0; page < 20; page++) {
+    let listUrl =
+      `${BUCKET}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`;
+    if (token) listUrl += `&continuation-token=${encodeURIComponent(token)}`;
+
+    const res = await fetch(viaProxy(listUrl));
+    if (!res.ok) throw new Error(`S3 list failed: ${res.status}`);
+    const xml = await res.text();
+
+    const re = /<Key>([^<]+)<\/Key>/g;
+    let match;
+    while ((match = re.exec(xml)) !== null) {
+      const key = match[1];
+      // Ignore MDM (metadata) sidecars and partial chunk objects (".001" etc.).
+      if (key.endsWith('_MDM')) continue;
+      if (/\.\d+$/.test(key)) continue;
+      keys.push(key);
+    }
+
+    if (!/<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml)) break;
+    const next = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+    if (!next) break;
+    // The token is XML-escaped in the response; decode the common entities so
+    // it round-trips through the next request's query string.
+    token = next[1]
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
   }
+
   keys.sort();
   return keys.map((key) => ({
     key,

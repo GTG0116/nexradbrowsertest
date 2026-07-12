@@ -3961,6 +3961,24 @@ input[type='range']::-moz-range-thumb {
   font-size: 10px;
   line-height: 1.2;
 }
+/* Docked variant: the same panel rendered inside the Settings UI rather than
+   floating over the map. Drop the absolute positioning and card chrome so it
+   flows as an ordinary settings block under the METAR toggle. */
+.metar-panel.metar-panel--docked {
+  position: static;
+  inset: auto;
+  left: auto;
+  bottom: auto;
+  z-index: auto;
+  min-width: 0;
+  max-width: none;
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.metar-controls[hidden] { display: none; }
 .metar-panel-row {
   display: grid;
   grid-template-columns: 1fr auto;

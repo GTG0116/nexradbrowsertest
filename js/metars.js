@@ -233,8 +233,11 @@ async function fetchTarget(target) {
 // ---------------------------------------------------------------------------
 
 export class MetarController {
-  constructor(map) {
+  constructor(map, opts = {}) {
     this.map = map;
+    // Optional element to render the controls panel into (the Settings UI).
+    // When absent the panel falls back to floating over the map container.
+    this.panelHost = opts.panelHost || null;
     this.enabled = false;
     this.obs = [];
     this.drawn = [];
@@ -402,9 +405,10 @@ export class MetarController {
 
   ensurePanel() {
     if (!this.panel) {
-      const container = this.map.getContainer();
+      // Prefer the Settings host; fall back to floating over the map.
+      const host = this.panelHost || this.map.getContainer();
       this.panel = document.createElement('div');
-      this.panel.className = 'metar-panel';
+      this.panel.className = this.panelHost ? 'metar-panel metar-panel--docked' : 'metar-panel';
       this.panel.innerHTML = `
         <div class="metar-panel-row">
           <span>METAR</span>
@@ -435,7 +439,7 @@ export class MetarController {
         try { localStorage.setItem(SIZE_STORAGE_KEY, String(this.sizeScale)); } catch {}
         this.scheduleRender();
       });
-      container.appendChild(this.panel);
+      host.appendChild(this.panel);
     }
     // Flight-category key in the current theme's plot colours.
     const cats = this.panel.querySelector('.metar-panel-cats');
@@ -446,10 +450,13 @@ export class MetarController {
         .join(' ');
     }
     this.panel.hidden = false;
+    // Reveal the Settings host row (kept collapsed while the overlay is off).
+    if (this.panelHost) this.panelHost.hidden = false;
   }
 
   hidePanel() {
     if (this.panel) this.panel.hidden = true;
+    if (this.panelHost) this.panelHost.hidden = true;
   }
 
   scheduleRender() {

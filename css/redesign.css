@@ -2057,12 +2057,13 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
   .app.sidebar-hidden .sidebar-resize { left: 0; }
   .app.sidebar-hidden .sidebar-collapse { left: 8px; }
   .app.sidebar-hidden .sidebar-collapse .lucide { transform: rotate(180deg); }
-  /* While the Settings drawer covers the sidebar, its title occupies the
-     top-left corner the collapse control normally sits in. Park the button
-     just outside the drawer's right edge so neither overlaps the other. */
+  /* While the Settings drawer covers the sidebar, the drawer has its own close
+     (×) control and there is nothing behind it to collapse into view. Parking
+     the collapse button just outside the drawer's right edge put it on top of
+     the map's top-left HUD (breadcrumb/clock), so hide it entirely until the
+     drawer is closed again. */
   .app:not(.mobile).sheet-open .sidebar-collapse {
-    top: 68px;
-    left: calc(var(--sidebar-w) + 12px);
+    display: none;
   }
   /* The open/close control occupies the sidebar's top-left corner. Give the
      first control group its own row so the button never covers Source. */
