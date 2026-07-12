@@ -6511,10 +6511,20 @@ function applyOutlookOpacity() {
 function setOutlookRasterOverlay(cfg) {
   const map = state.map;
   const SRC = 'ffg-outlook', LYR = 'ffg-outlook';
-  if (!map || !map.isStyleLoaded || !map.isStyleLoaded()) return;
+  if (!map) return;
+  // The style may still be loading when the FFG product is selected (fresh boot,
+  // or a mode/basemap switch mid-flight). Adding a source/layer before the style
+  // is ready throws and silently drops the overlay — which was the visible
+  // symptom of "FFG never shows". Defer to the next style load and re-run once,
+  // instead of returning and waiting for some other event to rebuild it.
+  if (!map.isStyleLoaded || !map.isStyleLoaded()) {
+    map.once('idle', () => setOutlookRasterOverlay(cfg));
+    return;
+  }
   if (map.getLayer(LYR)) map.removeLayer(LYR);
   if (map.getSource(SRC)) map.removeSource(SRC);
   if (!cfg) return;
+  const opacity = Number.isFinite(state.spcOpacity) ? state.spcOpacity : 0.3;
   map.addSource(SRC, {
     type: 'raster',
     tiles: [cfg.tiles],
@@ -6526,7 +6536,7 @@ function setOutlookRasterOverlay(cfg) {
   // of the data overlays — the radar, alerts and boundaries all read on top.
   const below = map.getLayer('spc-outlook-fill') ? 'spc-outlook-fill' : dataLayerAnchor(map);
   map.addLayer(
-    { id: LYR, type: 'raster', source: SRC, paint: { 'raster-opacity': state.spcOpacity, 'raster-fade-duration': 180 } },
+    { id: LYR, type: 'raster', source: SRC, paint: { 'raster-opacity': opacity, 'raster-fade-duration': 180 } },
     below
   );
 }
@@ -8169,6 +8179,13 @@ function setupMapTools() {
     for (const [btn, name] of toolButtons)
       btn.classList.toggle('active', state.mapTools.tool === name);
     if (el.toolXsect) el.toolXsect.classList.toggle('active', !!(state.xsect && state.xsect.active()));
+    // On mobile the visible tool lives in the dock's single swappable slot, which
+    // proxies to these hidden buttons. Its active glow is synced separately, so
+    // push the refresh through here too — otherwise arming a tool that resolves
+    // asynchronously (the cross section awaits its Level II volume before it
+    // toggles) leaves the dock button dark and the tool feels like it never
+    // enabled. See setupDockTools().
+    if (state._syncDockTool) state._syncDockTool();
     // Storm track takes over the screen: hide the bottom UI (dock, legend,
     // footer) so the track + town list own the view (CSS keys off this class).
     document.body.classList.toggle('storm-active', state.mapTools.tool === 'storm');
@@ -8210,7 +8227,14 @@ function setupMapTools() {
         return;
       }
       if (!state.xsect.active()) clearOtherTools('xsect');
-      if (!state.xsect.active()) await prepareCrossSectionVolume();
+      // Pick the best complete VST to slice, but never let a fetch/decode failure
+      // block the tool from arming — toggle() has its own volume guard. Without
+      // this, a rejected prepare left the tool (and the mobile dock slot that
+      // proxies to it) looking like it simply refused to enable.
+      if (!state.xsect.active()) {
+        try { await prepareCrossSectionVolume(); }
+        catch (e) { console.warn('cross-section volume prep failed', e); }
+      }
       state.xsect.toggle();
       syncToolButtons();
     });
@@ -8427,6 +8451,11 @@ function setupDockTools() {
     const btn = t.btn();
     el.dockToolBtn.classList.toggle('active', !!(btn && btn.classList.contains('active')));
   }
+  // Let the tool controllers (which flip the hidden proxy buttons' .active class
+  // when a tool arms/disarms — including asynchronously) refresh the dock slot's
+  // glow so the mobile UI reflects the real tool state. Without this the cross
+  // section, which awaits its volume before toggling, never lights the slot.
+  state._syncDockTool = syncActive;
 
   function buildMenu() {
     el.dockToolMenu.innerHTML = '';

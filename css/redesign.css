@@ -2567,3 +2567,190 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
     grid-template-columns: 1fr;
   }
 }
+
+/* ===========================================================================
+   Production motion polish
+   ---------------------------------------------------------------------------
+   A final, cohesive pass of smooth micro-animations layered on top of the base
+   motion system (--dur-* / --ease-*). Everything here is transform/opacity only
+   (GPU-friendly, no layout thrash) and additive, so it never changes geometry —
+   just how controls enter, respond and settle. The reduce-motion / prefers-
+   reduced-motion neutralisers in style.css use !important and match every
+   element, so all of this collapses to instant for users who ask for that.
+   =========================================================================== */
+
+/* A slightly springier curve for entrances that want a touch of overshoot, and
+   a shared soft shadow used for hover "lift". Kept local so the base tokens stay
+   authoritative for everything already tuned against them. */
+:root {
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --lift-shadow: 0 10px 24px -14px rgba(0, 0, 0, 0.55);
+}
+
+/* ---- Shared entrance keyframes --------------------------------------------- */
+@keyframes mpFadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes mpFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes mpPopIn {
+  0% { opacity: 0; transform: scale(0.94); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* ---- Interactive lift: buttons, rows and cards gently rise on hover and press
+   back down, so the whole surface feels physical rather than flat. Pointer-only
+   so touch devices (which have no hover) never get a stuck lifted state. ------ */
+@media (hover: hover) and (pointer: fine) {
+  .product-btn,
+  .vol-btn,
+  .tilt-btn,
+  .mode-btn,
+  .layout-btn,
+  .alert-row,
+  .pal-btn,
+  .sounding-btn,
+  .weather-action,
+  .split-badge {
+    transition: transform var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out),
+      background var(--dur-fast) var(--ease-out),
+      box-shadow var(--dur-base) var(--ease-out);
+  }
+  .product-btn:hover,
+  .vol-btn:hover,
+  .tilt-btn:hover,
+  .mode-btn:hover,
+  .layout-btn:hover,
+  .alert-row:hover,
+  .sounding-btn:hover:not([hidden]) {
+    transform: translateY(-1px);
+    box-shadow: var(--lift-shadow);
+  }
+  .product-btn:active,
+  .vol-btn:active,
+  .tilt-btn:active,
+  .mode-btn:active,
+  .layout-btn:active,
+  .alert-row:active {
+    transform: translateY(0) scale(0.97);
+    box-shadow: none;
+  }
+}
+
+/* ---- Mode / layout selection: a small confident pop when a control becomes the
+   active one, so switching modes reads as a deliberate state change rather than
+   a silent recolour. Scale-only (no opacity) since the button is already on
+   screen — matching the existing .product-btn.active entrance, which we leave
+   untouched. --------------------------------------------------------------- */
+@keyframes mpActivePop {
+  0% { transform: scale(0.95); }
+  60% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.mode-btn.active,
+.layout-btn.active {
+  animation: mpActivePop var(--dur-base) var(--ease-spring);
+}
+
+/* ---- Cross-section panel: it was appended and simply un-hidden (a hard pop).
+   Give it the same fade + rise the sounding / alert cards use. On mobile it is a
+   bottom sheet, so it slides up from the edge. ------------------------------- */
+.xsect {
+  will-change: opacity, transform;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out);
+}
+.xsect[hidden] {
+  display: block !important;
+  opacity: 0;
+  transform: translateY(12px) scale(0.99);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
+}
+@media (max-width: 759.98px) {
+  .xsect[hidden] {
+    transform: translateY(100%);
+  }
+}
+/* The product chips inside a freshly opened section fade in together. */
+.xsect:not([hidden]) .xs-products button {
+  animation: mpFadeUp var(--dur-base) var(--ease-out) both;
+}
+
+/* ---- Tool popovers (draw / measure controls): scale + fade from the rail. --- */
+.tool-popover:not([hidden]) {
+  animation: mpPopIn var(--dur-base) var(--ease-spring);
+  transform-origin: top right;
+}
+
+/* ---- Mobile dock tool chooser: the menu already scales in; stagger its items
+   so the list cascades open instead of appearing all at once. ---------------- */
+.dock-tool-menu:not([hidden]) .dock-tool-item {
+  animation: mpFadeUp var(--dur-base) var(--ease-out) both;
+}
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(1) { animation-delay: 0ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(2) { animation-delay: 22ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(3) { animation-delay: 44ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(4) { animation-delay: 66ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(5) { animation-delay: 88ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(6) { animation-delay: 110ms; }
+.dock-tool-menu:not([hidden]) .dock-tool-item:nth-child(7) { animation-delay: 132ms; }
+.dock-tool-item {
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.dock-tool-item:active {
+  transform: scale(0.97);
+}
+
+/* ---- Legend: fade the outlook swatch rows in when a new product's legend is
+   built, so colour scales resolve smoothly instead of snapping. -------------- */
+.spc-legend-row {
+  animation: mpFadeIn var(--dur-base) var(--ease-out);
+}
+
+/* ---- Outlook detail buttons cascade in when the panel builds (they are
+   rebuilt wholesale on every product/day switch, so a soft rise reads better
+   than a snap). --------------------------------------------------------------- */
+.outlook-detail-list .vol-btn {
+  animation: mpFadeUp var(--dur-base) var(--ease-out) both;
+}
+
+/* ---- Toggle buttons (ON/OFF pills): animate the colour + a tiny press so every
+   overlay switch feels responsive. ------------------------------------------- */
+.alerts-toggle {
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.alerts-toggle:active {
+  transform: scale(0.96);
+}
+
+/* ---- Status line / map readout text: cross-fade content changes softly. ----- */
+.dock-status,
+.map-readout b,
+.map-readout span {
+  transition: color var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+
+/* ---- Range-of-motion for the mobile bottom sheet already exists; make sure the
+   sheet tabs' active underline/colour eases rather than snaps. --------------- */
+.sheet-tab {
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
