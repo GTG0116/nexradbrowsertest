@@ -181,6 +181,7 @@
               <span>Analysis</span>
               <select id="obsDomainSelect">
                 <option value="RTMA">RTMA 2.5 km</option>
+                <option value="MESO">SPC Mesoanalysis</option>
               </select>
             </label>
           </section>
@@ -262,6 +263,22 @@
             <label class="field opacity-field" id="overlayOpacityField">
               <span>Overlay opacity <b id="opacityVal">85%</b></span>
               <input type="range" id="opacity" min="20" max="100" value="85" />
+            </label>
+          </section>
+
+          <!-- SPC Mesoanalysis controls. Shown only in Obs mode when the
+               Analysis picker is set to "SPC Mesoanalysis" — the interactive map
+               is swapped for the static SPC plot (#mesoView), so product and
+               sector selection live here in the sidebar. -->
+          <section class="panel" id="mesoPanel" hidden>
+            <h2 class="panel-title">Mesoanalysis</h2>
+            <label class="field">
+              <span>Product</span>
+              <select id="mesoProductSelect"></select>
+            </label>
+            <label class="field">
+              <span>Sector</span>
+              <select id="mesoSectorSelect"></select>
             </label>
           </section>
 
@@ -455,6 +472,29 @@
             </div>
             <div id="progress" class="progress"></div>
             <div id="decoding" class="decoding">DECODING</div>
+
+            <!-- SPC Mesoanalysis static plot. SPC only publishes finished raster
+                 images (no griddable data), so instead of a map overlay we cover
+                 the interactive map with the plain SPC GIF while a mesoanalysis
+                 product is selected. Toggled by applyMesoUi() in app.js. -->
+            <div id="mesoView" class="meso-view" hidden>
+              <div class="meso-view-head">
+                <span id="mesoViewTitle" class="meso-view-title">SPC Mesoanalysis</span>
+                <div class="meso-view-actions">
+                  <button id="mesoRefresh" class="meso-view-btn" type="button" title="Refresh image">
+                    <i data-lucide="refresh-cw" class="lucide sm" aria-hidden="true"></i>
+                  </button>
+                  <a id="mesoOpen" class="meso-view-btn" href="#" target="_blank" rel="noopener" title="Open full image on spc.noaa.gov">
+                    <i data-lucide="external-link" class="lucide sm" aria-hidden="true"></i>
+                  </a>
+                </div>
+              </div>
+              <div class="meso-view-body">
+                <img id="mesoImg" class="meso-img" alt="SPC mesoanalysis product" />
+                <div id="mesoLoading" class="meso-loading" hidden>Loading…</div>
+                <div id="mesoError" class="meso-error" hidden>Image unavailable.</div>
+              </div>
+            </div>
           </div>
         </section>
 

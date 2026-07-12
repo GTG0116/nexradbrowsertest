@@ -23,6 +23,11 @@ import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from '
 import { MODELS, MODEL_PRODUCTS, MODEL_CATEGORIES, MODEL_ORDER, listModels, loadModel, forecastHours,
   modelSupports, defaultProductFor, setModelProxy } from './models.js';
 import { OBS_PRODUCTS, OBS_CATEGORIES, listObservations, loadObservation } from './observations.js';
+import {
+  MESO_SECTORS, MESO_CATEGORIES, MESO_PRODUCTS,
+  MESO_DEFAULT_SECTOR, MESO_DEFAULT_CODE,
+  mesoImageUrl, mesoProductName, mesoSectorName,
+} from './mesoanalysis.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
   prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
@@ -1107,6 +1112,13 @@ const state = {
     displayGrid: null,
     layer: null,
   },
+  // SPC Mesoanalysis (static plots). `active` is set when the Obs-mode Analysis
+  // picker is "SPC Mesoanalysis"; the app then covers the map with #mesoView.
+  meso: {
+    active: false,
+    sector: MESO_DEFAULT_SECTOR,
+    code: MESO_DEFAULT_CODE,
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -1262,6 +1274,17 @@ function cacheEls() {
   el.conusViewSelect = $('#conusViewSelect');
   el.mrmsFields = $('#mrmsFields');
   el.obsFields = $('#obsFields');
+  el.obsDomainSelect = $('#obsDomainSelect');
+  el.mesoPanel = $('#mesoPanel');
+  el.mesoProductSelect = $('#mesoProductSelect');
+  el.mesoSectorSelect = $('#mesoSectorSelect');
+  el.mesoView = $('#mesoView');
+  el.mesoViewTitle = $('#mesoViewTitle');
+  el.mesoImg = $('#mesoImg');
+  el.mesoLoading = $('#mesoLoading');
+  el.mesoError = $('#mesoError');
+  el.mesoRefresh = $('#mesoRefresh');
+  el.mesoOpen = $('#mesoOpen');
   el.modelFields = $('#modelFields');
   el.modelSelect = $('#modelSelect');
   el.stormFields = $('#stormFields');
@@ -2857,6 +2880,9 @@ function applyModePanels() {
     el.archiveToggle.textContent = state.radarArchive ? 'ON' : 'OFF';
   }
   if (typeof updateDockSourceButton === 'function') updateDockSourceButton();
+  // SPC Mesoanalysis sub-mode: cover the map with the static plot and swap the
+  // RTMA controls for the product/sector pickers (no-op outside Obs mode).
+  if (typeof applyMesoUi === 'function') applyMesoUi();
 }
 
 function setMode(mode) {
@@ -2916,7 +2942,8 @@ function setMode(mode) {
   } else if (mode === 'models') {
     loadModelList();
   } else if (mode === 'observations') {
-    loadObservationList();
+    if (state.meso.active) loadMesoImage();
+    else loadObservationList();
   } else if (mode === 'outlooks') {
     enterOutlookSourceMode();
   }
@@ -2934,7 +2961,7 @@ function refreshActive() {
   if (state.mode === 'satellite') return loadSatScenes();
   if (state.mode === 'mrms') return loadMrmsList();
   if (state.mode === 'models') return loadModelList();
-  if (state.mode === 'observations') return loadObservationList();
+  if (state.mode === 'observations') return state.meso.active ? loadMesoImage(true) : loadObservationList();
   if (state.mode === 'outlooks') return refreshOutlookSource();
 }
 
@@ -3774,7 +3801,7 @@ function buildObservationList() {
 }
 
 async function loadObservationList() {
-  if (state.mode !== 'observations') return;
+  if (state.mode !== 'observations' || state.meso.active) return;
   setStatus('listing RTMA...', true);
   buildObservationList();
   try {
@@ -3839,12 +3866,136 @@ function clearObservations() {
   clearModelCityValues();
 }
 
+// ---------------------------------------------------------------------------
+// SPC Mesoanalysis (static plots)
+//
+// SPC only publishes finished raster plots, so there is no grid to drape over
+// the map. When a mesoanalysis product is active we cover the interactive map
+// with the plain SPC GIF (#mesoView); product and sector pickers live in the
+// sidebar (#mesoPanel). This lives inside Obs mode, chosen via the Analysis
+// picker (RTMA 2.5 km  |  SPC Mesoanalysis).
+// ---------------------------------------------------------------------------
+function mesoActive() {
+  return state.mode === 'observations' && state.meso.active;
+}
+
+function initMesoControls() {
+  if (!el.mesoProductSelect) return;
+  // Product picker: one <optgroup> per SPC section, in SPC's own order.
+  el.mesoProductSelect.innerHTML = '';
+  for (const cat of MESO_CATEGORIES) {
+    const og = document.createElement('optgroup');
+    og.label = cat.name;
+    for (const [code, name] of cat.products) {
+      const o = document.createElement('option');
+      o.value = code;
+      o.textContent = name;
+      if (code === state.meso.code) o.selected = true;
+      og.appendChild(o);
+    }
+    el.mesoProductSelect.appendChild(og);
+  }
+  // Sector picker.
+  el.mesoSectorSelect.innerHTML = '';
+  for (const s of MESO_SECTORS) {
+    const o = document.createElement('option');
+    o.value = s.id;
+    o.textContent = s.name;
+    if (s.id === state.meso.sector) o.selected = true;
+    el.mesoSectorSelect.appendChild(o);
+  }
+
+  el.mesoProductSelect.addEventListener('change', () => {
+    state.meso.code = el.mesoProductSelect.value;
+    loadMesoImage();
+    saveSettings();
+  });
+  el.mesoSectorSelect.addEventListener('change', () => {
+    state.meso.sector = el.mesoSectorSelect.value;
+    loadMesoImage();
+    saveSettings();
+  });
+  if (el.mesoRefresh) el.mesoRefresh.addEventListener('click', () => loadMesoImage(true));
+
+  if (el.mesoImg) {
+    el.mesoImg.addEventListener('load', () => {
+      if (el.mesoLoading) el.mesoLoading.hidden = true;
+      if (el.mesoError) el.mesoError.hidden = true;
+      el.mesoImg.hidden = false;
+    });
+    el.mesoImg.addEventListener('error', () => {
+      if (el.mesoLoading) el.mesoLoading.hidden = true;
+      el.mesoImg.hidden = true;
+      if (el.mesoError) el.mesoError.hidden = false;
+    });
+  }
+}
+
+// Point the <img> at the current product/sector. `force` busts the cache so a
+// manual refresh or a live tick pulls the freshest analysis.
+function loadMesoImage(force) {
+  if (!el.mesoImg) return;
+  const { sector, code } = state.meso;
+  const name = mesoProductName(code);
+  const url = mesoImageUrl(sector, code, force ? Date.now() : true);
+  if (el.mesoViewTitle) el.mesoViewTitle.textContent = `${name} — ${mesoSectorName(sector)}`;
+  if (el.mesoOpen) el.mesoOpen.href = mesoImageUrl(sector, code);
+  if (el.mesoError) el.mesoError.hidden = true;
+  if (el.mesoLoading) el.mesoLoading.hidden = false;
+  el.mesoImg.hidden = true;
+  el.mesoImg.src = url;
+}
+
+// Reflect the current mesoanalysis state onto the DOM: show/hide the static
+// image view + sidebar panel, and suppress the map-side panels it replaces.
+function applyMesoUi() {
+  const active = mesoActive();
+  const app = document.querySelector('.app');
+  if (app) app.classList.toggle('meso-active', active);
+  if (el.mesoPanel) el.mesoPanel.hidden = !active;
+  if (el.mesoView) el.mesoView.hidden = !active;
+  if (!active) return;
+  // The static plot stands in for the map, so the RTMA product grid, scan-frame
+  // list, opacity and city-value controls have nothing to act on — hide them.
+  if (el.productPanel) el.productPanel.hidden = true;
+  if (el.volumePanel) el.volumePanel.hidden = true;
+  if (el.overlayOpacityField) el.overlayOpacityField.hidden = true;
+  if (el.playFramesField) el.playFramesField.hidden = true;
+  if (el.modelCityValuesField) el.modelCityValuesField.hidden = true;
+}
+
+// Enter/leave the mesoanalysis sub-mode (driven by the Analysis picker). On
+// enter we drop the RTMA overlay and show the static plot; on leave we restore
+// the normal RTMA-overlay observation flow.
+function setMesoActive(active) {
+  active = !!active;
+  if (state.meso.active === active) { applyMesoUi(); return; }
+  state.meso.active = active;
+  if (active) {
+    clearObservations();
+    if (state.playback && state.playback.active) state.playback.stop();
+    applyMesoUi();
+    loadMesoImage();
+  } else {
+    applyMesoUi();
+    // Rebuild the RTMA product controls / legend and reload the grid list.
+    applyModePanels();
+    buildProductButtons();
+    buildLegend();
+    state._forceLatest = true;
+    loadObservationList();
+  }
+  saveSettings();
+}
+
 function observationGridForReadouts() {
   return (state.playback && state.playback.active && state.observations.displayGrid) ||
     state.observations.grid;
 }
 
 function renderObservations() {
+  // SPC Mesoanalysis draws its own static plot over the map — no grid to paint.
+  if (state.meso.active) { clearObservations(); return; }
   const map = state.map;
   if (!map || !state.styleReady) return;
   if (mainSourceSuppressed()) {
@@ -6666,6 +6817,7 @@ const COLLAPSIBLE_PANELS = [
   ['layoutPanel', true],
   ['layerPanel', true],
   ['productPanel', false],
+  ['mesoPanel', false],
   ['tiltPanel', false],
   ['fhourPanel', false],
   ['outlookDetailPanel', false],
@@ -6749,6 +6901,7 @@ function layoutMobileSheet() {
   if (sourceInProducts) prod.append(el.sourcePanel);
   if (mode === 'models') prod.append(el.volumePanel); // model runs
   prod.append(el.productPanel);
+  if (mode === 'observations') prod.append(el.mesoPanel);
   if (mode === 'outlooks') prod.append(el.spcPanel, el.outlookDetailPanel);
 
   set.append(el.quickSettings);
@@ -6781,7 +6934,7 @@ function layoutDesktopSidebar() {
   // Product and Active alerts, per the redesign.
   el.sidebar.append(
     el.sourcePanel, el.layoutPanel, el.layerPanel, el.tiltPanel, el.fhourPanel,
-    el.productPanel, el.outlookDetailPanel, el.alertsPanel,
+    el.productPanel, el.mesoPanel, el.outlookDetailPanel, el.alertsPanel,
     el.settingsBtn, el.sidebarFoot
   );
   placeDesktopVolumePanel();
@@ -9454,6 +9607,7 @@ function saveSettings() {
         mrms: { productId: state.mrms.productId },
         models: { modelKey: state.models.modelKey, productId: state.models.productId, stormId: state.models.stormId },
         observations: { productId: state.observations.productId },
+        meso: { active: state.meso.active, sector: state.meso.sector, code: state.meso.code },
         map: c && isFinite(c.lng) ? { lng: c.lng, lat: c.lat, zoom: m.getZoom() } : null,
       };
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
@@ -9631,6 +9785,11 @@ function applyStoredSettings(s) {
   }
   if (s.observations && typeof s.observations.productId === 'string' && OBS_PRODUCTS[s.observations.productId])
     state.observations.productId = s.observations.productId;
+  if (s.meso && typeof s.meso === 'object') {
+    if (typeof s.meso.active === 'boolean') state.meso.active = s.meso.active;
+    if (MESO_SECTORS.some((x) => x.id === s.meso.sector)) state.meso.sector = s.meso.sector;
+    if (MESO_PRODUCTS[s.meso.code]) state.meso.code = s.meso.code;
+  }
   if (s.map && isFinite(s.map.lng) && isFinite(s.map.lat)) state._restoreView = s.map;
 }
 
@@ -9846,6 +10005,14 @@ function init() {
   // Source-mode switch + satellite controls.
   initSatSelects();
   initModelSelects();
+  initMesoControls();
+  // Obs-mode Analysis picker: RTMA gridded overlay vs. SPC Mesoanalysis plots.
+  if (el.obsDomainSelect) {
+    el.obsDomainSelect.value = state.meso.active ? 'MESO' : 'RTMA';
+    el.obsDomainSelect.addEventListener('change', () => {
+      setMesoActive(el.obsDomainSelect.value === 'MESO');
+    });
+  }
   applyModePanels();
   el.modeSwitch.addEventListener('click', (e) => {
     const btn = e.target.closest('.mode-btn');
