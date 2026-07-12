@@ -799,6 +799,26 @@ body.theme-dark .mapboxgl-map {
   background: #070b10;
 }
 
+/* iOS standalone (add-to-home-screen) status-bar fill. With the black-
+   translucent status bar the app draws edge-to-edge under the notch/Dynamic
+   Island, which left an empty, sometimes-glitchy translucent gap above the
+   chrome. This paints that safe-area band as a solid strip so it reads as an
+   intentional status bar. It is zero-height (invisible) anywhere without a top
+   inset — i.e. everywhere except notched iOS home-screen apps — and never
+   intercepts input. Kept dark in both themes for legibility of the white
+   status-bar glyphs. */
+.app::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: env(safe-area-inset-top, 0px);
+  background: #0a0e13;
+  z-index: 9000;
+  pointer-events: none;
+}
+
 /* SPC Mesoanalysis static-image view: covers the interactive map while a
    mesoanalysis product is selected. The SPC plots are drawn for a white
    background, so the image area stays light in both themes. */
@@ -819,6 +839,19 @@ body.theme-dark .mapboxgl-map {
 .app.meso-active .map-readout {
   display: none !important;
 }
+/* The bottom dock (source picker / settings / frame nav) is the only way off
+   the mesoanalysis view on mobile, so it must ride ABOVE the static plot rather
+   than be buried under it. The image body is pushed up to leave the dock its
+   own clear space at the bottom. */
+.app.mobile.meso-active .mobile-dock {
+  z-index: 1002;
+}
+.app.mobile.meso-active .meso-view {
+  bottom: var(--meso-dock-gap, 132px);
+}
+.app.mobile.meso-active .meso-view-body {
+  align-items: flex-start;
+}
 body.theme-dark .meso-view {
   background: #0b1017;
 }
@@ -830,6 +863,10 @@ body.theme-dark .meso-view {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
+  /* Clear the iOS notch: the meso view is full-bleed (top:0), so lift the
+     header content below the status-bar inset. The safe-area fill (.app::before)
+     paints that band, so the header reads as continuous with it. */
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
   background: var(--hud);
   border-bottom: 1px solid var(--hud-border);
   color: var(--ink);
@@ -863,6 +900,34 @@ body.theme-dark .meso-view {
 }
 .meso-view-btn:hover {
   background: var(--hud-border);
+}
+.meso-view-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-ink);
+}
+.meso-view-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--hud);
+  border-bottom: 1px solid var(--hud-border);
+  flex: 0 0 auto;
+}
+.meso-scrub {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.meso-time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  min-width: 3.5em;
+  text-align: right;
+  white-space: nowrap;
 }
 .meso-view-body {
   position: relative;

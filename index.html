@@ -280,6 +280,10 @@
               <span>Sector</span>
               <select id="mesoSectorSelect"></select>
             </label>
+            <label class="field">
+              <span>Loop frames</span>
+              <select id="mesoFramesSelect"></select>
+            </label>
           </section>
 
           <section class="panel" id="fhourPanel" hidden>
@@ -488,6 +492,22 @@
                     <i data-lucide="external-link" class="lucide sm" aria-hidden="true"></i>
                   </a>
                 </div>
+              </div>
+              <!-- Frame playback: step/loop through the recent hourly archive.
+                   Sits below the header so it stays reachable above the mobile
+                   dock (the dock overlays the bottom of the image). -->
+              <div class="meso-view-bar">
+                <button id="mesoPrev" class="meso-view-btn" type="button" title="Previous frame">
+                  <i data-lucide="chevron-left" class="lucide sm" aria-hidden="true"></i>
+                </button>
+                <button id="mesoPlay" class="meso-view-btn" type="button" title="Play / pause loop">
+                  <i data-lucide="play" class="lucide sm" aria-hidden="true"></i>
+                </button>
+                <button id="mesoNext" class="meso-view-btn" type="button" title="Next frame">
+                  <i data-lucide="chevron-right" class="lucide sm" aria-hidden="true"></i>
+                </button>
+                <input id="mesoScrub" class="meso-scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Frame" />
+                <span id="mesoTime" class="meso-time">—</span>
               </div>
               <div class="meso-view-body">
                 <img id="mesoImg" class="meso-img" alt="SPC mesoanalysis product" />
