@@ -358,7 +358,10 @@ function styleBoundaries(map, anchor, o) {
   const hasGenericBoundary = (map.getStyle().layers || []).some(
     (ly) => isBoundaryLayer(ly) && !MAPBOX_ADMIN_LAYERS.has(ly.id));
   const hasNativeState = !!map.getLayer('admin-1-boundary') || hasGenericBoundary;
-  if (!hasMapboxCountry && !hasGenericBoundary && info)
+  // A generic OpenMapTiles boundary layer is not proof that it visibly styles
+  // country lines (both satellite styles omit them). Keep a dedicated country
+  // layer whenever there is no native Mapbox country layer.
+  if (!hasMapboxCountry && info)
     ensureFallbackBorders(map, anchor, info, col, w, { skipState: hasNativeState });
 
   // County (admin_level 2) lines aren't drawn by the stock styles; add our own

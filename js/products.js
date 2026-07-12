@@ -150,12 +150,23 @@ const ZDR_STOPS = [
 
 // Differential phase (degrees).
 const PHI_STOPS = [
-  s(0, [20, 20, 60]),
-  s(60, [0, 120, 220]),
-  s(120, [0, 200, 120]),
-  s(180, [230, 220, 0]),
-  s(240, [255, 120, 0]),
-  s(360, [255, 0, 0]),
+  s(0, [20, 20, 60]), s(60, [0, 120, 220]),
+  s(120, [0, 200, 120]), s(180, [230, 220, 0]),
+  s(240, [255, 120, 0]), s(360, [255, 0, 0]),
+];
+
+// Specific differential phase, matched to the supplied -2..7 °/km scale.
+const KDP_STOPS = [
+  s(-2.0, [72, 72, 72]), s(-1.5, [35, 70, 35]),
+  s(-1.0, [92, 52, 115]), s(-0.5, [92, 0, 0]),
+  s(0.0, [122, 0, 28]), s(0.5, [165, 24, 58]),
+  s(1.0, [190, 62, 128]), s(1.5, [142, 78, 150]),
+  s(2.0, [28, 73, 126]), s(2.5, [55, 150, 122]),
+  s(3.0, [0, 220, 40]), s(3.5, [0, 255, 25]),
+  s(4.0, [170, 240, 0]), s(4.5, [235, 230, 0]),
+  s(5.0, [245, 190, 0]), s(5.5, [235, 125, 0]),
+  s(6.0, [220, 55, 0]), s(6.5, [170, 40, 0]),
+  s(7.0, [130, 45, 0]),
 ];
 
 // `disp` carries an imperial display conversion applied only to the *labels and
@@ -194,6 +205,7 @@ export const PRODUCTS = {
   RHO: product('RHO', 'Correlation Coeff.', 'ρHV', 'RHO', CC_STOPS),
   ZDR: product('ZDR', 'Differential Refl.', 'dB', 'ZDR', ZDR_STOPS),
   PHI: product('PHI', 'Differential Phase', '°', 'PHI', PHI_STOPS),
+  KDP: product('KDP', 'Specific Diff. Phase', '°/km', 'KDP', KDP_STOPS),
 };
 
 // Decimal places to show for a (display) unit.
@@ -239,7 +251,7 @@ export function displayFactorFor(nativeUnit, dispUnit) {
   return f == null ? null : f;
 }
 
-export const PRODUCT_ORDER = ['REF', 'VEL', 'SRV', 'SW', 'RHO', 'ZDR', 'PHI'];
+export const PRODUCT_ORDER = ['REF', 'VEL', 'SRV', 'SW', 'RHO', 'ZDR', 'PHI', 'KDP'];
 
 // The reflectivity color table is shared across single-site radar, MRMS and the
 // weather models, so they all draw dBZ identically — and a user-loaded
@@ -325,7 +337,8 @@ export function palTargetProduct(pal) {
   const hint = `${pal.productHint || ''} ${pal.units || ''}`.toUpperCase();
   if (/\bCC\b|RHOHV|CORRELATION/.test(hint)) return 'RHO';
   if (/ZDR|DIFFERENTIAL REF/.test(hint)) return 'ZDR';
-  if (/PHI|KDP|DIFFERENTIAL PH/.test(hint)) return 'PHI';
+  if (/KDP|SPECIFIC DIFFERENTIAL/.test(hint)) return 'KDP';
+  if (/PHI|DIFFERENTIAL PH/.test(hint)) return 'PHI';
   if (/\bSW\b|SPECTRUM/.test(hint)) return 'SW';
   if (/\bBV\b|\bV\b|VEL|M\/S|KT|KNOT/.test(hint)) return 'VEL';
   if (/\bBR\b|\bZ\b|DBZ|REFLECT/.test(hint)) return 'REF';

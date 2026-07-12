@@ -26,6 +26,7 @@ import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
   prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
+import { LsrController, LSR_HOURS_CHOICES, LSR_DEFAULT_HOURS, defaultLsrCats } from './lsr.js';
 import { MapTools } from './maptools.js';
 import { CrossSectionTool } from './xsect.js';
 import { SplitView } from './splitview.js';
@@ -405,6 +406,8 @@ function setupOverlays(map) {
     map.addSource('sites', { type: 'geojson', data: sitesGeoJSON() });
   if (!map.getSource('cyclones'))
     map.addSource('cyclones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getSource('lsr'))
+    map.addSource('lsr', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
 
   // Register the CIG hatch tiles. Style loads wipe added images, so (re)add them
   // each time before the layer that references them by name.
@@ -484,6 +487,16 @@ function setupOverlays(map) {
     },
     anchor
   );
+  map.addLayer({
+    id: 'lsr-points', type: 'circle', source: 'lsr',
+    layout: { visibility:(state.lsr ? state.lsr.enabled : state._lsr.on) ? 'visible' : 'none' },
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 7, 5.5, 10, 7],
+      'circle-color': ['get', 'color'],
+      'circle-stroke-color': 'rgba(10,20,35,0.9)', 'circle-stroke-width': 1.2,
+      'circle-opacity': .92,
+    },
+  }, anchor);
   // SPC outlook outline — kept above the radar (label anchor) so risk boundaries
   // stay visible even where radar echoes cover the translucent fill.
   map.addLayer(
@@ -891,6 +904,7 @@ const state = {
   mapProvider: 'mapbox',
   basemap: 'dark',
   uiTheme: 'dark',
+  reduceMotion: false,
   // User customisation of the basemap's own layers (town labels, roads,
   // rivers, borders). Re-applied on every style load so it survives a
   // basemap switch. See js/mapStyle.js.
@@ -918,6 +932,8 @@ const state = {
   styleReady: false,
   geo: null,
   alerts: null,
+  lsr: null,
+  _lsr: { on:false, hours:LSR_DEFAULT_HOURS, cats:defaultLsrCats() },
   // Tropical cyclones overlay (NHC + JTWC). `_cyclones` holds the restored
   // prefs (master + per-part toggles) applied when the controller is built at
   // init — the same pattern as `spc`/`_spc` below.
@@ -1085,6 +1101,14 @@ function cacheEls() {
   el.layerProductSelect = $('#layerProductSelect');
   el.layerStyleSelect = $('#layerStyleSelect');
   el.metarsToggle = $('#metarsToggle');
+  el.lsrToggle = $('#lsrToggle');
+  el.lsrPanel = $('#lsrPanel');
+  el.lsrHours = $('#lsrHours');
+  el.lsrFilters = $('#lsrFilters');
+  el.lsrStatus = $('#lsrStatus');
+  el.lsrList = $('#lsrList');
+  el.lsrPreview = $('#lsrPreview');
+  el.lsrPreviewCard = $('#lsrPreviewCard');
   el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
@@ -1104,6 +1128,7 @@ function cacheEls() {
   el.palSaveCustom = $('#palSaveCustom');
   el.alertList = $('#alertList');
   el.alertsToggle = $('#alertsToggle');
+  el.alertsRefresh = $('#alertsRefresh');
   el.alertDetail = $('#alertDetail');
   el.alertDetailPanel = $('#alertDetailPanel');
   el.alertClose = $('#alertClose');
@@ -1126,6 +1151,7 @@ function cacheEls() {
   el.drawToolPopup = $('#drawToolPopup');
   el.drawToolPopupTitle = $('#drawToolPopupTitle');
   el.keybindControls = $('#keybindControls');
+  el.reduceMotionToggle = $('#reduceMotionToggle');
   el.spcPanel = $('#spcPanel');
   el.spcToggle = $('#spcToggle');
   el.outlookSelect = $('#outlookSelect');
@@ -1157,6 +1183,7 @@ function cacheEls() {
   el.outlookDetailPanel = $('#outlookDetailPanel');
   el.outlookDetailList = $('#outlookDetailList');
   el.volumeTitle = $('#volumeTitle');
+  el.crossSectionVst = $('#crossSectionVst');
   el.tiltPanel = $('#tiltPanel');
   el.satOptsPanel = $('#satOptsPanel');
   el.irEnhanceToggle = $('#irEnhanceToggle');
@@ -1334,6 +1361,18 @@ function initMap() {
   map.addControl(state.geolocate, 'bottom-left');
   state.map = map;
 
+  window.addEventListener('radarnexus:location', (event) => {
+    const d = event.detail || {};
+    if (Array.isArray(d.bbox) && d.bbox.length === 4) {
+      map.fitBounds([[d.bbox[0], d.bbox[1]], [d.bbox[2], d.bbox[3]]], {
+        padding: 70, maxZoom: 13,
+      });
+    } else if (Number.isFinite(d.lon) && Number.isFinite(d.lat)) {
+      map.flyTo({ center: [d.lon, d.lat], zoom: Math.max(map.getZoom(), 10) });
+    }
+    if (d.label) setStatus(`location: ${d.label}`);
+  });
+
   // If the supplied token is invalid/revoked, Mapbox emits a 401. Clear the bad
   // token and re-open the setup gate rather than leaving the user a blank map.
   map.on('error', (e) => {
@@ -1349,6 +1388,7 @@ function initMap() {
   map.on('style.load', () => {
     state.styleReady = true;
     setupOverlays(map);
+    if (state.lsr) state.lsr.reapply();
     // Once the map is up, sweep every site for a recent scan so down radars show
     // red. Kicked off a single time (style.load also fires on basemap switches).
     if (!state._downScanStarted) {
@@ -1676,7 +1716,7 @@ function routeProductToPane(id) {
 
 // The dual-polarization moments. TDWR terminal radars scan only to Doppler
 // (REF/VEL/SW), so these products are hidden when a TDWR site is active.
-const DUAL_POL = new Set(['RHO', 'ZDR', 'PHI']);
+const DUAL_POL = new Set(['RHO', 'ZDR', 'PHI', 'KDP']);
 
 // Product ids offered for the current radar site — the full set, minus dual-pol
 // for TDWR towers.
@@ -1699,7 +1739,7 @@ function radarProduct(id = state.productId) {
 // own section so the picker reads cleanly as the product set has grown.
 const RADAR_CATEGORIES = [
   { id: 'doppler', name: 'Doppler', products: ['REF', 'VEL', 'SRV', 'SW'] },
-  { id: 'dualpol', name: 'Dual Pol', products: ['RHO', 'ZDR', 'PHI'] },
+  { id: 'dualpol', name: 'Dual Pol', products: ['RHO', 'ZDR', 'PHI', 'KDP'] },
   { id: 'precip', name: 'Precip Accumulation', products: ['PR1', 'PR3', 'PRT'] },
   { id: 'ffgx', name: 'FFG Exceedance', products: ['FFX1', 'FFX3'] },
   { id: 'derived', name: 'Derived Products', products: ['ET', 'VIL'] },
@@ -1712,8 +1752,7 @@ function makeRadarProductButton(id, active) {
   const btn = document.createElement('button');
   btn.className = 'product-btn';
   btn.dataset.id = id;
-  const swatch = swatchGradientCss(p.scale);
-  btn.innerHTML = `${swatch ? `<span class="pb-swatch" style="background:${swatch}"></span>` : ''}<span class="pb-id">${id}</span><span class="pb-name">${p.name}</span>`;
+  btn.innerHTML = `<span class="pb-id">${id.slice(0, 3)}</span><span class="pb-name">${p.name}</span>`;
   if (id === active) btn.classList.add('active');
   btn.addEventListener('click', () => {
     if (routeProductToPane(id)) return;
@@ -1885,10 +1924,15 @@ function legendHTML(p, scale) {
   const u = dispUnitOf(p);
   const dec = unitDecimals(u);
   const tick = (v) => dispValue(p, v).toFixed(dec);
+  const labels = p.legendTicks || [tick(lo), tick((lo + hi) / 2), tick(hi)];
+  const unitLabel = p.legendTicks ? '' : ` <span>(${u})</span>`;
+  const labelRow = p.legendGroups
+    ? `<div class="legend-groups">${labels.map((label) => `<span>${label}</span>`).join('')}</div>`
+    : `<div class="legend-ticks"><span>${labels[0]}</span><span>${labels[1]}</span><span>${labels[2]}</span></div>`;
   return `
-    <div class="legend-title">${p.name} <span>(${u})</span></div>
+    <div class="legend-title">${p.name}${unitLabel}</div>
     <div class="legend-bar" style="background:linear-gradient(90deg,${colors.join(',')})"></div>
-    <div class="legend-ticks"><span>${tick(lo)}</span><span>${tick((lo + hi) / 2)}</span><span>${tick(hi)}</span></div>`;
+    ${labelRow}`;
 }
 
 // A small linear-gradient swatch sampled from a product's real color scale —
@@ -2533,6 +2577,7 @@ function syncSplit() {
 
 // Format a native physical value in the product's imperial display units.
 function fmtValue(product, v) {
+  if (typeof product.formatValue === 'function') return product.formatValue(v);
   const u = dispUnitOf(product);
   return `${dispValue(product, v).toFixed(unitDecimals(u))} ${u}`;
 }
@@ -6492,6 +6537,7 @@ const COLLAPSIBLE_PANELS = [
   ['outlookDetailPanel', false],
   ['alertsPanel', false],
   ['cyclonesPanel', true],
+  ['lsrPanel', true],
 ];
 
 function setupCollapsiblePanels() {
@@ -6566,7 +6612,7 @@ function layoutMobileSheet() {
   set.append(el.tiltPanel, el.fhourPanel);
   if (mode !== 'models') set.append(el.volumePanel);
   set.append(el.layoutPanel, el.layerPanel, el.displayPanel, el.satOptsPanel);
-  set.append(el.alertsPanel, el.cyclonesPanel, el.basemapPanel);
+  set.append(el.alertsPanel, el.cyclonesPanel, el.lsrPanel, el.basemapPanel);
   if (mode !== 'outlooks') set.append(el.spcPanel, el.outlookDetailPanel);
   set.append(el.metaPanel);
 
@@ -6590,7 +6636,8 @@ function layoutDesktopSidebar() {
   // heading are hidden in favour of the top command bar), Elevation tilt,
   // Product and Active alerts, per the redesign.
   el.sidebar.append(
-    el.sourcePanel, el.tiltPanel, el.fhourPanel, el.productPanel, el.outlookDetailPanel, el.alertsPanel,
+    el.sourcePanel, el.layoutPanel, el.layerPanel, el.tiltPanel, el.fhourPanel,
+    el.productPanel, el.outlookDetailPanel, el.alertsPanel,
     el.settingsBtn, el.sidebarFoot
   );
   placeDesktopVolumePanel();
@@ -6605,8 +6652,8 @@ function layoutDesktopDrawer() {
   // One continuous settings surface in the desktop sidebar: no paging and no
   // secondary "More settings" fold.
   el.pageControls.append(
-    el.volumePanel, el.layoutPanel, el.layerPanel, el.displayPanel,
-    el.satOptsPanel, el.cyclonesPanel, el.basemapPanel, el.spcPanel, el.metaPanel
+    el.volumePanel, el.displayPanel,
+    el.satOptsPanel, el.cyclonesPanel, el.lsrPanel, el.basemapPanel, el.spcPanel, el.metaPanel
   );
   placeDesktopVolumePanel();
   // The sidebar already surfaces the primary controls directly — collapse the
@@ -7042,12 +7089,8 @@ async function buildPlaybackProvider(opts = {}) {
     const hours = forecastHours(run);
     const frameCount = hours.length;
     return {
-      // Native-resolution frames are streamed through a small sliding window.
-      // This keeps playback visually identical to the static model view without
-      // holding an entire 200-frame run in memory.
-      streaming: true,
-      maxCachedFrames: CONSTRAINED_DEVICE ? 2 : 3,
-      prefetchAhead: CONSTRAINED_DEVICE ? 1 : 2,
+      // Keep every decoded forecast hour resident. Per-run pooling bounds total
+      // memory without discarding frames the user has already loaded.
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
@@ -7061,7 +7104,8 @@ async function buildPlaybackProvider(opts = {}) {
         run,
       })),
       async load(f) {
-        const grid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
+        const sourceGrid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
+        const grid = poolGridForLoop(sourceGrid, frameCount);
         const payload = prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
         payload.meta = { product: grid.product, time: grid.time, fhour: f.fhour };
         // Barb/contour overlays only when the whole run can afford them: bounded
@@ -7459,12 +7503,12 @@ function createPlayback() {
       if (!this.frames.length) return;
       this.pause();
       i = Math.max(0, Math.min(this.frames.length - 1, i | 0));
-      if (this.provider && this.provider.streaming && (!this.frames[i] || !this.frames[i].loaded)) {
+      if (!this.frames[i] || !this.frames[i].loaded) {
         this.idx = i;
         el.playScrub.value = String(i);
         el.playLabel.textContent = `${i + 1}/${this.frames.length} · ${scanFrameLabel(this.frames[i])} · loading`;
         this.loadOne(i, this.loadSeq);
-        this.prefetchAhead();
+        if (this.provider && this.provider.streaming) this.prefetchAhead();
         return;
       }
       const j = this.nearestLoaded(i);
@@ -7876,6 +7920,51 @@ function renderStormBriefing(data) {
   document.body.classList.add('storm-briefing-open');
 }
 
+function elevationProfile(volume) {
+  const vals = [];
+  for (const sw of (volume && volume.sweeps) || []) {
+    if (!sw.moments || !sw.moments.includes('REF')) continue;
+    if (!vals.some((v) => Math.abs(v - sw.elevation) <= TILT_EPS)) vals.push(sw.elevation);
+  }
+  return { count: vals.length, top: vals.length ? Math.max(...vals) : 0 };
+}
+
+function showCrossSectionVst(scan, profile) {
+  if (!el.crossSectionVst || !scan) return;
+  const when = scan.time instanceof Date ? scan.time : new Date(scan.time);
+  const label = Number.isNaN(when.getTime()) ? scan.label : when.toLocaleString([], {
+    month:'short', day:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', timeZoneName:'short',
+  });
+  el.crossSectionVst.hidden = false;
+  el.crossSectionVst.textContent = `Last complete cross-section VST: ${label} · ${profile.count} elevations`;
+}
+
+// Find the newest fullest volume at or before the selected scan. The live file
+// can appear while it is still accumulating upper tilts; comparing a short run
+// of adjacent volumes lets cross sections fall back to the completed VST while
+// preserving the exact acquisition time of every elevation in that one file.
+async function prepareCrossSectionVolume() {
+  const selected = state.volumes.findIndex((v) => v.key === state.volumeKey);
+  if (selected < 0) return;
+  const candidates = state.volumes.slice(Math.max(0, selected - 5), selected + 1).reverse();
+  let best = null;
+  for (const scan of candidates) {
+    try {
+      const volume = scan.key === state.volumeKey && state.volume
+        ? state.volume : await getDecodedVolume(scan.key);
+      const profile = elevationProfile(volume);
+      const score = profile.count * 100 + profile.top;
+      if (!best || score > best.score) best = { scan, volume, profile, score };
+    } catch (_) { /* try the preceding VST */ }
+  }
+  if (!best) return;
+  showCrossSectionVst(best.scan, best.profile);
+  if (best.scan.key !== state.volumeKey) {
+    setStatus(`cross section: using complete VST ${best.scan.label || ''}`);
+    await loadVolume(best.scan.key);
+  }
+}
+
 function setupMapTools() {
   // Surface observations (METAR station plots).
   state.metars = new MetarController(state.map);
@@ -7895,8 +7984,30 @@ function setupMapTools() {
   }
   if (state._metarsOn) setMetars(true, true);
 
+  state.lsr = new LsrController(state.map, {
+    list:el.lsrList, status:el.lsrStatus, filters:el.lsrFilters,
+    hoursSelect:el.lsrHours, preview:el.lsrPreview, previewCard:el.lsrPreviewCard,
+    suppressClick:() => clickConsumingToolActive(),
+    onPrefsChanged:() => saveSettings(),
+  });
+  state.lsr.hours = state._lsr.hours;
+  state.lsr.cats = { ...state._lsr.cats };
+  if (el.lsrHours) el.lsrHours.value = String(state._lsr.hours);
+  if (el.lsrToggle) {
+    setToggleBtn(el.lsrToggle, state._lsr.on);
+    el.lsrToggle.addEventListener('click', () => {
+      const on = !state.lsr.enabled;
+      state.lsr.setEnabled(on);
+      setToggleBtn(el.lsrToggle, on);
+      setStatus(on ? 'storm reports on' : 'storm reports off');
+      saveSettings();
+    });
+  }
+  state.lsr.setEnabled(state._lsr.on);
+
   // Draw / measure / storm-track annotations.
   state.mapTools = new MapTools(state.map);
+  state.mapTools.getScanTime = () => productTime();
   applyDrawStyle(); // restore the user's freehand-draw colour + width
   // Mirror committed drawings into the split pane.
   state.mapTools.onChange = (fc) => {
@@ -7961,12 +8072,13 @@ function setupMapTools() {
   });
 
   if (el.toolXsect) {
-    el.toolXsect.addEventListener('click', () => {
+    el.toolXsect.addEventListener('click', async () => {
       if (state.mode !== 'radar') {
         setStatus('cross sections read the Level II volume — switch to RADAR');
         return;
       }
       if (!state.xsect.active()) clearOtherTools('xsect');
+      if (!state.xsect.active()) await prepareCrossSectionVolume();
       state.xsect.toggle();
       syncToolButtons();
     });
@@ -8151,7 +8263,7 @@ function toolIconMarkup(icon) {
 // The tools offered in the mobile dock slot. Kept as a function (rather than the
 // constant list) so source-specific filtering can be reintroduced if needed.
 const XSECT_ICON =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><path d="M3 20h18"/><path d="M4 20c2.2-7 3.8-10.5 5.5-10.5S12.4 15 14 15s3-9 6-9"/><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/></svg>';
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide sm"><line x1="4" y1="20" x2="20" y2="4"/><circle cx="4" cy="20" r="1.5"/><circle cx="20" cy="4" r="1.5"/></svg>';
 
 const MOBILE_TOOL_DEFS = [
   { id: 'inspect', icon: 'crosshair', label: 'Inspect a pixel', btn: () => el.inspectBtn },
@@ -9135,6 +9247,9 @@ function saveSettings() {
         dealias: state.dealias,
         radarOverlay: state.radarOverlay,
         metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
+        lsr: state.lsr
+          ? { on:state.lsr.enabled, hours:state.lsr.hours, cats:{ ...state.lsr.cats } }
+          : { ...state._lsr, cats:{ ...state._lsr.cats } },
         modelCityValues: state.modelCityValues,
         cityValuesProducts: state.cityValuesProducts,
         cityReadout: state.cityReadout,
@@ -9159,6 +9274,7 @@ function saveSettings() {
             }
           : { ...state._spc, opacity: state.spcOpacity },
         playbackFrames: state.playbackFrames,
+        reduceMotion: state.reduceMotion,
         panelCollapsed: state.panelCollapsed,
         draw: state.draw,
         keybinds: state.keybinds,
@@ -9224,6 +9340,7 @@ function applyStoredSettings(s) {
   state.smooth = state.smoothByMode[state.mode] ?? state.smooth;
   if (typeof s.basemap === 'string' && BASEMAPS[s.basemap]) state.basemap = s.basemap;
   if (s.uiTheme === 'dark' || s.uiTheme === 'light') state.uiTheme = s.uiTheme;
+  if (typeof s.reduceMotion === 'boolean') state.reduceMotion = s.reduceMotion;
   if (s.mapStyle && typeof s.mapStyle === 'object') state.mapStyle = normalizeMapStyle(s.mapStyle);
   if (s.alertStyle && typeof s.alertStyle === 'object') state.alertStyle = sanitizeAlertStyle(s.alertStyle);
   if (typeof s.alertOpacity === 'number') state.alertOpacity = Math.max(0.1, Math.min(1, s.alertOpacity));
@@ -9234,6 +9351,14 @@ function applyStoredSettings(s) {
   if (s.mapProvider === 'mapbox' || s.mapProvider === 'maptiler') state.mapProvider = s.mapProvider;
   if (typeof s.dealias === 'boolean') state.dealias = s.dealias;
   if (typeof s.radarOverlay === 'boolean') state.radarOverlay = s.radarOverlay;
+  if (s.lsr && typeof s.lsr === 'object') {
+    if (typeof s.lsr.on === 'boolean') state._lsr.on = s.lsr.on;
+    if (LSR_HOURS_CHOICES.includes(s.lsr.hours)) state._lsr.hours = s.lsr.hours;
+    if (s.lsr.cats && typeof s.lsr.cats === 'object') {
+      for (const key of Object.keys(state._lsr.cats))
+        if (typeof s.lsr.cats[key] === 'boolean') state._lsr.cats[key] = s.lsr.cats[key];
+    }
+  }
   if (s.panelCollapsed && typeof s.panelCollapsed === 'object') {
     state.panelCollapsed = {};
     for (const [key, val] of Object.entries(s.panelCollapsed)) {
@@ -9737,6 +9862,19 @@ function init() {
     suppressClick: () => clickConsumingToolActive(),
   });
   state.alerts.start();
+  if (el.alertsRefresh) {
+    el.alertsRefresh.addEventListener('click', async () => {
+      el.alertsRefresh.classList.add('loading');
+      el.alertsRefresh.disabled = true;
+      try {
+        await state.alerts.load();
+        setStatus('active alerts refreshed');
+      } finally {
+        el.alertsRefresh.classList.remove('loading');
+        el.alertsRefresh.disabled = false;
+      }
+    });
+  }
   // Apply the restored alerts on/off preference (default on).
   if (state._alertsOn === false) state.alerts.setEnabled(false);
   el.alertsToggle.addEventListener('click', () => {
@@ -9870,6 +10008,16 @@ function init() {
     el.uiThemeSelect.value = state.uiTheme;
     el.uiThemeSelect.addEventListener('change', () => {
       applyUiTheme(el.uiThemeSelect.value);
+      saveSettings();
+    });
+  }
+  document.body.classList.toggle('reduce-motion', state.reduceMotion);
+  if (el.reduceMotionToggle) {
+    setToggleBtn(el.reduceMotionToggle, state.reduceMotion);
+    el.reduceMotionToggle.addEventListener('click', () => {
+      state.reduceMotion = !state.reduceMotion;
+      document.body.classList.toggle('reduce-motion', state.reduceMotion);
+      setToggleBtn(el.reduceMotionToggle, state.reduceMotion);
       saveSettings();
     });
   }

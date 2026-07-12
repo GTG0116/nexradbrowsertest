@@ -123,13 +123,11 @@ const FFG_LEGEND = [
 ];
 // A MapLibre raster-source tile template hitting the service's export endpoint.
 // The service exposes each duration as a mosaic *group* with a child Image layer.
-// Asking the export endpoint for the child layer alone can yield a fully
-// transparent tile even though the parent is enabled in the ArcGIS viewer. Use
-// the duration's mosaic group ID, which lets the service resolve its visible Image
-// child itself (and works consistently for all four durations).
-function ffgTiles(mosaicLayerId) {
+// Request the visible Image child explicitly. Exporting only the Mosaic Layer
+// group can return transparent PNGs even though the ArcGIS viewer expands it.
+function ffgTiles(imageLayerId) {
   return `${FFG_MOSAIC}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857` +
-    `&size=256,256&dpi=96&format=png32&transparent=true&layers=show:${mosaicLayerId}` +
+    `&size=256,256&dpi=96&format=png32&transparent=true&layers=show:${imageLayerId}` +
     '&interpolation=RSP_NearestNeighbor&f=image';
 }
 
@@ -189,10 +187,10 @@ export const OUTLOOKS = {
     label: 'Flash Flood Guidance',
     raster: { legend: FFG_LEGEND, tiles: (d) => ffgTiles(d.layer), source: FFG_MOSAIC },
     details: [
-      { id: '1h', label: '1 Hour', layer: 0 },
-      { id: '3h', label: '3 Hour', layer: 4 },
-      { id: '6h', label: '6 Hour', layer: 8 },
-      { id: '12h', label: '12 Hour', layer: 12 },
+      { id: '1h', label: '1 Hour', layer: 3 },
+      { id: '3h', label: '3 Hour', layer: 7 },
+      { id: '6h', label: '6 Hour', layer: 11 },
+      { id: '12h', label: '12 Hour', layer: 15 },
     ],
   },
   cpc_temp: {

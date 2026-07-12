@@ -128,7 +128,39 @@ function parseMessage31(r, base, bodyLen) {
       radial.nyquist = r.u16(o + 16) * 0.01;
     }
   }
+  if (radial.moments.PHI) radial.moments.KDP = deriveKdp(radial.moments.PHI);
   return radial;
+}
+
+// KDP is one half the range derivative of differential phase. A four-gate
+// centred window damps gate noise while retaining storm-scale gradients.
+export function deriveKdp(phi) {
+  // Match the ordinary Level-II moment contract: codes 0/1 mean missing and
+  // physical value = (code - offset) / scale. Keeping KDP in a Uint16Array
+  // makes it transferable through decoder.worker.js and directly consumable
+  // by the radar shader, renderer sampler, playback cache, and cross sections.
+  const scale = 100;
+  const offset = 10002; // code 2 represents -100.00 °/km
+  const raw = new Uint16Array(phi.gateCount);
+  const halfWindow = 4;
+  const spanKm = (2 * halfWindow * phi.gateSpacing) / 1000;
+  for (let i = halfWindow; i < phi.gateCount - halfWindow; i++) {
+    const a = phi.value(i - halfWindow), b = phi.value(i + halfWindow);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || !spanKm) continue;
+    let delta = b - a;
+    while (delta > 180) delta -= 360;
+    while (delta < -180) delta += 360;
+    const value = 0.5 * delta / spanKm;
+    raw[i] = Math.max(2, Math.min(65535, Math.round(value * scale + offset)));
+  }
+  return {
+    gateCount:phi.gateCount, firstGate:phi.firstGate, gateSpacing:phi.gateSpacing,
+    scale, offset, raw,
+    value(i) {
+      const code = raw[i];
+      return code < 2 ? NaN : (code - offset) / scale;
+    },
+  };
 }
 
 // A moment data block (REF/VEL/SW/ZDR/PHI/RHO/CFP).

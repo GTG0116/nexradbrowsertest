@@ -52,7 +52,7 @@ function fmtDist(m) {
   return `${mi.toFixed(mi < 10 ? 2 : 1)} mi · ${km.toFixed(km < 10 ? 2 : 1)} km`;
 }
 
-const bgColor = { draw: '#36e0c8', measure: '#ffd54a', storm: '#ff5a7a' };
+const bgColor = { draw: '#36e0c8', measure: '#ffd54a', storm: '#e2643f' };
 
 function firstLabelLayerId(map) {
   const layers = (map.getStyle && map.getStyle().layers) || [];
@@ -80,6 +80,9 @@ export class MapTools {
     this.stormSpeed = 30; // mph
     this.stormMinutes = 60;
     this.stormMaxTowns = 20; // cap on town labels in the cone (user-adjustable)
+    this.stormShape = 'cone'; // cone | line | free
+    this.stormMotion = 'manual'; // manual | scans
+    this.getScanTime = null;
     this._stormSeq = 0; // guards against overlapping async town lookups
     this._storm = null; // { a, b }
 
@@ -212,7 +215,7 @@ export class MapTools {
     // Freehand draw and the drag-to-measure both need the pointer (no map pan
     // while the gesture is in progress); the storm click tool keeps the map
     // interactive but suppresses double-click zoom while finishing a shape.
-    if (tool === 'draw' || tool === 'measure') this.map.dragPan.disable();
+    if (tool === 'draw' || tool === 'measure' || (tool === 'storm' && this.stormShape === 'free')) this.map.dragPan.disable();
     else this.map.dragPan.enable();
     if (tool) this.map.doubleClickZoom.disable();
     else this.map.doubleClickZoom.enable();
@@ -262,6 +265,9 @@ export class MapTools {
         this.draft = { kind: 'measure', coords: [pt, pt] };
         this._renderMeasureLabels();
         this._refresh();
+      } else if (this.tool === 'storm' && this.stormShape === 'free') {
+        drawing = true;
+        this.draft = { kind: 'storm', coords: [pt] };
       }
     });
     map.on('mousemove', (e) => {
@@ -273,6 +279,9 @@ export class MapTools {
         this.draft.coords[1] = pt;
         this._renderMeasureLabels();
         this._refresh();
+      } else if (this.tool === 'storm' && this.stormShape === 'free' && drawing) {
+        this.draft.coords.push(pt);
+        this._refresh();
       }
     });
     map.on('mouseup', () => {
@@ -282,6 +291,9 @@ export class MapTools {
       } else if (this.tool === 'measure' && measuring) {
         measuring = false;
         this._commitMeasure();
+      } else if (this.tool === 'storm' && this.stormShape === 'free' && drawing) {
+        drawing = false;
+        this._commitStormPath();
       }
     });
 
@@ -308,7 +320,7 @@ export class MapTools {
     canvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse') return;
       if (activePointerId != null) return;
-      if (this.tool !== 'draw' && this.tool !== 'measure') return;
+      if (this.tool !== 'draw' && this.tool !== 'measure' && !(this.tool === 'storm' && this.stormShape === 'free')) return;
       e.preventDefault();
       e.stopPropagation();
       activePointerId = e.pointerId;
@@ -325,6 +337,9 @@ export class MapTools {
         this.draft = { kind: 'measure', coords: [pt, pt] };
         this._renderMeasureLabels();
         this._refresh();
+      } else {
+        pointerDrawing = true;
+        this.draft = { kind: 'storm', coords: [pt] };
       }
     }, { passive: false });
     canvas.addEventListener('pointermove', (e) => {
@@ -340,6 +355,9 @@ export class MapTools {
       } else if (this.tool === 'measure' && pointerMeasuring) {
         this.draft.coords[1] = pt;
         this._renderMeasureLabels();
+        this._refresh();
+      } else if (this.tool === 'storm' && this.stormShape === 'free' && pointerDrawing) {
+        this.draft.coords.push(pt);
         this._refresh();
       }
     }, { passive: false });
@@ -358,6 +376,9 @@ export class MapTools {
       } else if (commit && this.tool === 'measure' && pointerMeasuring) {
         pointerMeasuring = false;
         this._commitMeasure();
+      } else if (commit && this.tool === 'storm' && this.stormShape === 'free' && pointerDrawing) {
+        pointerDrawing = false;
+        this._commitStormPath();
       } else if (pointerDrawing || pointerMeasuring) {
         pointerDrawing = false;
         pointerMeasuring = false;
@@ -432,18 +453,56 @@ export class MapTools {
   _startStorm() {
     this._storm = { a: null, b: null };
     this._clearStormBriefing();
-    this._showStormPanel('Click the storm’s current location.');
+    const msg = this.stormShape === 'free'
+      ? 'First, free-draw the storm’s current shape or leading edge.'
+      : this.stormShape === 'line'
+        ? 'First, click both ends of a line across the storm’s current width.'
+        : 'Click the storm’s current location.';
+    this._showStormPanel(msg);
   }
 
   _stormClick(pt) {
+    if (Date.now() < (this._ignoreStormClickUntil || 0)) return;
     if (!this._storm) this._storm = { a: null, b: null };
+    if (this.stormShape !== 'cone') {
+      if (this._storm.basePath) {
+        this._storm.b = pt;
+        this._storm.timeB = this._scanTimestamp();
+        this._applyScanMotion();
+        this.draft = { kind: 'storm', coords: [this._storm.a, pt] };
+        this._refresh();
+        this._buildStormTrack();
+        return;
+      }
+      if (this.stormShape === 'free') return;
+      if (!this._storm.shapeStart) {
+        this._storm.shapeStart = pt;
+        this.draft = { kind: 'storm', coords: [pt] };
+        this._showStormPanel('Now click the other end of the storm-width line.');
+      } else {
+        const basePath = [this._storm.shapeStart, pt];
+        const center = pathCenter(basePath);
+        this._storm = { a: center, b: null, basePath, timeA: this._scanTimestamp() };
+        this.draft = { kind: 'storm', coords: basePath };
+        this._showStormPanel(this.stormMotion === 'scans'
+          ? 'Change radar scans, then click the storm’s new center to calculate direction and speed.'
+          : 'Now click from the storm toward its movement direction.');
+      }
+      this._refresh();
+      return;
+    }
     if (!this._storm.a) {
       this._storm.a = pt;
+      this._storm.timeA = this._scanTimestamp();
       this.draft = { kind: 'storm', coords: [pt] };
-      this._showStormPanel('Now click a point in the direction the storm is moving.');
+      this._showStormPanel(this.stormMotion === 'scans'
+        ? 'Change to another radar scan, then click the storm’s new location.'
+        : 'Now click a point in the direction the storm is moving.');
       this._refresh();
     } else if (!this._storm.b) {
       this._storm.b = pt;
+      this._storm.timeB = this._scanTimestamp();
+      this._applyScanMotion();
       this.draft = { kind: 'storm', coords: [this._storm.a, pt] };
       this._refresh();
       this._buildStormTrack();
@@ -452,7 +511,8 @@ export class MapTools {
 
   async _buildStormTrack() {
     const { a, b } = this._storm;
-    this._lastStorm = { a, b }; // remember so speed/time edits can re-plot
+    const basePath = this._storm.basePath || null;
+    this._lastStorm = { ...this._storm, basePath: basePath && basePath.slice() }; // remember so edits can re-plot
     const seq = ++this._stormSeq; // invalidate any in-flight town lookup
     const brng = bearing(a, b);
     const speedMph = this.stormSpeed;
@@ -460,7 +520,8 @@ export class MapTools {
     const speedMs = speedMph * 0.44704;
     const totalM = speedMs * minutes * 60;
     const end = destination(a, brng, totalM);
-    const cone = coneRing(a, brng, totalM);
+    const drawnPath = [a, end];
+    const cone = this.stormShape === 'cone' ? coneRing(a, brng, totalM) : sweptFootprint(basePath, brng, totalM);
 
     // Forecast cone — a wedge that widens with lead time to convey positional
     // uncertainty (like an NHC/SPC track cone). Drawn first so the track line
@@ -472,12 +533,24 @@ export class MapTools {
     });
 
     // Track line (origin → forecast end), dashed.
-    const trackCoords = [a, end];
+    const trackCoords = drawnPath;
     this.shapes.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: trackCoords },
       properties: { kind: 'storm', color: bgColor.storm, dashed: true },
     });
+    // Preserve the exact user-defined footprint at the current and forecast
+    // positions so the track reads as a swept shape, not a generic-width cone.
+    if (basePath) {
+      this.shapes.push({
+        type: 'Feature', geometry: { type: 'LineString', coordinates: basePath },
+        properties: { kind: 'storm', color: bgColor.storm, width: 3.4, role: 'footprint' },
+      });
+      this.shapes.push({
+        type: 'Feature', geometry: { type: 'LineString', coordinates: translatePath(basePath, brng, totalM) },
+        properties: { kind: 'storm', color: bgColor.storm, width: 2.4, dashed: true, role: 'forecast-footprint' },
+      });
+    }
     // Storm position marker.
     this.shapes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a }, properties: { kind: 'storm', color: bgColor.storm, role: 'storm-pos' } });
 
@@ -563,6 +636,37 @@ export class MapTools {
     this._storm = null;
   }
 
+  _scanTimestamp() {
+    if (this.stormMotion !== 'scans' || typeof this.getScanTime !== 'function') return null;
+    const value = this.getScanTime();
+    const d = value instanceof Date ? value : value && value.time instanceof Date ? value.time : null;
+    return d && Number.isFinite(d.getTime()) ? d.getTime() : null;
+  }
+
+  _applyScanMotion() {
+    const s = this._storm;
+    if (this.stormMotion !== 'scans' || !s || !s.timeA || !s.timeB) return;
+    const hours = Math.abs(s.timeB - s.timeA) / 3600000;
+    if (hours > 0) this.stormSpeed = Math.max(1, Math.min(250, haversine(s.a, s.b) * M_TO_MI / hours));
+  }
+
+  _commitStormPath() {
+    const coords = this.draft && this.draft.coords;
+    if (!coords || coords.length < 2 || haversine(coords[0], coords[coords.length - 1]) < 50) {
+      this._cancelDraft();
+      return;
+    }
+    const basePath = simplifyPath(coords, 48);
+    const center = pathCenter(basePath);
+    this._storm = { a: center, b: null, basePath, timeA: this._scanTimestamp() };
+    this.draft = { kind: 'storm', coords: basePath };
+    this._ignoreStormClickUntil = Date.now() + 350;
+    this._showStormPanel(this.stormMotion === 'scans'
+      ? 'Shape saved. Change radar scans, then click the storm’s new center.'
+      : 'Shape saved. Now click from the storm toward its movement direction.');
+    this._refresh();
+  }
+
   // Floating control for the storm tool: status text + speed/time inputs.
   _showStormPanel(msg, withInputs) {
     if (!this._stormPanel) {
@@ -579,17 +683,38 @@ export class MapTools {
         <button id="stormDone" class="storm-x" title="Finish (Esc)">✕</button>
       </div>
       <div class="storm-msg">${msg}</div>
+      <div class="storm-segments" role="group" aria-label="Track shape">
+        <button data-storm-shape="cone">Cone</button><button data-storm-shape="line">Line</button><button data-storm-shape="free">Free draw</button>
+      </div>
       <div class="storm-inputs">
-        <label>Speed <input type="number" min="5" max="120" value="${this.stormSpeed}" id="stormSpeed"> mph</label>
-        <label>Time <input type="number" min="15" max="180" step="15" value="${this.stormMinutes}" id="stormMin"> min</label>
+        <label>Motion <select id="stormMotion"><option value="manual">Manual mph</option><option value="scans">Two radar scans</option></select></label>
+        <label class="storm-speed-field">Speed <input type="number" min="1" max="250" step="0.1" value="${this.stormSpeed.toFixed(1)}" id="stormSpeed"> mph</label>
+        <label>Track length <input type="number" min="15" max="180" step="15" value="${this.stormMinutes}" id="stormMin"> min</label>
         <label>Max towns <input type="number" min="1" max="200" step="1" value="${this.stormMaxTowns}" id="stormMaxTowns"></label>
         <button id="stormReset">Reset</button>
       </div>`;
     const sp = p.querySelector('#stormSpeed');
+    const motion = p.querySelector('#stormMotion');
     const mn = p.querySelector('#stormMin');
     const mx = p.querySelector('#stormMaxTowns');
+    motion.value = this.stormMotion;
+    p.querySelectorAll('[data-storm-shape]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.stormShape === this.stormShape);
+      btn.addEventListener('click', () => {
+        this.stormShape = btn.dataset.stormShape;
+        if (this.stormShape === 'free') this.map.dragPan.disable(); else this.map.dragPan.enable();
+        this._removeStormShapes();
+        this._startStorm();
+      });
+    });
+    const syncMotion = () => {
+      this.stormMotion = motion.value;
+      p.querySelector('.storm-speed-field').hidden = this.stormMotion === 'scans';
+    };
+    motion.addEventListener('change', () => { syncMotion(); this._removeStormShapes(); this._startStorm(); });
+    syncMotion();
     const recompute = () => {
-      this.stormSpeed = Math.max(5, Number(sp.value) || 30);
+      this.stormSpeed = Math.max(1, Number(sp.value) || 30);
       this.stormMinutes = Math.max(15, Number(mn.value) || 60);
       this.stormMaxTowns = Math.min(200, Math.max(1, Number(mx.value) || 20));
       // Re-plot if a heading is already defined.
@@ -649,6 +774,45 @@ function coneRing(origin, brngDeg, totalM) {
     right.push(destination(p, brngDeg + 90, half));
   }
   return [...left, ...right.reverse(), left[0]];
+}
+
+// Constant-width storm corridor around a user-defined straight or curved path.
+function corridorRing(path, halfWidthM) {
+  const left = [], right = [];
+  for (let i = 0; i < path.length; i++) {
+    const before = path[Math.max(0, i - 1)];
+    const after = path[Math.min(path.length - 1, i + 1)];
+    const brng = bearing(before, after);
+    left.push(destination(path[i], brng - 90, halfWidthM));
+    right.push(destination(path[i], brng + 90, halfWidthM));
+  }
+  return [...left, ...right.reverse(), left[0]];
+}
+
+function pathCenter(path) {
+  let lon = 0, lat = 0;
+  for (const p of path) { lon += p[0]; lat += p[1]; }
+  return [lon / path.length, lat / path.length];
+}
+
+function translatePath(path, brngDeg, distM) {
+  return path.map((p) => destination(p, brngDeg, distM));
+}
+
+// Sweep the user-created line/shape through the forecast distance. Joining the
+// original footprint to its translated copy preserves its width, bends and
+// irregular outline for the full speed × lead-time track.
+function sweptFootprint(path, brngDeg, distM) {
+  const base = path && path.length > 1 ? path : [[0, 0], [0, 0]];
+  const forecast = translatePath(base, brngDeg, distM);
+  return [...base, ...forecast.reverse(), base[0]];
+}
+
+function simplifyPath(coords, maxPoints) {
+  if (coords.length <= maxPoints) return coords.slice();
+  const out = [];
+  for (let i = 0; i < maxPoints; i++) out.push(coords[Math.round(i * (coords.length - 1) / (maxPoints - 1))]);
+  return out;
 }
 
 function compass(deg) {

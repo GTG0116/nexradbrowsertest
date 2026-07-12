@@ -650,6 +650,7 @@ export class AlertsController {
     this.alerts = []; // [{ id, feature, cls, bounds }]
     this.enabled = true;
     this.selectedId = null;
+    this._loadPromise = null;
 
     // Extra maps that mirror the alert polygons (e.g. the split-view second
     // pane). Each must already carry an `alerts` GeoJSON source + fill/line
@@ -825,6 +826,13 @@ export class AlertsController {
   }
 
   async load() {
+    if (this._loadPromise) return this._loadPromise;
+    this._loadPromise = this._load();
+    try { return await this._loadPromise; }
+    finally { this._loadPromise = null; }
+  }
+
+  async _load() {
     try {
       const features = await fetchActiveAlerts();
       this.alerts = features
@@ -946,7 +954,10 @@ export class AlertsController {
       )}</span><span class="alert-row-area">${esc(
         (p.areaDesc || '').split(';')[0]
       )}</span></span><span class="alert-row-time">${esc(fmtClock(p.ends || p.expires))}</span>`;
-      row.addEventListener('click', () => this.openPreview(a.id));
+      row.addEventListener('click', () => {
+        this._fitTo(a.id);
+        this.openPreview(a.id);
+      });
       list.appendChild(row);
     }
   }

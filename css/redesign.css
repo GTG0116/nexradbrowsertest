@@ -225,6 +225,42 @@ button {
   margin-left: auto;
 }
 
+.location-search {
+  position: fixed;
+  z-index: 1300;
+  top: 54px;
+  left: 82px;
+  width: min(430px, calc(100vw - 100px));
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+}
+.console-location { position: relative; }
+.console-location::after {
+  content: 'Search location';
+  margin-left: 4px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.location-search:not([hidden])::before {
+  content: 'Go to a city, address, landmark, or latitude/longitude';
+  display: block;
+  margin: 0 0 7px;
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+.location-search form { display: flex; align-items: center; gap: 8px; }
+.location-search input { flex: 1; min-width: 0; }
+.location-search form button { border: 0; background: transparent; color: var(--ink-dim); font-size: 22px; cursor: pointer; }
+.location-search-results { display: grid; gap: 3px; max-height: 300px; margin-top: 7px; overflow: auto; }
+.location-search-results button { padding: 9px 10px; color: var(--ink); background: transparent; border: 0; border-radius: 7px; text-align: left; cursor: pointer; }
+.location-search-results button:hover { background: var(--panel-2); }
+.location-search-status { padding: 10px; color: var(--ink-dim); }
+
 .console-modes {
   display: flex;
   align-items: center;
@@ -443,19 +479,12 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* The 6-way source switch and its "Source" heading live in the top command
-   bar now (#modeSwitch is the same node the bar's nav forwards clicks to —
-   see installCommandBar in redesign-chrome.js) — the sidebar only keeps the
-   per-mode secondary pickers (radar site, satellite/sector, MRMS domain,
-   model, storm, RTMA domain), which the top bar's design has no room for. */
-.sidebar > #sourcePanel > .panel-title,
-.sidebar > #sourcePanel > .mode-switch {
-  display: none;
-}
-
-.sidebar > #sourcePanel {
-  padding-top: 0;
-}
+/* The command bar mirrors #modeSwitch, while the original switch remains a
+   dependable fallback in the sidebar on localhost and compact layouts. */
+/* Keep the source switch available in the sidebar as well as the command bar.
+   The command bar is intentionally hidden on compact layouts and can also fail
+   to initialize when the page is opened without a web server, so making it the
+   only route to Satellite / MRMS / Models left the local UI stranded in Radar. */
 
 .mode-btn,
 .layout-btn,
@@ -2032,12 +2061,17 @@ body.theme-dark .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
      top-left corner the collapse control normally sits in. Park the button
      just outside the drawer's right edge so neither overlaps the other. */
   .app:not(.mobile).sheet-open .sidebar-collapse {
-    left: calc(var(--sidebar-w) + 10px);
+    top: 68px;
+    left: calc(var(--sidebar-w) + 12px);
   }
   /* The open/close control occupies the sidebar's top-left corner. Give the
      first control group its own row so the button never covers Source. */
   .app:not(.sidebar-hidden) .sidebar > #sourcePanel {
     padding-top: 42px;
+  }
+  .app:not(.mobile) .sidebar > #sourcePanel > .panel-title,
+  .app:not(.mobile) .sidebar > #sourcePanel > .mode-switch {
+    display: none !important;
   }
   /* Once the sidebar is gone the map HUD moves into that same corner. Reserve
      a small gutter for the reopen control so Source/Product remains clickable. */

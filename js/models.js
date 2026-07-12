@@ -423,6 +423,24 @@ const PRECIP_STOPS = [
 ];
 const precipScale = (hiMM) => rampScale(PRECIP_STOPS.map(([f, c]) => [f * hiMM, c]));
 
+// Precipitation type encodes the categorical phase in separate 100-point bands
+// and the precipitation rate (mm/h, capped at 50) within each band. Repeating a
+// phase colour from pale to saturated preserves rate detail while making rain,
+// freezing rain, ice pellets and snow immediately distinguishable.
+const PTYPE_SCALE = rampScale([
+  // Rain uses the familiar radar progression instead of a single green ramp.
+  [0.01, [80, 190, 100]], [8, [20, 150, 55]], [18, [235, 225, 45]],
+  [30, [245, 135, 25]], [42, [220, 40, 35]], [50, [150, 20, 125]],
+  // Freezing rain and ice pellets form the clearly separated MIX band.
+  [50.01, [255, 205, 230]], [68, [245, 105, 185]],
+  [88, [205, 35, 145]], [100, [125, 10, 115]],
+  [100.01, [255, 235, 155]], [120, [245, 180, 55]],
+  [140, [225, 105, 20]], [150, [175, 55, 15]],
+  // Snow runs cyan through deep blue, like operational winter radar palettes.
+  [150.01, [220, 248, 255]], [165, [105, 205, 245]],
+  [182, [45, 135, 230]], [200, [45, 45, 175]],
+]);
+
 // Snowfall accumulation (depth), as fractions of the product's full-scale value.
 // Light dustings in pale blue, deepening through blue → purple → pink for the big
 // totals, following the familiar NWS snowfall look.
@@ -576,6 +594,25 @@ const sfc = (varName, level) => ({ varName, level, file: 'sfc' });
 const weasdTotal = { varName: 'WEASD', level: 'surface', acc: /^0-/ };
 const frozrTotal = { varName: 'FROZR', level: 'surface', acc: /^0-/ };
 const frzrTotal = { varName: 'FRZR', level: 'surface', acc: /^0-/ };
+
+// PRATE is kg m^-2 s^-1 (equivalent to mm/s). The four categorical fields are
+// 0/1 masks. In a mixed cell use the most wintry reported phase, which prevents
+// a simultaneous rain flag from hiding freezing rain or snow.
+const precipTypeRate = (a, i) => {
+  const rate = a[0][i] * 3600;
+  if (!Number.isFinite(rate) || rate <= 0) return NaN;
+  const phase = a[4][i] > 0 ? 3 : a[3][i] > 0 ? 2 : a[2][i] > 0 ? 1 : 0;
+  return phase * 50 + Math.min(49.99, rate);
+};
+const formatPrecipTypeRate = (v) => {
+  const phase = Math.max(0, Math.min(3, Math.floor(v / 50)));
+  const rate = v - phase * 50;
+  return `${['Rain', 'Freezing rain', 'Ice pellets', 'Snow'][phase]} · ${rate.toFixed(1)} mm/h`;
+};
+const precipTypeSources = () => [
+  sfc('PRATE', 'surface'), sfc('CRAIN', 'surface'), sfc('CFRZR', 'surface'),
+  sfc('CICEP', 'surface'), sfc('CSNOW', 'surface'),
+];
 // Low/mid-level temperatures (K) that bracket the warmest layer the snow falls
 // through — the input to the Kuchera ratio.
 const SNOW_TEMPS = [sfc('TMP', '2 m above ground'), prs('TMP', 925), prs('TMP', 850), prs('TMP', 700)];
@@ -761,6 +798,14 @@ export const MODEL_PRODUCTS = {
     reflectivity: true,
     dispUnit: 'dBZ', dispFactor: 1, dispOffset: 0,
   }),
+  PTYPE: withMslpOverlay({
+    ...gridProduct('PTYPE', 'Precip Type & Rate', PTYPE_SCALE, 0.01, 'phase + mm/h'),
+    combine: precipTypeRate,
+    sources: precipTypeSources,
+    formatValue: formatPrecipTypeRate,
+    legendTicks: ['Rain', 'Mix', 'Snow'],
+    legendGroups: true,
+  }),
   TMP: withMslpOverlay({ ...TMP_PROD, varName: 'TMP', level: '2 m above ground' }),
   WIND: withWindContours(withMslpOverlay({
     ...WIND_PROD, combine: 'mag',
@@ -921,7 +966,7 @@ export const MODEL_PRODUCTS = {
 export const MODEL_CATEGORIES = [
   {
     id: 'surface', name: 'Surface & Precip',
-    products: ['REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF'],
+    products: ['REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF'],
   },
   {
     id: 'upper', name: 'Upper Air',
@@ -950,7 +995,7 @@ export const MODEL_ORDER = MODEL_CATEGORIES.flatMap((c) => c.products);
 // the QPF products need. HRRR (unlisted) supports the full set.
 const MODEL_PRODUCT_SUPPORT = {
   nam: [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'LAPSE', 'SRH3', 'SHEAR6', 'LTNG',
@@ -959,14 +1004,14 @@ const MODEL_PRODUCT_SUPPORT = {
     'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   namnest: [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'LCL',
     'SRH1', 'SRH3', 'SHEAR6', 'STORM', 'STP', 'SCP', 'EHI1', 'EHI3', 'LTNG',
   ],
   rap: [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF1', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'CAPE3', 'SBCIN', 'MLCIN', 'LAPSE',
@@ -975,10 +1020,12 @@ const MODEL_PRODUCT_SUPPORT = {
     'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT', 'ICET', 'FZRA',
   ],
   gfs: [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
+    'REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6', 'QPF24', 'QPF',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'MUCAPE', 'SBCIN', 'MLCIN', 'LAPSE', 'SRH3', 'STORM', 'EHI3',
+    // GFS has accumulated WEASD snapshots, but no FROZR/FRZR accumulation.
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   // GraphCast posts only pressure-level mass/wind fields (HGT/TMP/UGRD/VGRD/
   // SPFH/VVEL) — no surface, precip, CAPE or absolute vorticity — so it can
@@ -1029,13 +1076,15 @@ const MODEL_PRODUCT_SUPPORT = {
     'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   // GEFS mean: the 0.25° `pgrb2s` surface set plus 0.5° pressure levels. APCP
-  // is a 6-h bucket (not a run total), so only the fixed 6-h QPF is offered;
-  // WEASD is an instantaneous snapshot, so no snowfall products.
+  // is a 6-h bucket (not a run total), so only the fixed 6-h QPF is offered.
+  // WEASD is an accumulated valid-time snapshot, from which snow windows can
+  // be differenced.
   gefsens: [
-    'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6',
+    'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC', 'QPF6',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'MLCAPE', 'SBCIN', 'MLCIN', 'SRH3',
+    'SNOW6', 'SNOW12', 'SNOW24', 'SNOWT', 'KUCH6', 'KUCH12', 'KUCH24', 'KUCHT',
   ],
   // AI GEFS members post pressure-level fields only (like the deterministic
   // AI GFS), so the mean covers just isotachs and upper-air temperatures —
@@ -1054,7 +1103,7 @@ const MODEL_PRODUCT_SUPPORT = {
   // run-total precip (APCP is a 3-h bucket), no lightning or winter fields. Same
   // field set on the parent and the storm nest, so all four keys share the list.
   ...Object.fromEntries(['hfsa', 'hfsaparent', 'hfsb', 'hfsbparent'].map((k) => [k, [
-    'REFC', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
+    'REFC', 'PTYPE', 'TMP', 'FEELS', 'WIND', 'GUST', 'RH', 'DPT', 'TCDC',
     'W200', 'W300', 'W500', 'W700', 'W850', 'W925',
     'VORT850', 'VORT700', 'VORT500', 'TMP925', 'TMP850', 'TMP700', 'TMP500',
     'SBCAPE', 'SBCIN', 'SRH3',
@@ -1077,10 +1126,28 @@ const FEELS_FROM_DEWPOINT = {
   ],
 };
 const ECMWF_PRODUCT_FIX = { DPT: DIRECT_DPT, FEELS: FEELS_FROM_DEWPOINT };
+
+// NCEP global products label accumulated WEASD as a plain valid-time forecast,
+// so the generic /^0-/ accumulation matcher cannot find it. Use the current
+// snapshot (and an earlier snapshot for fixed windows) explicitly.
+function snowSnapshotProductFixes() {
+  const weasd = { varName: 'WEASD', level: 'surface', file: 'sfc' };
+  const window = (hours, kuchera) => (fhour) => {
+    const snow = fhour > hours ? [weasd, { ...weasd, fhourDelta: -hours }] : [weasd];
+    return kuchera ? [...SNOW_TEMPS, ...snow] : snow;
+  };
+  return {
+    SNOW6: { sources: window(6, false) }, SNOW12: { sources: window(12, false) },
+    SNOW24: { sources: window(24, false) }, SNOWT: { sources: () => [weasd] },
+    KUCH6: { sources: window(6, true) }, KUCH12: { sources: window(12, true) },
+    KUCH24: { sources: window(24, true) }, KUCHT: { sources: () => [...SNOW_TEMPS, weasd] },
+  };
+}
 MODELS.ecmwf.productFix = ECMWF_PRODUCT_FIX;
 MODELS.aifs.productFix = ECMWF_PRODUCT_FIX;
 MODELS.ecmwfens.productFix = ECMWF_PRODUCT_FIX;
 MODELS.aifsens.productFix = ECMWF_PRODUCT_FIX;
+MODELS.gfs.productFix = snowSnapshotProductFixes();
 
 // GEFS mean: dewpoint is direct; precip is a 6-h bucket (matched by its
 // accumulation string) rather than a run total; the cloud-cover and layer-CAPE
@@ -1094,6 +1161,9 @@ MODELS.gefsens.productFix = {
   TCDC: { minFhour: 3 }, // period-averaged field, absent from the analysis
   MLCAPE: { level: '180-0 mb above ground' },
   MLCIN: { sources: () => [sfc('CIN', '180-0 mb above ground')] },
+  // GEFS publishes accumulated WEASD as a valid-time snapshot ("N hour fcst"),
+  // not a "0-N hour acc" record. Window products are differences of snapshots.
+  ...snowSnapshotProductFixes(),
 };
 
 // Does a model offer a given product?

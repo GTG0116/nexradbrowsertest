@@ -50,22 +50,29 @@ function slantForGround(s, sinEl, cosEl) {
   return r;
 }
 
-// Collapse repeated tilts (SAILS) to the freshest sweep per elevation, keeping
-// only sweeps that carry `moment`. Input sweeps are sorted by elevation.
+// Build one time-coherent elevation set. A SAILS/MESO-SAILS volume can contain
+// a fresh low-level revisit after the higher tilts were collected. Picking the
+// newest sweep independently at every elevation mixes two scan cycles. Use the
+// oldest of each elevation's newest samples as the latest common cutoff.
 function tiltsForMoment(sweeps, moment) {
   const list = sweeps.filter((sw) => {
     const m = sw.moments;
     return m && (Array.isArray(m) ? m.includes(moment) : m.has && m.has(moment));
   });
-  const out = [];
+  const groups = [];
   for (const sw of list) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(sw.elevation - last.elevation) <= TILT_EPS) {
-      if ((sw.time || 0) > (last.time || 0)) out[out.length - 1] = sw;
-    } else {
-      out.push(sw);
-    }
+    let group = groups.find((g) => Math.abs(sw.elevation - g.elevation) <= TILT_EPS);
+    if (!group) groups.push((group = { elevation: sw.elevation, sweeps: [] }));
+    group.sweeps.push(sw);
   }
+  if (!groups.length) return [];
+  for (const group of groups) group.sweeps.sort((a, b) => (a.time || 0) - (b.time || 0));
+  const commonTime = Math.min(...groups.map((g) => g.sweeps[g.sweeps.length - 1].time || 0));
+  const out = groups.map((g) => {
+    const eligible = g.sweeps.filter((sw) => !commonTime || (sw.time || 0) <= commonTime);
+    return eligible[eligible.length - 1] || g.sweeps[0];
+  });
+  out.commonTime = commonTime;
   return out;
 }
 
@@ -306,6 +313,7 @@ export class CrossSectionTool {
       this._render();
       return;
     }
+    const commonTime = sweeps.commonTime || 0;
     // Velocity products are shown the way the map shows them: dealiased (always,
     // for SRV; per the user toggle for VEL), with SRV's mean-wind removal.
     if (this.productId === 'SRV') sweeps = sweeps.map((sw) => stormRelativeSweep(dealiasSweep(sw)));
@@ -392,7 +400,8 @@ export class CrossSectionTool {
     };
     const miles = (totalM * M_TO_MI).toFixed(totalM * M_TO_MI < 20 ? 1 : 0);
     this._meta.textContent =
-      `${vol.icao || ''} · ${product.name} · ${tilts.length} tilts · ${miles} mi`;
+      `${vol.icao || ''} · ${product.name} · ${tilts.length} tilts` +
+      `${commonTime ? ` · coherent through ${new Date(commonTime).toISOString().slice(11, 19)}Z` : ''} · ${miles} mi`;
     this._render();
   }
 
