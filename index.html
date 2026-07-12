@@ -5,9 +5,10 @@
     <!-- maximum-scale=1 stops iPad/iOS Safari from zooming the page when a form
          control is focused (the map provides its own zoom, so page zoom isn't
          needed); viewport-fit=cover lets the page extend edge-to-edge on
-         devices with a notch/home indicator. The map reserves no safe-area
-         space; only the floating top chrome is offset below the Dynamic
-         Island (see the env(safe-area-inset-top) rules in the stylesheets). -->
+         devices with a notch/home indicator. The map remains visible through
+         the top safe area; only the floating top chrome is offset below the
+         Dynamic Island (see the env(safe-area-inset-top) rules in the
+         stylesheets). -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
@@ -34,7 +35,9 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <!-- Pin the icon runtime so an upstream `latest` release cannot silently
+         change production behavior; defer it so the CDN is not parser-blocking. -->
+    <script defer src="https://unpkg.com/lucide@1.23.0/dist/umd/lucide.js"></script>
     <link
       href="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.css"
       rel="stylesheet"
@@ -91,11 +94,10 @@
           <span>Radar<span>Nexus</span></span>
         </div>
         <span class="console-divider" aria-hidden="true"></span>
-        <button class="console-site" type="button" data-console-focus="siteSelect" title="Choose radar site">
+        <button class="console-site console-location" type="button" data-console-focus="locationSearchInput"
+          title="Search for a town or place" aria-label="Search for a town or place" aria-haspopup="dialog">
           <i data-lucide="search" aria-hidden="true"></i>
-          <span class="console-site-code" id="consoleSiteCode">KTLX</span>
-          <span class="console-site-name" id="consoleSiteName">Oklahoma City, OK</span>
-          <i data-lucide="chevron-down" aria-hidden="true"></i>
+          <span class="console-site-name">Search towns or places</span>
         </button>
         <div class="location-search" id="locationSearch" hidden>
           <form id="locationSearchForm">

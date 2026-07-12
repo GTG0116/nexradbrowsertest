@@ -470,6 +470,24 @@ export function prepareModelOverlayData(grid) {
   };
 }
 
+// Compact contour-only bundle for long playback runs. Callers can serialize
+// this and materialize only the currently displayed frame.
+export function prepareModelPlaybackContours(grid) {
+  if (!grid || !grid.overlays) return null;
+  const hasHeight = !!grid.overlays.hgt;
+  const hasMslp = !!grid.overlays.mslp;
+  const hasWindContours = !!grid.overlays.windSpeed;
+  if (!hasHeight && !hasMslp && !hasWindContours) return null;
+  return {
+    hasHeight, hasWind: false, hasMslp, hasWindContours,
+    hgt: hasHeight ? heightContourGeoJSON(grid) : EMPTY,
+    windBarbs: EMPTY,
+    mslp: hasMslp ? mslpContourGeoJSON(grid) : EMPTY,
+    pressureCenters: EMPTY,
+    windContours: hasWindContours ? windContourGeoJSON(grid) : EMPTY,
+  };
+}
+
 export function showPreparedModelOverlays(map, data) {
   if (!data) { clearModelOverlays(map); return; }
   setupModelOverlayLayers(map, firstAnchor(map));

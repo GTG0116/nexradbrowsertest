@@ -237,13 +237,15 @@ const SANS = "'Manrope', system-ui, sans-serif";
 function drawExportInfo(ctx, cap, W, u, theme, xInset = 0) {
   const pad = Math.round(u * 0.65);
   const gap = Math.round(u * 0.38);
-  const title = cap.sub || cap.title || 'RadarNexus';
+  // Preserve the actual source (model name, radar site, satellite, etc.). The
+  // previous clean-export chip replaced this with the product description.
+  const title = cap.title || 'RadarNexus';
   const time = cap.time || '';
+  const detail = [cap.sub, time].filter(Boolean).join(' · ');
   ctx.save();
   ctx.font = `700 ${Math.round(u * 1.0)}px ${SANS}`;
   const titleW = ctx.measureText(title).width;
   ctx.font = `600 ${Math.round(u * 0.7)}px ${MONO}`;
-  const detail = time;
   const detailW = ctx.measureText(detail).width;
   const boxW = Math.min(W - xInset - pad * 2, Math.ceil(Math.max(titleW, detailW) + pad * 2));
   const boxH = Math.round(u * 3.05);

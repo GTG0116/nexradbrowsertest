@@ -224,7 +224,7 @@ export const MODELS = {
     // The 0.25° surface set stops at F240; keep the run there so every product
     // spans the same hours.
     forecastHoursList() {
-      return steppedList(0, 240, 3);
+      return steppedList(0, 384, 3);
     },
   },
   aigefsens: {
@@ -256,7 +256,7 @@ export const MODELS = {
     cycleStep: 6,
     latencyMin: 420,
     forecastHoursList() {
-      return steppedList(0, 240, 6);
+      return steppedList(0, 384, 6);
     },
   },
   ecmwfens: {
@@ -625,10 +625,11 @@ function kucheraRatio(tmaxK) {
   return tmaxK <= 271.16 ? 12 + 2 * d : Math.max(0, 12 + d);
 }
 // Liquid-equivalent (mm) over the window: the run total now, minus `hours` earlier
-// when that earlier total is present (longer lead times); floored at zero. NaN at
-// `now` propagates so gaps stay gaps. `then` is undefined at short lead times.
+// when that earlier total is present (longer lead times); floored at zero. A
+// missing value at either endpoint propagates so gaps stay gaps. `then` is
+// undefined at short lead times.
 const weasdDelta = (now, then) => {
-  if (Number.isNaN(now)) return NaN;
+  if (!Number.isFinite(now) || (then !== undefined && !Number.isFinite(then))) return NaN;
   const w = then === undefined ? now : now - then;
   return w > 0 ? w : 0;
 };
@@ -1258,7 +1259,11 @@ async function runExists(model, run, productId) {
     }
     return runProbeCache.get(url);
   });
-  return (await Promise.all(checks)).some(Boolean);
+  // Every distinct source file is required to build the selected product. A
+  // cycle can be visible while its pressure file is still uploading; accepting
+  // only the surface file lists a run that is guaranteed to fail for derived
+  // products such as Kuchera snow.
+  return (await Promise.all(checks)).every(Boolean);
 }
 
 // List the available model runs (cycles) for a UTC day, newest last. Cycles step
@@ -1552,7 +1557,9 @@ function rangesFromEcmwfIndex(entries, q) {
   for (const e of entries) {
     if (e.param !== q.param) continue;
     if (q.levelist != null ? String(e.levelist) !== String(q.levelist) : e.levelist != null) continue;
-    out.push({ start: e._offset, end: e._offset + e._length - 1, sub: 0 });
+    const start = Number(e._offset), length = Number(e._length);
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length <= 0) continue;
+    out.push({ start, end: start + length - 1, sub: 0 });
   }
   if (!out.length) throw new Error(`field ${q.param}${q.levelist ? '/' + q.levelist + ' hPa' : ''} not in index`);
   return out;
@@ -1690,8 +1697,9 @@ function combineGrids(grids, mode) {
     for (let i = 0; i < n; i++) out[i] = Math.hypot(arrays[0][i], arrays[1][i]);
   } else if (mode === 'diff') {
     for (let i = 0; i < n; i++) {
-      const d = arrays[0][i] - arrays[1][i];
-      out[i] = Number.isNaN(arrays[0][i]) ? NaN : d > 0 ? d : 0;
+      const now = arrays[0][i], then = arrays[1][i];
+      const d = now - then;
+      out[i] = Number.isFinite(now) && Number.isFinite(then) ? (d > 0 ? d : 0) : NaN;
     }
   } else {
     for (let i = 0; i < n; i++) out[i] = mode(arrays, i);
@@ -1711,9 +1719,20 @@ function emptyGrid() {
 async function fetchRange(url, range, onProgress) {
   const headers = { Range: `bytes=${range.start}-${range.end == null ? '' : range.end}` };
   const res = await fetch(url, { headers });
-  if (!res.ok && res.status !== 206) throw new Error(`download failed: ${res.status}`);
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  // A 200 response means a proxy/origin ignored Range. Feeding the entire GRIB
+  // file to a decoder expecting one indexed message silently renders the first
+  // field instead (and can allocate hundreds of MB). Only bytes=0- genuinely
+  // denotes the whole object and is safe as a 200 response.
+  if (res.status !== 206 && !(range.start === 0 && range.end == null)) {
+    throw new Error('model data server ignored the requested byte range');
+  }
   const total = range.end == null ? 0 : range.end - range.start + 1;
-  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  if (!res.body || !total) {
+    const out = new Uint8Array(await res.arrayBuffer());
+    if (total && out.length !== total) throw new Error(`truncated model range (${out.length}/${total} bytes)`);
+    return out;
+  }
   const reader = res.body.getReader();
   const chunks = [];
   let received = 0;
@@ -1722,8 +1741,9 @@ async function fetchRange(url, range, onProgress) {
     if (done) break;
     chunks.push(value);
     received += value.length;
-    if (onProgress) onProgress(received / total);
+    if (onProgress) onProgress(Math.min(1, received / total));
   }
+  if (received !== total) throw new Error(`truncated model range (${received}/${total} bytes)`);
   const out = new Uint8Array(received);
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }

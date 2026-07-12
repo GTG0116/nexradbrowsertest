@@ -20,6 +20,7 @@ import { loadScene, ensureBands } from './goes.js';
 // keeping memory bounded (each cached GOES scene pins its downloaded file bytes).
 const scenes = new Map();
 const order = [];
+let cacheEpoch = 0;
 // Full-disk source files are very large. Two scenes preserve fast product/band
 // switches while preventing an idle satellite session from pinning six files
 // and their parser state in the worker heap.
@@ -65,24 +66,30 @@ self.onmessage = async (e) => {
       return;
     }
     if (type === 'clear') {
+      // In-flight load handlers continue after this message returns. Advance an
+      // epoch so one that started before the clear cannot repopulate the cache
+      // after the user has left satellite mode.
+      cacheEpoch++;
       scenes.clear();
       order.length = 0;
       return;
     }
     if (type === 'load') {
+      const epoch = cacheEpoch;
       const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress);
-      remember(msg.key, scene);
+      if (epoch === cacheEpoch) remember(msg.key, scene);
       const { slim, transfer } = slimScene(scene, msg.bands);
       self.postMessage({ id, ok: true, scene: slim }, transfer);
       return;
     }
     if (type === 'ensure') {
+      const epoch = cacheEpoch;
       let scene = scenes.get(msg.key);
       let added = msg.bands;
       if (!scene) {
         // Evicted (or this worker never had it): reload just the bands wanted.
         scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress);
-        remember(msg.key, scene);
+        if (epoch === cacheEpoch) remember(msg.key, scene);
       } else {
         const before = new Set(Object.keys(scene.channels));
         await ensureBands(scene, msg.bands);

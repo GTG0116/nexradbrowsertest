@@ -24,6 +24,10 @@ const resolveGrid = (p) => (p && p.reflectivity ? reflectivityProduct(p) : p);
 const DATA_LAYER_IDS = ['radar', 'mrms', 'models', 'observations', SATELLITE_LAYER_ID];
 const OUTLOOK_SEP = '|';
 const EMPTY_FC = { type: 'FeatureCollection', features: [] };
+// Alternate-pane grids can be tens of megabytes (MRMS is especially large).
+// Keep only the current working set instead of retaining every frame/hour that
+// a long split-view session visits.
+const GRID_CACHE_MAX = 6;
 
 function outlookValue(productId, detailId) {
   return `${productId}${OUTLOOK_SEP}${detailId}`;
@@ -101,6 +105,34 @@ export class SplitView {
 
   _emptyLayers() {
     return { radar: null, mrms: null, models: null, observations: null, sat: null };
+  }
+
+  _gridKey(mode, id) {
+    const state = this.ctx.state;
+    if (mode === 'mrms') {
+      const frame = state.mrms.frameKey || (state.live ? 'live' : state.date.getTime());
+      return `mrms:${id}:${frame}`;
+    }
+    if (mode === 'observations')
+      return `observations:${id}:${state.observations.frameKey || ''}`;
+    if (mode === 'models')
+      return `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.stormId}:${state.models.fhour}`;
+    return `${mode}:${id}`;
+  }
+
+  _gridCacheGet(key) {
+    if (!this._gridCache.has(key)) return undefined;
+    const value = this._gridCache.get(key);
+    this._gridCache.delete(key);
+    this._gridCache.set(key, value);
+    return value;
+  }
+
+  _gridCacheSet(key, value) {
+    this._gridCache.delete(key);
+    this._gridCache.set(key, value);
+    while (this._gridCache.size > GRID_CACHE_MAX)
+      this._gridCache.delete(this._gridCache.keys().next().value);
   }
 
   _paneNums() {
@@ -221,6 +253,7 @@ export class SplitView {
     this.productId = null;
     this.paneCount = 1;
     this.activePane = 1;
+    this._gridCache.clear();
 
     if (this.ctx.onActivePaneChange) this.ctx.onActivePaneChange();
     if (this.ctx.onSplitProductsChange) this.ctx.onSplitProductsChange();
@@ -552,6 +585,8 @@ export class SplitView {
 
   onModeChange() {
     if (!this.active) return;
+    // Cached grids belong to the previous source/timeline and may be very large.
+    this._gridCache.clear();
     for (const n of this._extraPaneNums()) {
       this.productIds[n] = this._defaultProduct(n);
       this.outlooksByPane[n] = this.ctx.state.mode === 'outlooks' ? parseOutlookValue(this.productIds[n]) : null;
@@ -795,7 +830,7 @@ export class SplitView {
       // than stamp a stale satellite frame over whatever the pane shows now.
       if (!this.active || pane > this.paneCount || state.mode !== 'satellite') return;
       if ((this.productIds[pane] || state.sat.productId) !== id) return;
-      if (!state.sat.scene) { this._clearData(pane); return; }
+      if (state.sat.scene !== scene) return;
       const payload = this.ctx.satPayloadForProduct
         ? this.ctx.satPayloadForProduct(id)
         : { meta: scene, rgba: buildRGBA(scene, id, { enhanceIR: state.sat.enhanceIR }), bbox: sceneBBox(scene) };
@@ -819,7 +854,13 @@ export class SplitView {
       (mode === 'models' && id === state.models.productId) ||
       (mode === 'observations' && id === state.observations.productId);
     const map = this._mapForPane(pane);
+    const ck = this._gridKey(mode, id);
+    const current = () => this.active && pane <= this.paneCount &&
+      this._mapForPane(pane) === map && state.mode === mode &&
+      (this.productIds[pane] || (mode === 'observations' ? state.observations.productId : null)) === id &&
+      this._gridKey(mode, id) === ck;
     const draw = (grid) => {
+      if (!current()) return;
       if (!grid) {
         this._clearData(pane);
         return;
@@ -838,13 +879,9 @@ export class SplitView {
       return;
     }
 
-    const ck = mode === 'mrms'
-      ? `mrms:${id}`
-      : mode === 'observations'
-      ? `observations:${id}:${state.observations.frameKey}`
-      : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.stormId}:${state.models.fhour}`;
-    if (this._gridCache.has(ck)) {
-      draw(this._gridCache.get(ck));
+    const cached = this._gridCacheGet(ck);
+    if (cached !== undefined) {
+      draw(cached);
       return;
     }
 
@@ -852,6 +889,7 @@ export class SplitView {
       let grid;
       if (mode === 'mrms') {
         const frames = await listMrms(id, state.live ? new Date() : state.date);
+        if (!current()) return;
         if (!frames.length) {
           this._clearData(pane);
           return;
@@ -872,11 +910,11 @@ export class SplitView {
         }
         grid = await loadModel(state.models.modelKey, id, run, state.models.fhour);
       }
-      this._gridCache.set(ck, grid);
-      if (this.productIds[pane] === id) draw(grid);
+      this._gridCacheSet(ck, grid);
+      draw(grid);
     } catch (e) {
       console.error('split grid load', e);
-      this._clearData(pane);
+      if (current()) this._clearData(pane);
     }
   }
 
@@ -901,7 +939,13 @@ export class SplitView {
     if (!map) return;
     const src = map.getSource && map.getSource('spc-outlook');
     const sel = this.outlookForPane(pane);
+    const current = () => this.active && pane <= this.paneCount &&
+      this._mapForPane(pane) === map && this.ctx.state.mode === 'outlooks' && (() => {
+        const now = this.outlookForPane(pane);
+        return now.product === sel.product && now.detail === sel.detail;
+      })();
     const draw = (data) => {
+      if (!current()) return;
       if (src) src.setData(data || EMPTY_FC);
       if (map.getLayer('spc-outlook-fill'))
         map.setPaintProperty('spc-outlook-fill', 'fill-opacity', (this.ctx.state && this.ctx.state.spcOpacity) || 0.3);
@@ -915,19 +959,20 @@ export class SplitView {
       return;
     }
     const ck = `outlook:${sel.product}:${sel.detail}`;
-    if (this._gridCache.has(ck)) {
-      draw(this._gridCache.get(ck));
+    const cached = this._gridCacheGet(ck);
+    if (cached !== undefined) {
+      draw(cached);
       return;
     }
     loadOutlookData(sel.product, sel.detail)
       .then(({ fc }) => {
-        this._gridCache.set(ck, fc);
+        this._gridCacheSet(ck, fc);
         const cur = this.outlookForPane(pane);
         if (cur.product === sel.product && cur.detail === sel.detail) draw(fc);
       })
       .catch((e) => {
         console.error('split outlook load', e);
-        draw(EMPTY_FC);
+        if (current()) draw(EMPTY_FC);
       });
     if (map.getLayer('spc-outlook-fill'))
       map.setPaintProperty('spc-outlook-fill', 'fill-opacity', (this.ctx.state && this.ctx.state.spcOpacity) || 0.3);
@@ -983,12 +1028,7 @@ export class SplitView {
     else if (mode === 'models' && id === state.models.productId) grid = state.models.grid;
     else if (mode === 'observations' && id === state.observations.productId) grid = state.observations.grid;
     if (!grid) {
-      const ck = mode === 'mrms'
-        ? `mrms:${id}`
-        : mode === 'observations'
-        ? `observations:${id}:${state.observations.frameKey}`
-        : `models:${state.models.modelKey}:${id}:${state.models.runKey}:${state.models.stormId}:${state.models.fhour}`;
-      grid = this._gridCache.get(ck);
+      grid = this._gridCacheGet(this._gridKey(mode, id));
     }
     if (!grid || !this.ctx.sampleGridRaw || !this.ctx.formatGridValue) return null;
     const p = resolveGrid(grid.product);

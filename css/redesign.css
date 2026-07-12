@@ -239,7 +239,7 @@ button {
 }
 .console-location { position: relative; }
 .console-location::after {
-  content: 'Search location';
+  content: 'Town search';
   margin-left: 4px;
   color: var(--ink-dim);
   font-size: 11px;
@@ -260,6 +260,15 @@ button {
 .location-search-results button { padding: 9px 10px; color: var(--ink); background: transparent; border: 0; border-radius: 7px; text-align: left; cursor: pointer; }
 .location-search-results button:hover { background: var(--panel-2); }
 .location-search-status { padding: 10px; color: var(--ink-dim); }
+
+/* Changing playback text must not resize the adjacent scrubber. */
+.dock-main > .playback-bar .pb-label {
+  flex: 0 0 clamp(180px, 24vw, 330px);
+  width: clamp(180px, 24vw, 330px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .console-modes {
   display: flex;
@@ -799,24 +808,24 @@ body.theme-dark .mapboxgl-map {
   background: #070b10;
 }
 
-/* iOS standalone (add-to-home-screen) status-bar fill. With the black-
-   translucent status bar the app draws edge-to-edge under the notch/Dynamic
-   Island, which left an empty, sometimes-glitchy translucent gap above the
-   chrome. This paints that safe-area band as a solid strip so it reads as an
-   intentional status bar. It is zero-height (invisible) anywhere without a top
-   inset — i.e. everywhere except notched iOS home-screen apps — and never
-   intercepts input. Kept dark in both themes for legibility of the white
-   status-bar glyphs. */
-.app::before {
+/* Keep the iOS home-indicator region visually joined to the bottom controls
+   even while the dock or settings sheet is transitioning. This is intentionally
+   an absolute, non-animated paint layer: a fixed/transformed safe-area layer above
+   the WebGL map can flicker or briefly de-composite in iOS WebKit. The top safe
+   area has no corresponding fill, so the map remains genuinely full-bleed
+   behind the translucent status bar. The inset resolves to zero on ordinary
+   displays; keeping this rule outside the phone breakpoint also covers an
+   iPhone or iPad rotated to landscape. */
+.app::after {
   content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
+  position: absolute;
   right: 0;
-  height: env(safe-area-inset-top, 0px);
-  background: #0a0e13;
-  z-index: 9000;
+  bottom: 0;
+  left: 0;
+  height: env(safe-area-inset-bottom, 0px);
+  background: var(--panel);
   pointer-events: none;
+  z-index: 699;
 }
 
 /* SPC Mesoanalysis static-image view: covers the interactive map while a
@@ -864,8 +873,8 @@ body.theme-dark .meso-view {
   gap: 8px;
   padding: 8px 12px;
   /* Clear the iOS notch: the meso view is full-bleed (top:0), so lift the
-     header content below the status-bar inset. The safe-area fill (.app::before)
-     paints that band, so the header reads as continuous with it. */
+     header content below the status-bar inset. The header's own background
+     continues behind the translucent status bar. */
   padding-top: calc(8px + env(safe-area-inset-top, 0px));
   background: var(--hud);
   border-bottom: 1px solid var(--hud-border);

@@ -184,11 +184,18 @@ function rangeFromIdx(text, source) {
 async function fetchBytes(url, onProgress, range) {
   const headers = range ? { Range: `bytes=${range.start}-${range.end == null ? '' : range.end}` } : undefined;
   const res = await fetch(url, headers ? { headers } : undefined);
-  if (!res.ok && !(range && res.status === 206)) throw new Error(`RTMA download failed: ${res.status}`);
+  if (!res.ok) throw new Error(`RTMA download failed: ${res.status}`);
+  if (range && res.status !== 206 && !(range.start === 0 && range.end == null)) {
+    throw new Error('RTMA server ignored the requested byte range');
+  }
   const total = range && range.end != null
     ? range.end - range.start + 1
     : Number(res.headers.get('content-length')) || 0;
-  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  if (!res.body || !total) {
+    const out = new Uint8Array(await res.arrayBuffer());
+    if (range && total && out.length !== total) throw new Error(`truncated RTMA range (${out.length}/${total} bytes)`);
+    return out;
+  }
   const reader = res.body.getReader();
   const chunks = [];
   let received = 0;
@@ -197,8 +204,9 @@ async function fetchBytes(url, onProgress, range) {
     if (done) break;
     chunks.push(value);
     received += value.length;
-    if (onProgress) onProgress(received / total);
+    if (onProgress) onProgress(Math.min(1, received / total));
   }
+  if (range && received !== total) throw new Error(`truncated RTMA range (${received}/${total} bytes)`);
   const out = new Uint8Array(received);
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
@@ -211,6 +219,29 @@ async function idxTextFor(key) {
   return res.text();
 }
 
+// Select a one-based GRIB message from a file containing concatenated messages.
+// RTMA's fallback record numbers refer to whole GRIB messages, not submessages
+// inside the first message; passing `record - 1` to decodeGrib2 therefore used
+// to clamp to (and render) the wrong field whenever the sidecar index was down.
+function gribMessageAt(bytes, record) {
+  if (!Number.isInteger(record) || record < 1) throw new Error('invalid RTMA fallback record');
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 0, current = 0;
+  while (pos + 16 <= bytes.length) {
+    if (String.fromCharCode(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]) !== 'GRIB') {
+      throw new Error(`invalid concatenated GRIB message at byte ${pos}`);
+    }
+    const length = Number(dv.getBigUint64(pos + 8, false));
+    if (!Number.isSafeInteger(length) || length < 20 || pos + length > bytes.length) {
+      throw new Error(`invalid concatenated GRIB length at byte ${pos}`);
+    }
+    current++;
+    if (current === record) return bytes.subarray(pos, pos + length);
+    pos += length;
+  }
+  throw new Error(`RTMA fallback record ${record} not found`);
+}
+
 async function fetchDecodeSource(key, source, idxPromise, onProgress) {
   const url = `${BUCKET}/${key}`;
   try {
@@ -220,7 +251,7 @@ async function fetchDecodeSource(key, source, idxPromise, onProgress) {
   } catch (idxErr) {
     if (!Number.isFinite(source.record)) throw idxErr;
     const bytes = await fetchBytes(url, onProgress);
-    return decodeGrib2(bytes, Math.max(0, source.record - 1));
+    return decodeGrib2(gribMessageAt(bytes, source.record));
   }
 }
 

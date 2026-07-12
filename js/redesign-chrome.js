@@ -162,7 +162,23 @@ function installCommandBar() {
   const locationForm = document.querySelector('#locationSearchForm');
   const locationInput = document.querySelector('#locationSearchInput');
   const locationResults = document.querySelector('#locationSearchResults');
-  const closeLocation = () => { if (locationBox) locationBox.hidden = true; };
+  let locationSearchSeq = 0;
+  let locationSearchController = null;
+  const setLocationStatus = (message) => {
+    if (!locationResults) return;
+    const status = document.createElement('div');
+    status.className = 'location-search-status';
+    status.textContent = message;
+    locationResults.replaceChildren(status);
+  };
+  const closeLocation = () => {
+    // Invalidate the request too, so a late response cannot repopulate a search
+    // panel the user deliberately dismissed.
+    locationSearchSeq++;
+    locationSearchController?.abort();
+    locationSearchController = null;
+    if (locationBox) locationBox.hidden = true;
+  };
   bar.querySelector('[data-console-focus]')?.addEventListener('click', () => {
     if (!locationBox) return;
     locationBox.hidden = false;
@@ -173,30 +189,53 @@ function installCommandBar() {
     event.preventDefault();
     const q = locationInput?.value.trim();
     if (!q || !locationResults) return;
-    locationResults.innerHTML = '<div class="location-search-status">Searching…</div>';
+    locationSearchController?.abort();
+    const controller = new AbortController();
+    locationSearchController = controller;
+    const seq = ++locationSearchSeq;
+    setLocationStatus('Searching...');
     try {
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&addressdetails=1&q=${encodeURIComponent(q)}`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      const response = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const places = await response.json();
+      if (seq !== locationSearchSeq || controller.signal.aborted) return;
+      if (!Array.isArray(places)) throw new Error('invalid response');
       locationResults.innerHTML = '';
-      if (!places.length) locationResults.innerHTML = '<div class="location-search-status">No locations found.</div>';
+      let validPlaces = 0;
       for (const place of places) {
+        const lat = Number(place.lat);
+        const lon = Number(place.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = place.display_name;
+        button.textContent = String(place.display_name || `${lat}, ${lon}`);
         button.addEventListener('click', () => {
           const bb = place.boundingbox;
+          const bbox = Array.isArray(bb) && bb.length >= 4
+            ? [Number(bb[2]), Number(bb[0]), Number(bb[3]), Number(bb[1])]
+            : null;
           window.dispatchEvent(new CustomEvent('radarnexus:location', { detail: {
-            label: place.display_name, lat: Number(place.lat), lon: Number(place.lon),
-            bbox: bb ? [Number(bb[2]), Number(bb[0]), Number(bb[3]), Number(bb[1])] : null,
+            label: button.textContent, lat, lon,
+            bbox: bbox && bbox.every(Number.isFinite) ? bbox : null,
           } }));
           closeLocation();
         });
         locationResults.appendChild(button);
+        validPlaces++;
       }
+      if (!validPlaces) setLocationStatus('No locations found.');
     } catch (error) {
-      locationResults.innerHTML = `<div class="location-search-status">Search unavailable (${error.message}).</div>`;
+      if (seq !== locationSearchSeq || controller.signal.aborted || error?.name === 'AbortError') return;
+      const message = error instanceof Error ? error.message : String(error);
+      // Error strings may come from a network intermediary; render them as text,
+      // never as markup.
+      setLocationStatus(`Search unavailable (${message}).`);
+    } finally {
+      if (seq === locationSearchSeq) locationSearchController = null;
     }
   });
 

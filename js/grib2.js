@@ -34,6 +34,9 @@ async function inflate(bytes) {
 // value spread across the R,G,B bytes — so we handle both. The returned typed
 // array is sized to the field's bit depth (Uint8/Uint16/Uint32).
 async function decodePNG(png) {
+  if (png.length < 33 || png[0] !== 0x89 || png[1] !== 0x50 || png[2] !== 0x4e || png[3] !== 0x47) {
+    throw new Error('invalid PNG in GRIB2');
+  }
   const dv = new DataView(png.buffer, png.byteOffset, png.length);
   const W = dv.getUint32(16);
   const H = dv.getUint32(20);
@@ -44,6 +47,9 @@ async function decodePNG(png) {
   // Samples per pixel: grayscale (0) → 1, truecolour RGB (2) → 3.
   const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : 0;
   if (!channels) throw new Error('unsupported PNG colour type ' + colorType + ' in GRIB2');
+  if (!W || !H || (bitDepth !== 8 && !(colorType === 0 && bitDepth === 16))) {
+    throw new Error(`unsupported PNG dimensions/bit depth ${W}x${H}/${bitDepth} in GRIB2`);
+  }
 
   // concatenate IDAT chunks
   const idat = [];
@@ -64,6 +70,7 @@ async function decodePNG(png) {
 
   const bpp = (bitDepth / 8) * channels; // bytes per pixel (filter unit)
   const stride = W * bpp;
+  if (raw.length !== H * (stride + 1)) throw new Error('truncated PNG scan data in GRIB2');
   // Output values can be 8-bit (gray-8), 16-bit (gray-16) or 24-bit (RGB-8).
   const bitsPerValue = colorType === 2 ? channels * bitDepth : bitDepth;
   const out = bitsPerValue <= 8 ? new Uint8Array(W * H)
@@ -91,7 +98,7 @@ async function decodePNG(png) {
         case 2: v = rb + b; break;
         case 3: v = rb + ((a + b) >> 1); break;
         case 4: v = rb + paeth(a, b, c); break;
-        default: v = rb;
+        default: throw new Error(`unsupported PNG filter ${ft} in GRIB2`);
       }
       cur[x] = v & 255;
     }
@@ -129,6 +136,12 @@ function readSignMag(dv, off, nbytes) {
 class BitReader {
   constructor(buf) { this.buf = buf; this.pos = 0; }
   read(nbits) {
+    if (!Number.isInteger(nbits) || nbits < 0 || nbits > 32) {
+      throw new Error(`GRIB2: invalid packed bit width ${nbits}`);
+    }
+    if (this.pos + nbits > this.buf.length * 8) {
+      throw new Error('GRIB2: truncated packed data');
+    }
     let v = 0, pos = this.pos;
     const buf = this.buf;
     for (let k = 0; k < nbits; k++) {
@@ -159,6 +172,11 @@ function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values
   const bitsGL = dv.getUint8(p5 + 46);            // bits per scaled group length
   const order = drt === 3 ? dv.getUint8(p5 + 47) : 0;       // spatial-diff order
   const nbytesd = drt === 3 ? dv.getUint8(p5 + 48) : 0;     // octets per extra descriptor
+
+  if (!ng) throw new Error('GRIB2: complex packing has no groups');
+  if (drt === 3 && order !== 1 && order !== 2) {
+    throw new Error(`GRIB2: unsupported spatial differencing order ${order}`);
+  }
 
   const br = new BitReader(dataSection);
 
@@ -196,6 +214,7 @@ function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values
       for (let n = 0; n < L && k < npts; n++) X[k++] = ref + br.read(w);
     }
   }
+  if (k !== npts) throw new Error(`GRIB2: complex packing produced ${k}/${npts} values`);
 
   // Undo the spatial differencing, then scale to physical units.
   if (drt === 3) {
@@ -221,6 +240,7 @@ function unpackComplex(dv, p5, dataSection, npts, R, scaleE, scaleD, drt, values
 // implemented (signed data throws).
 function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
   if (flags & 1) throw new Error('AEC: signed data not supported');
+  if (!blockSize || !rsi) throw new Error('AEC: invalid block size or reference interval');
   const pp = !!(flags & 8);
   const padRsi = !!(flags & 32);
   // Option-ID field length by sample resolution (libaec aec_decode_init).
@@ -239,18 +259,29 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
     for (let j = 0; j <= i; j++) { seTable[2 * k] = i; seTable[2 * k + 1] = ms; k++; }
   }
 
-  // MSB-first bit reader over a byte accumulator: `acc` holds `accBits` unread
-  // bits (the next bit to emit is the high one). Refilling a whole byte at a
-  // time — instead of recomputing a byte index and shift for every single bit —
-  // is what makes a 50-member ensemble decode in seconds rather than minutes.
+  // MSB-first reader with at most one byte buffered. This avoids both silent
+  // zero-padding at EOF and 32-bit accumulator overflow on wide, unaligned reads.
   const buf = dataSection;
   const len = buf.length;
   let pos = 0, acc = 0, accBits = 0;
-  const readBits = (n) => {
-    if (n === 0) return 0;
-    while (accBits < n) { acc = ((acc << 8) | (pos < len ? buf[pos++] : 0)) >>> 0; accBits += 8; }
-    accBits -= n;
-    return (acc >>> accBits) & (n >= 32 ? 0xffffffff : (1 << n) - 1);
+  const readBits = (count) => {
+    if (!Number.isInteger(count) || count < 0 || count > 32) {
+      throw new Error(`AEC: invalid bit width ${count}`);
+    }
+    let value = 0;
+    while (count > 0) {
+      if (!accBits) {
+        if (pos >= len) throw new Error('AEC: truncated stream');
+        acc = buf[pos++];
+        accBits = 8;
+      }
+      const take = Math.min(count, accBits);
+      const shift = accBits - take;
+      value = value * Math.pow(2, take) + ((acc >>> shift) & ((1 << take) - 1));
+      accBits -= take;
+      count -= take;
+    }
+    return value >>> 0;
   };
   // Fundamental sequence (unary): count zeros up to the terminating 1.
   const readFS = () => {
@@ -267,7 +298,7 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
   };
   // Byte-align the reader (used before each padded RSI): discard the fractional
   // bits so the next read starts on a byte boundary.
-  const alignByte = () => { accBits -= accBits & 7; };
+  const alignByte = () => { accBits = 0; };
 
   const out = new Uint32Array(npts);
   const rsiSize = rsi * blockSize;
@@ -289,11 +320,11 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
         if (ref) out[n++] = readBits(bits);
         if (se) {
           // Second extension: FS codes decode to pairs of samples.
-          for (let i = ref; i < blockSize && n < npts; ) {
+          for (let i = ref; i < blockSize && n < rsiEnd; ) {
             const m = readFS();
             if (m > 90) throw new Error('AEC: bad second-extension code');
             const d1 = m - seTable[2 * m + 1];
-            if ((i & 1) === 0) { out[n++] = seTable[2 * m] - d1; i++; if (n >= npts) break; }
+            if ((i & 1) === 0) { out[n++] = seTable[2 * m] - d1; i++; if (n >= rsiEnd) break; }
             out[n++] = d1; i++;
           }
         } else {
@@ -307,16 +338,16 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
             zb--;
           }
           let zs = zb * blockSize - ref;
-          while (zs-- > 0 && n < npts) out[n++] = 0;
+          while (zs-- > 0 && n < rsiEnd) out[n++] = 0;
         }
       } else if (id === uncompId) {
-        for (let i = 0; i < blockSize && n < npts; i++) out[n++] = readBits(bits);
+        for (let i = 0; i < blockSize && n < rsiEnd; i++) out[n++] = readBits(bits);
       } else {
         // Sample splitting: FS of the high parts, then k-bit remainders.
         const k = id - 1;
         if (ref) out[n++] = readBits(bits);
         const base = n;
-        const cnt = Math.min(encLen, npts - n);
+        const cnt = Math.min(encLen, rsiEnd - n);
         const pk = k < 31 ? (1 << k) : Math.pow(2, k); // hoisted out of the sample loop
         for (let i = 0; i < encLen; i++) {
           const fs = readFS();
@@ -366,26 +397,38 @@ function unpackAEC(dataSection, npts, bits, flags, blockSize, rsi) {
 // `sub` (0-based) to choose which field to decode; it defaults to the first.
 export async function decodeGrib2(input, sub = 0) {
   const b = await gunzip(input instanceof Uint8Array ? input : new Uint8Array(input));
+  if (b.length < 20) throw new Error('GRIB2: message is too short');
   const dv = new DataView(b.buffer, b.byteOffset, b.length);
   if (String.fromCharCode(b[0], b[1], b[2], b[3]) !== 'GRIB') throw new Error('not GRIB2');
+  if (b[7] !== 2) throw new Error(`unsupported GRIB edition ${b[7]}`);
 
   let grid = null;
   // Each completed data section (section 7) closes one field; we collect the
   // packing parameters of every field so the requested submessage can be picked.
   const fields = [];
   let R = 0, E = 0, D = 0, bits = 0, drt = -1, npts = 0, p5 = 0;
-  let bitmapIndicator = 255, bitmapSection = null;
+  let bitmapIndicator = 255, bitmapSection = null, previousBitmap = null;
 
   let p = 16; // after section 0
-  while (p < b.length - 4) {
-    if (String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3]) === '7777') break;
+  let sawEnd = false;
+  while (p <= b.length - 4) {
+    if (String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3]) === '7777') {
+      sawEnd = true;
+      break;
+    }
+    if (p + 5 > b.length) throw new Error('GRIB2: truncated section header');
     const len = dv.getUint32(p);
+    if (len < 5 || p + len > b.length) {
+      throw new Error(`GRIB2: invalid section length ${len}`);
+    }
     const sec = b[p + 4];
     if (sec === 3) {
+      if (len < 72) throw new Error('GRIB2: truncated grid definition section');
       const gdt = dv.getUint16(p + 12); // grid definition template number
       const ni = dv.getUint32(p + 30);
       const nj = dv.getUint32(p + 34);
       if (gdt === 30) {
+        if (len < 73) throw new Error('GRIB2: truncated Lambert grid definition');
         // Lambert Conformal Conic (HRRR & most NCEP CONUS model grids).
         grid = {
           proj: 'lambert',
@@ -403,7 +446,7 @@ export async function decodeGrib2(input, sub = 0) {
         };
         if (grid.lo1 > 180) grid.lo1 -= 360;
         if (grid.lov > 180) grid.lov -= 360;
-      } else {
+      } else if (gdt === 0) {
         // Plain lat/lon grid (GDT 3.0) — MRMS and similar. ECMWF grids start at
         // exactly 180°E — the same meridian as −180°, so relabelling keeps the
         // column order intact while placing the grid on the −180…180 map.
@@ -417,11 +460,16 @@ export async function decodeGrib2(input, sub = 0) {
           dj: dv.getUint32(p + 67) / 1e6,
           scanMode: dv.getUint8(p + 71),
         };
+      } else {
+        throw new Error(`unsupported GRIB2 grid template ${gdt}`);
       }
     } else if (sec === 5) {
+      if (len < 21) throw new Error('GRIB2: truncated data representation section');
       p5 = p;
       npts = dv.getUint32(p + 5);
       drt = dv.getUint16(p + 9);
+      const minDrtLength = drt === 2 ? 47 : drt === 3 ? 49 : drt === 42 ? 25 : 21;
+      if (len < minDrtLength) throw new Error(`GRIB2: truncated data template ${drt}`);
       R = dv.getFloat32(p + 11);
       E = readSignMag(dv, p + 15, 2);
       D = readSignMag(dv, p + 17, 2);
@@ -429,22 +477,39 @@ export async function decodeGrib2(input, sub = 0) {
       // Reset bitmap state for this field; its section 6 (always present) sets it.
       bitmapIndicator = 255; bitmapSection = null;
     } else if (sec === 6) {
+      if (len < 6) throw new Error('GRIB2: truncated bitmap section');
       // Bitmap section: octet 6 is the indicator (0 = bitmap present in this
       // section, 255 = none). When present, only the unmasked grid points are
       // encoded in section 7, so the decoded values must be scattered back out.
       bitmapIndicator = b[p + 5];
-      if (bitmapIndicator === 0) bitmapSection = b.subarray(p + 6, p + len);
+      if (bitmapIndicator === 0) {
+        bitmapSection = b.subarray(p + 6, p + len);
+        previousBitmap = bitmapSection;
+      } else if (bitmapIndicator === 254) {
+        if (!previousBitmap) throw new Error('GRIB2: bitmap reuse requested before a bitmap was defined');
+        bitmapSection = previousBitmap;
+      } else if (bitmapIndicator === 255) {
+        bitmapSection = null;
+      } else {
+        throw new Error(`unsupported GRIB2 predefined bitmap ${bitmapIndicator}`);
+      }
     } else if (sec === 7) {
+      if (!p5) throw new Error('GRIB2: data section appeared before its representation section');
       // Close this field with the packing parameters seen since the last one.
       fields.push({ p5, npts, drt, R, E, D, bits, bitmapIndicator, bitmapSection, dataSection: b.subarray(p + 5, p + len) });
     }
     p += len;
   }
+  if (!sawEnd) throw new Error('GRIB2: missing end marker');
   if (!grid) throw new Error('GRIB2: no grid definition section');
   if (!fields.length) throw new Error('GRIB2: no data section');
 
-  // Pick the requested submessage (clamped), then decode just that field.
-  const f = fields[Math.min(sub, fields.length - 1)];
+  // Pick the requested submessage. Returning the last field for an invalid
+  // index silently renders a different meteorological variable, so fail loudly.
+  if (!Number.isInteger(sub) || sub < 0 || sub >= fields.length) {
+    throw new Error(`GRIB2: submessage ${sub} is out of range (found ${fields.length})`);
+  }
+  const f = fields[sub];
   ({ p5, npts, drt, R, E, D, bits } = f);
   const dataSection = f.dataSection;
 
@@ -456,15 +521,26 @@ export async function decodeGrib2(input, sub = 0) {
   // With a bitmap, section 7 holds only the `npts` unmasked points; decode those,
   // then scatter into the full grid below. Without one, npts === total and the
   // decoded array *is* the grid.
-  const bitmap = f.bitmapIndicator === 0 ? f.bitmapSection : null;
+  const bitmap = f.bitmapSection;
+  if (bitmap && bitmap.length * 8 < total) throw new Error('GRIB2: truncated bitmap');
+  let represented = total;
+  if (bitmap) {
+    represented = 0;
+    for (let i = 0; i < total; i++) represented += (bitmap[i >> 3] >> (7 - (i & 7))) & 1;
+  }
+  if (npts !== represented) {
+    throw new Error(`GRIB2: point count ${npts} does not match the grid/bitmap (${represented})`);
+  }
   const decoded = new Float32Array(bitmap ? npts : total);
 
   if (drt === 41) {
     const { samples } = await decodePNG(dataSection);
+    if (samples.length !== decoded.length) throw new Error('GRIB2: PNG sample count does not match the field');
     for (let i = 0; i < decoded.length; i++) decoded[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 40) {
     // JPEG2000 (RAP). decodeJ2K returns integer samples in raster order.
     const { samples } = decodeJ2K(dataSection);
+    if (samples.length !== decoded.length) throw new Error('GRIB2: JPEG2000 sample count does not match the field');
     for (let i = 0; i < decoded.length; i++) decoded[i] = (R + samples[i] * scaleE) / scaleD;
   } else if (drt === 0) {
     // simple packing: big-endian bit field of `bits` per point.

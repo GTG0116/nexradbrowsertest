@@ -32,7 +32,7 @@ import {
 } from './mesoanalysis.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
-  prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
+  prepareModelOverlayData, prepareModelPlaybackContours, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
@@ -756,7 +756,21 @@ function clearRadarSource(map) {
 const DECODE_POOL_SIZE = CONSTRAINED_DEVICE ? 1 : 2;
 let decodeSeq = 0;
 const pending = new Map();
-const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
+const decodeWorkers = new Array(DECODE_POOL_SIZE).fill(null);
+
+function failDecodeWorker(target, error) {
+  for (const [id, job] of pending) {
+    if (job.worker !== target) continue;
+    pending.delete(id);
+    job.reject(error);
+  }
+  target.busy = 0;
+  try { target.terminate(); } catch (_) { /* already stopped */ }
+  const index = decodeWorkers.indexOf(target);
+  if (index >= 0) decodeWorkers[index] = null;
+}
+
+function createDecodeWorker(index) {
   const w = new Worker(new URL('./decoder.worker.js', import.meta.url), {
     type: 'module',
   });
@@ -770,20 +784,48 @@ const decodeWorkers = Array.from({ length: DECODE_POOL_SIZE }, () => {
     if (ok) job.resolve(result);
     else job.reject(new Error(error));
   };
+  // A worker crash used to leave every assigned promise pending forever and its
+  // `busy` count permanently elevated. Reject only this worker's jobs and leave
+  // an empty pool slot; the next decode lazily creates a replacement.
+  w.onerror = (event) => {
+    failDecodeWorker(w, new Error(`radar decode worker error: ${event.message || 'crashed'}`));
+  };
+  w.onmessageerror = () => {
+    failDecodeWorker(w, new Error('radar decode worker returned an unreadable response'));
+  };
+  decodeWorkers[index] = w;
   return w;
-});
+}
+
 function decodeVolume(bytes) {
   const id = ++decodeSeq;
   // Hand the job to the least-loaded worker (round-robin used to stack several
   // decodes on one worker while others sat idle when job durations varied); jobs
   // are keyed by a global id so replies route back correctly regardless of which
   // worker answers first.
-  let w = decodeWorkers[0];
-  for (const cand of decodeWorkers) if (cand.busy < w.busy) w = cand;
-  w.busy++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    w.postMessage({ id, bytes }, [bytes.buffer]); // zero-copy transfer
+    let creationError = null;
+    for (let i = 0; i < decodeWorkers.length; i++) {
+      if (decodeWorkers[i]) continue;
+      try { createDecodeWorker(i); }
+      catch (error) { creationError = error; }
+    }
+    const available = decodeWorkers.filter(Boolean);
+    if (!available.length) {
+      reject(creationError || new Error('no radar decode worker is available'));
+      return;
+    }
+    let w = available[0];
+    for (const cand of available) if (cand.busy < w.busy) w = cand;
+    w.busy++;
+    pending.set(id, { resolve, reject, worker: w });
+    try {
+      w.postMessage({ id, bytes }, [bytes.buffer]); // zero-copy transfer
+    } catch (error) {
+      // A browser can synchronously reject a post to a worker it just killed.
+      // Route that through the same cleanup as an asynchronous worker crash.
+      failDecodeWorker(w, error);
+    }
   });
 }
 
@@ -1072,6 +1114,7 @@ const state = {
     scenes: [],
     sceneKey: null,
     scene: null,
+    _renderedProductId: null,
     displayMeta: null,
     _bbox: null,
     layer: null,
@@ -2462,21 +2505,58 @@ function setupPaletteCreator() {
 // ---------------------------------------------------------------------------
 // Data loading
 // ---------------------------------------------------------------------------
+let loadChromeSeq = 0;
+
+function beginLoadChrome(show = true) {
+  const token = ++loadChromeSeq;
+  el.progress.style.width = '0%';
+  el.progress.classList.toggle('show', show);
+  el.decoding.classList.remove('show');
+  return token;
+}
+
+function ownsLoadChrome(token) {
+  return token === loadChromeSeq;
+}
+
+function finishLoadChrome(token) {
+  if (!ownsLoadChrome(token)) return;
+  el.progress.classList.remove('show');
+  el.decoding.classList.remove('show');
+}
+
+function cancelLoadChrome() {
+  loadChromeSeq++;
+  el.progress.classList.remove('show');
+  el.decoding.classList.remove('show');
+}
+
+let volumeListSeq = 0;
+
 async function loadVolumeList() {
   if (isL3Product(state.productId)) return loadL3List();
+  const seq = ++volumeListSeq;
+  const site = state.site;
+  const requestMode = state.mode;
+  const requestedDate = new Date(state.date);
+  const requestedDay = requestedDate.getTime();
+  const current = () => seq === volumeListSeq && state.mode === requestMode &&
+    !isL3Product(state.productId) && state.site === site && state.date.getTime() === requestedDay;
   setStatus(`listing ${state.site}…`, true);
   buildVolumeList();
   try {
-    let vols = await listVolumes(state.site, state.date);
+    let vols = await listVolumes(site, requestedDate);
+    if (!current()) return;
     // If the selected UTC day has no scans (e.g. just after 00z when the current
     // day is still empty, or a quiet gap), fall back a day at a time until one
     // turns up, adopting that day. LIVE keeps resetting the date to "now", so the
     // view snaps forward to the current UTC day as soon as its first scan lands.
     if (!vols.length) {
-      const probe = new Date(state.date);
+      const probe = new Date(requestedDate);
       for (let i = 0; i < 7 && !vols.length; i++) {
         probe.setUTCDate(probe.getUTCDate() - 1);
-        const back = await listVolumes(state.site, probe);
+        const back = await listVolumes(site, probe);
+        if (!current()) return;
         if (back.length) {
           state.date = new Date(probe);
           el.dateInput.value = isoDate(state.date);
@@ -2485,6 +2565,10 @@ async function loadVolumeList() {
         }
       }
     }
+    // A fallback intentionally changes `state.date`; any other context change
+    // above already returned through `current()` before reaching this commit.
+    if (seq !== volumeListSeq || state.mode !== requestMode || state.site !== site ||
+        isL3Product(state.productId)) return;
     state.volumes = vols;
     buildVolumeList();
     setStatus(`${vols.length} scans available`);
@@ -2496,7 +2580,7 @@ async function loadVolumeList() {
       if (latest !== state.volumeKey) loadVolume(latest);
     }
   } catch (e) {
-    setStatus(`list error: ${e.message}`);
+    if (current()) setStatus(`list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -2504,16 +2588,26 @@ async function loadVolumeList() {
 // List the Level III frames for the active product at this site/day (reusing the
 // volume-list UI), then auto-load the latest, mirroring loadVolumeList for L2.
 async function loadL3List() {
-  const prod = radarProduct();
+  const seq = ++volumeListSeq;
+  const site = state.site;
+  const requestMode = state.mode;
+  const productId = state.productId;
+  const requestedDate = new Date(state.date);
+  const requestedDay = requestedDate.getTime();
+  const current = () => seq === volumeListSeq && state.mode === requestMode &&
+    state.site === site && state.productId === productId && state.date.getTime() === requestedDay;
+  const prod = radarProduct(productId);
   setStatus(`listing ${state.site} ${prod.name}…`, true);
   buildVolumeList();
   try {
-    let frames = await listLevel3(state.site, state.productId, state.date);
+    let frames = await listLevel3(site, productId, requestedDate);
+    if (!current()) return;
     if (!frames.length) {
-      const probe = new Date(state.date);
+      const probe = new Date(requestedDate);
       for (let i = 0; i < 7 && !frames.length; i++) {
         probe.setUTCDate(probe.getUTCDate() - 1);
-        const back = await listLevel3(state.site, state.productId, probe);
+        const back = await listLevel3(site, productId, probe);
+        if (!current()) return;
         if (back.length) {
           state.date = new Date(probe);
           el.dateInput.value = isoDate(state.date);
@@ -2522,6 +2616,8 @@ async function loadL3List() {
         }
       }
     }
+    if (seq !== volumeListSeq || state.mode !== requestMode || state.site !== site ||
+        state.productId !== productId) return;
     state.volumes = frames;
     buildVolumeList();
     setStatus(`${frames.length} frames available`);
@@ -2536,7 +2632,7 @@ async function loadL3List() {
       loadVolume(latest);
     }
   } catch (e) {
-    setStatus(`list error: ${e.message}`);
+    if (current()) setStatus(`list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -2574,18 +2670,21 @@ async function loadL3Frame(key) {
   state.volumeKey = key;
   markActiveVolume(key);
   const seq = ++volumeLoadSeq;
-  const cached = l3Cache.has(`${state.productId}|${key}`);
+  const site = state.site;
+  const productId = state.productId;
+  const requestMode = state.mode;
+  const current = () => seq === volumeLoadSeq && state.mode === requestMode &&
+    state.site === site && state.productId === productId && state.volumeKey === key;
+  const cached = l3Cache.has(`${productId}|${key}`);
+  const chrome = beginLoadChrome(!cached);
   if (!cached) {
     setStatus('downloading…', true);
-    el.progress.style.width = '0%';
-    el.progress.classList.add('show');
-    el.decoding.classList.remove('show');
   }
   try {
     const decoded = await getDecodedL3(key, (p) => {
-      if (seq === volumeLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
+      if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
     });
-    if (seq !== volumeLoadSeq) return;
+    if (!current()) return;
     state.l3.decoded = decoded;
     const site = { lat: decoded.lat, lon: decoded.lon };
     if (state._recenterRadar) {
@@ -2598,13 +2697,10 @@ async function loadL3Frame(key) {
     setStatus(`loaded · ${decoded.sweep.radials.length} radials`);
     prefetchAdjacentL3(key);
   } catch (e) {
-    if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
+    if (current()) setStatus(`decode error: ${e.message}`);
     console.error(e);
   } finally {
-    if (seq === volumeLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -2614,23 +2710,25 @@ async function loadVolume(key) {
   state.volumeKey = key;
   markActiveVolume(key);
   const seq = ++volumeLoadSeq;
+  const site = state.site;
+  const requestMode = state.mode;
+  const current = () => seq === volumeLoadSeq && state.mode === requestMode &&
+    state.site === site && state.volumeKey === key && !isL3Product(state.productId);
   // Cache hit → skip the download/decode chrome entirely (no progress bar or
   // status flicker), so arrow-key stepping through warmed scans is instant.
   const cached = peekDecodedVolume(key);
+  const chrome = beginLoadChrome(!cached);
   if (!cached) {
     setStatus('downloading volume…', true);
-    el.progress.style.width = '0%';
-    el.progress.classList.add('show');
-    el.decoding.classList.remove('show');
   }
   try {
     const volume = cached || await getDecodedVolume(key, (p) => {
-      if (seq !== volumeLoadSeq) return;
+      if (!current() || !ownsLoadChrome(chrome)) return;
       el.progress.style.width = Math.round(p * 100) + '%';
       // Download finished → the decode worker owns the wait from here.
       if (p >= 1) { setStatus('decoding…', true); el.decoding.classList.add('show'); }
     });
-    if (seq !== volumeLoadSeq) return; // a newer selection superseded this one
+    if (!current()) return; // a newer selection superseded this one
     state.volume = volume;
     state.sweeps = volume.sweeps;
 
@@ -2668,13 +2766,10 @@ async function loadVolume(key) {
     setStatus(`loaded · ${volume.radialCount} radials`);
     prefetchAdjacentVolumes(key);
   } catch (e) {
-    if (seq === volumeLoadSeq) setStatus(`decode error: ${e.message}`);
+    if (current()) setStatus(`decode error: ${e.message}`);
     console.error(e);
   } finally {
-    if (seq === volumeLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -2903,6 +2998,9 @@ function setMode(mode) {
   if (state.mode === mode) return;
   if (state.playback && state.playback.active) state.playback.stop();
   cancelFrameWarm();
+  // Progress/decoding chrome is shared by every source. Retire the previous
+  // source's ownership immediately; any late finally block now becomes a no-op.
+  cancelLoadChrome();
   const prevMode = state.mode;
   if (prevMode === 'outlooks' && mode !== 'outlooks') leaveOutlookSourceMode();
   state.mode = mode;
@@ -3254,6 +3352,8 @@ function initSatSelects() {
   });
 }
 
+let satProductSeq = 0;
+
 function buildSatProductButtons() {
   el.productButtons.innerHTML = '';
   el.productButtons.className = 'product-grid';
@@ -3292,18 +3392,43 @@ function buildSatProductButtons() {
       if (routeProductToPane(id)) return;
       ensureLiveForSwitch();
       cancelFrameWarm();
+      const previousProductId = state.sat._renderedProductId || state.sat.productId;
       state.sat.productId = id;
+      const seq = ++satProductSeq;
+      const scene = state.sat.scene;
+      const satKey = state.sat.satKey;
+      const sectorKey = state.sat.sectorKey;
+      const current = () => seq === satProductSeq && state.mode === 'satellite' &&
+        state.sat.productId === id && state.sat.scene === scene &&
+        state.sat.satKey === satKey && state.sat.sectorKey === sectorKey;
       document.querySelectorAll('.product-btn').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       buildSatLegend();
-      // Decode any extra bands this product needs from the cached file first.
-      if (state.sat.scene) {
-        setStatus(`rendering ${satProviderName()}…`, true);
-        await ensureBandsAsync(state.sat.scene, state.sat.satKey, state.sat.sectorKey, bandsFor(id));
-        renderSatellite();
-        setStatus(`${satProviderName()} ready`);
-      }
       updateSatInfo();
       saveSettings();
+      // Decode any extra bands this product needs from the cached file first.
+      if (scene) {
+        setStatus(`rendering ${satProviderName()}…`, true);
+        try {
+          await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(id));
+          if (!current()) return;
+          renderSatellite();
+          setStatus(`${satProviderName()} ready`);
+        } catch (error) {
+          if (current()) {
+            // Keep the controls/legend aligned with the pixels still on screen.
+            // The previous successfully-rendered product already has its bands.
+            state.sat.productId = previousProductId;
+            document.querySelectorAll('.product-btn')
+              .forEach((b) => b.classList.toggle('active', b.dataset.id === previousProductId));
+            buildSatLegend();
+            updateSatInfo();
+            renderSatellite();
+            saveSettings();
+            setStatus(`${satProviderName()} ${id} error: ${error.message || error}`);
+          }
+          console.error(error);
+        }
+      }
     });
     el.productButtons.appendChild(btn);
   };
@@ -3330,15 +3455,26 @@ function buildSatList() {
   el.volumeList.appendChild(frag);
 }
 
+let satListSeq = 0;
+
 async function loadSatScenes() {
   if (state.mode !== 'satellite') return;
+  const seq = ++satListSeq;
+  const satKey = state.sat.satKey;
+  const sectorKey = state.sat.sectorKey;
+  const requestLive = state.live;
+  const requestedDay = state.date.getTime();
+  const current = () => seq === satListSeq && state.mode === 'satellite' &&
+    state.sat.satKey === satKey && state.sat.sectorKey === sectorKey &&
+    state.live === requestLive && (requestLive || state.date.getTime() === requestedDay);
   setStatus(`listing ${satProviderName()}…`, true);
   buildSatList();
   try {
-    const when = state.live ? new Date() : state.date;
-    const scenes = isMirsSat(state.sat.satKey)
-      ? await listMirsScenes(state.sat.satKey, when)
-      : await listScenes(state.sat.satKey, state.sat.sectorKey, when);
+    const when = requestLive ? new Date() : new Date(state.date);
+    const scenes = isMirsSat(satKey)
+      ? await listMirsScenes(satKey, when)
+      : await listScenes(satKey, sectorKey, when);
+    if (!current()) return;
     state.sat.scenes = scenes;
     buildSatList();
     setStatus(`${scenes.length} ${satProviderName()} scenes`);
@@ -3350,7 +3486,7 @@ async function loadSatScenes() {
       if (latest !== state.sat.sceneKey) loadSatScene(latest);
     }
   } catch (e) {
-    setStatus(`${satProviderName()} list error: ${e.message}`);
+    if (current()) setStatus(`${satProviderName()} list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -3360,17 +3496,23 @@ async function loadSatScene(key) {
   state.sat.sceneKey = key;
   markActiveVolume(key, buildSatList);
   const seq = ++satLoadSeq;
+  const satKey = state.sat.satKey;
+  const sectorKey = state.sat.sectorKey;
+  const mirs = isMirsSat(satKey);
+  const current = () => seq === satLoadSeq && state.mode === 'satellite' &&
+    state.sat.sceneKey === key && state.sat.satKey === satKey && state.sat.sectorKey === sectorKey;
+  const chrome = beginLoadChrome(true);
   setStatus(`downloading ${satProviderName()}…`, true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
   // Microwave swaths take their own decode path: NetCDF granule → rasterised
   // lat/lon grid, drawn through the shared GPU grid layer.
-  if (isMirsSat(state.sat.satKey)) {
+  if (mirs) {
+    const productId = state.sat.productId;
     try {
-      const grid = await loadMirsGrid(state.sat.satKey, key, state.sat.productId, (p) => {
-        if (seq === satLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
+      const grid = await loadMirsGrid(satKey, key, productId, (p) => {
+        if (current() && state.sat.productId === productId && ownsLoadChrome(chrome))
+          el.progress.style.width = Math.round(p * 100) + '%';
       });
-      if (seq !== satLoadSeq) return;
+      if (!current() || state.sat.productId !== productId) return;
       state.sat.mirsGrid = grid;
       state.sat.scene = null;
       state.sat.displayMeta = { width: grid.ni, height: grid.nj };
@@ -3379,20 +3521,28 @@ async function loadSatScene(key) {
       updateSatInfo();
       setStatus(`${satProviderName()} ${grid.product.name} loaded`);
     } catch (e) {
-      if (seq === satLoadSeq) setStatus(`MIRS error: ${e.message}`);
+      if (current() && state.sat.productId === productId) setStatus(`MIRS error: ${e.message}`);
       console.error(e);
     } finally {
-      if (seq === satLoadSeq) el.progress.classList.remove('show');
+      finishLoadChrome(chrome);
     }
     return;
   }
   try {
-    const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, key, bandsFor(state.sat.productId), (p) => {
-      el.progress.style.width = Math.round(p * 100) + '%';
+    const scene = await loadSceneAsync(satKey, sectorKey, key, bandsFor(state.sat.productId), (p) => {
+      if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
     });
-    if (seq !== satLoadSeq) return; // a newer selection superseded this one
+    if (!current()) return; // a newer selection superseded this one
+    // A product can change while the base scene is downloading. Ensure the
+    // eventual scene carries whichever bands are current before committing it.
+    for (;;) {
+      const productId = state.sat.productId;
+      await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(productId));
+      if (!current()) return;
+      if (productId === state.sat.productId) break;
+    }
     setStatus(`rendering ${satProviderName()}…`, true);
-    el.decoding.classList.add('show');
+    if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     state.sat.scene = scene;
     state.sat.displayMeta = null;
     state.sat._bbox = null;
@@ -3405,13 +3555,10 @@ async function loadSatScene(key) {
     updateSatInfo();
     setStatus(`${satProviderName()} ${SECTORS[state.sat.sectorKey].label} loaded`);
   } catch (e) {
-    if (seq === satLoadSeq) setStatus(`${satProviderName()} error: ${e.message}`);
+    if (current()) setStatus(`${satProviderName()} error: ${e.message}`);
     console.error(e);
   } finally {
-    if (seq === satLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -3424,6 +3571,7 @@ function setSatelliteSource(map) {
 function clearSatellite() {
   if (state.sat.layer) state.sat.layer.clear();
   if (state.sat.mirsLayer) state.sat.mirsLayer.clear();
+  state.sat._renderedProductId = null;
 }
 
 // The microwave swath rides the same GPU grid layer family as MRMS, on its own
@@ -3464,7 +3612,10 @@ function renderSatellite() {
   }
   if (isMirsSat(state.sat.satKey)) {
     if (state.sat.layer) state.sat.layer.clear(); // leaving no stale GOES frame under the swath
-    if (state.sat.mirsGrid) drawMirsGrid(state.sat.mirsGrid);
+    if (state.sat.mirsGrid) {
+      drawMirsGrid(state.sat.mirsGrid);
+      state.sat._renderedProductId = state.sat.productId;
+    }
     else if (state.sat.mirsLayer) state.sat.mirsLayer.clear();
     renderLayerStack();
     syncSplit();
@@ -3478,6 +3629,7 @@ function renderSatellite() {
   state.sat.displayMeta = payload.meta;
   state.sat._bbox = payload.bbox;
   drawSatScene(payload.meta, payload.rgba, payload.bbox);
+  state.sat._renderedProductId = state.sat.productId;
   renderLayerStack();
   syncSplit();
   updateDock();
@@ -3636,13 +3788,23 @@ function buildMrmsList() {
   el.volumeList.appendChild(frag);
 }
 
+let mrmsListSeq = 0;
+
 async function loadMrmsList() {
   if (state.mode !== 'mrms') return;
+  const seq = ++mrmsListSeq;
+  const productId = state.mrms.productId;
+  const requestLive = state.live;
+  const requestedDay = state.date.getTime();
+  const current = () => seq === mrmsListSeq && state.mode === 'mrms' &&
+    state.mrms.productId === productId && state.live === requestLive &&
+    (requestLive || state.date.getTime() === requestedDay);
   setStatus('listing MRMS…', true);
   buildMrmsList();
   try {
-    const when = state.live ? new Date() : state.date;
-    const frames = await listMrms(state.mrms.productId, when);
+    const when = requestLive ? new Date() : new Date(state.date);
+    const frames = await listMrms(productId, when);
+    if (!current()) return;
     state.mrms.frames = frames;
     buildMrmsList();
     setStatus(`${frames.length} MRMS frames`);
@@ -3654,7 +3816,7 @@ async function loadMrmsList() {
       if (latest !== state.mrms.frameKey) loadMrmsFrame(latest);
     }
   } catch (e) {
-    setStatus(`MRMS list error: ${e.message}`);
+    if (current()) setStatus(`MRMS list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -3664,28 +3826,27 @@ async function loadMrmsFrame(key) {
   state.mrms.frameKey = key;
   markActiveVolume(key, buildMrmsList);
   const seq = ++mrmsLoadSeq;
+  const productId = state.mrms.productId;
+  const current = () => seq === mrmsLoadSeq && state.mode === 'mrms' &&
+    state.mrms.productId === productId && state.mrms.frameKey === key;
+  const chrome = beginLoadChrome(true);
   setStatus('downloading MRMS…', true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
   try {
-    let grid = await loadMrms(state.mrms.productId, key, (p) => {
-      el.progress.style.width = Math.round(p * 100) + '%';
+    let grid = await loadMrms(productId, key, (p) => {
+      if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
     });
-    if (seq !== mrmsLoadSeq) return; // a newer selection superseded this one
+    if (!current()) return; // a newer selection superseded this one
     setStatus('decoding MRMS…', true);
-    el.decoding.classList.add('show');
+    if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     grid = compactGridForConstrainedDevice(grid);
     state.mrms.grid = grid;
     renderMrms();
     setStatus(`MRMS ${grid.product.name} loaded`);
   } catch (e) {
-    if (seq === mrmsLoadSeq) setStatus(`MRMS error: ${e.message}`);
+    if (current()) setStatus(`MRMS error: ${e.message}`);
     console.error(e);
   } finally {
-    if (seq === mrmsLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -3814,13 +3975,22 @@ function buildObservationList() {
   el.volumeList.appendChild(frag);
 }
 
+let observationListSeq = 0;
+
 async function loadObservationList() {
   if (state.mode !== 'observations' || state.meso.active) return;
+  const seq = ++observationListSeq;
+  const requestLive = state.live;
+  const requestedDay = state.date.getTime();
+  const current = () => seq === observationListSeq && state.mode === 'observations' &&
+    !state.meso.active && state.live === requestLive &&
+    (requestLive || state.date.getTime() === requestedDay);
   setStatus('listing RTMA...', true);
   buildObservationList();
   try {
-    const when = state.live ? new Date() : state.date;
+    const when = requestLive ? new Date() : new Date(state.date);
     const frames = await listObservations(when);
+    if (!current()) return;
     state.observations.frames = frames;
     buildObservationList();
     setStatus(`${frames.length} RTMA frames`);
@@ -3832,7 +4002,7 @@ async function loadObservationList() {
       loadObservationFrame(latest);
     }
   } catch (e) {
-    setStatus(`RTMA list error: ${e.message}`);
+    if (current()) setStatus(`RTMA list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -3843,28 +4013,28 @@ async function loadObservationFrame(key) {
   state.observations.frameKey = key;
   markActiveVolume(key, buildObservationList);
   const seq = ++observationLoadSeq;
-  const product = OBS_PRODUCTS[state.observations.productId];
+  const productId = state.observations.productId;
+  const product = OBS_PRODUCTS[productId];
+  const current = () => seq === observationLoadSeq && state.mode === 'observations' &&
+    !state.meso.active && state.observations.productId === productId &&
+    state.observations.frameKey === key;
+  const chrome = beginLoadChrome(true);
   setStatus(`downloading RTMA ${product ? product.name : ''}...`, true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
   try {
-    const grid = await loadObservation(state.observations.productId, key, (p) => {
-      el.progress.style.width = Math.round(p * 100) + '%';
+    const grid = await loadObservation(productId, key, (p) => {
+      if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
     });
-    if (seq !== observationLoadSeq || state.mode !== 'observations') return;
+    if (!current()) return;
     setStatus('decoding RTMA...', true);
-    el.decoding.classList.add('show');
+    if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     state.observations.grid = grid;
     renderObservations();
     setStatus(`RTMA ${grid.product.name} loaded`);
   } catch (e) {
-    if (seq === observationLoadSeq) setStatus(`RTMA error: ${e.message}`);
+    if (current()) setStatus(`RTMA error: ${e.message}`);
     console.error(e);
   } finally {
-    if (seq === observationLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -4407,20 +4577,32 @@ function selectFhour(f) {
   loadModelFrame();
 }
 
+let modelListSeq = 0;
+
 async function loadModelList() {
   if (state.mode !== 'models') return;
+  const seq = ++modelListSeq;
+  const modelKey = state.models.modelKey;
+  const productId = state.models.productId;
+  const requestLive = state.live;
+  const requestedDay = state.date.getTime();
+  const name = modelKey.toUpperCase() || 'model';
+  const current = () => seq === modelListSeq && state.mode === 'models' &&
+    state.models.modelKey === modelKey && state.models.productId === productId &&
+    state.live === requestLive && (requestLive || state.date.getTime() === requestedDay);
   setStatus(`listing ${modelName()}…`, true);
   buildModelList();
   try {
-    const when = state.live ? new Date() : state.date;
-    const runs = await listModels(state.models.modelKey, state.models.productId, when);
+    const when = requestLive ? new Date() : new Date(state.date);
+    const runs = await listModels(modelKey, productId, when);
+    if (!current()) return;
     state.models.runs = runs;
     buildModelList();
     setStatus(`${runs.length} model runs`);
     if (!runs.length) {
       // A CORS-restricted source with no proxy configured lists nothing — say
       // why instead of leaving a bare "0 model runs".
-      const m = MODELS[state.models.modelKey];
+      const m = MODELS[modelKey];
       if (m && m.corsNote && !localStorage.getItem('modelDataProxy')) setStatus(m.corsNote);
       return;
     }
@@ -4447,7 +4629,7 @@ async function loadModelList() {
       buildFhourList();
     }
   } catch (e) {
-    setStatus(`${modelName()} list error: ${e.message}`);
+    if (current()) setStatus(`${name} list error: ${e.message}`);
     console.error(e);
   }
 }
@@ -4483,21 +4665,36 @@ async function loadModelFrame() {
   if (!run) return;
   const fhour = state.models.fhour;
   const seq = ++modelLoadSeq;
+  const modelKey = state.models.modelKey;
+  const productId = state.models.productId;
+  const runKey = state.models.runKey;
+  const stormId = state.models.stormId;
+  // Storm selection mutates the live run object; snapshot the request so a
+  // later storm click cannot redirect this in-flight load to different files.
+  const requestRun = {
+    ...run,
+    fhours: Array.isArray(run.fhours) ? [...run.fhours] : run.fhours,
+    storm: run.storm,
+  };
+  const name = modelKey.toUpperCase() || 'model';
+  const current = () => seq === modelLoadSeq && state.mode === 'models' &&
+    state.models.modelKey === modelKey && state.models.productId === productId &&
+    state.models.runKey === runKey && state.models.stormId === stormId &&
+    state.models.fhour === fhour;
+  const chrome = beginLoadChrome(true);
   setStatus(`downloading ${modelName()}…`, true);
-  el.progress.style.width = '0%';
-  el.progress.classList.add('show');
   try {
-    let grid = await loadModel(state.models.modelKey, state.models.productId, run, fhour, (p) => {
+    let grid = await loadModel(modelKey, productId, requestRun, fhour, (p) => {
       // A superseded load keeps downloading in the background — don't let its
       // progress fight the current one's bar.
-      if (seq === modelLoadSeq) el.progress.style.width = Math.round(p * 100) + '%';
+      if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
     });
     // Bail if a newer selection superseded this one, or the user has since left
     // models mode (e.g. a model loop stopped *because* the mode/source changed —
     // its idle() reload must not paint a model layer over the new source).
-    if (seq !== modelLoadSeq || state.mode !== 'models') return;
+    if (!current()) return;
     setStatus(`decoding ${modelName()}…`, true);
-    el.decoding.classList.add('show');
+    if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     grid = compactGridForConstrainedDevice(grid);
     grid._overlayData = prepareModelOverlayData(grid);
     state.models.grid = grid;
@@ -4505,7 +4702,7 @@ async function loadModelFrame() {
     renderModels();
     setStatus(`${modelName()} ${run.label} F${p2(fhour)} · ${grid.product.name}`);
   } catch (e) {
-    if (seq === modelLoadSeq) {
+    if (current()) {
       // A 403/404 on the index usually means the run is listed (its F00 is up)
       // but this forecast hour hasn't posted yet — say that instead of "error".
       const stillPosting = /index fetch failed: (403|404)/.test(e.message || '');
@@ -4515,10 +4712,7 @@ async function loadModelFrame() {
     }
     console.error(e);
   } finally {
-    if (seq === modelLoadSeq) {
-      el.progress.classList.remove('show');
-      el.decoding.classList.remove('show');
-    }
+    finishLoadChrome(chrome);
   }
 }
 
@@ -5435,7 +5629,17 @@ async function renderLayerStack() {
   clearLayerStack();
   if (!state.layers.enabled || !state.layers.items.length) return;
   for (const layer of state.layers.items) {
-    await renderOneUserLayer(layer, seq);
+    try {
+      await renderOneUserLayer(layer, seq);
+    } catch (error) {
+      // One unavailable source (including a satellite band that failed both
+      // attempts) should not reject an unobserved top-level render promise or
+      // prevent the remaining user layers from drawing.
+      if (seq === state.layers.renderSeq) {
+        console.error(`layer stack ${layer.source} render failed`, error);
+        setStatus(`${LAYER_STACK_SOURCE_LABELS[layer.source] || layer.source} layer error: ${error.message || error}`);
+      }
+    }
     if (seq !== state.layers.renderSeq) return;
   }
 }
@@ -5644,7 +5848,11 @@ function drawModelPayload(payload) {
   const grid = payload && (payload.grid || gridFromPackedPayload(payload));
   if (grid) state.models.displayGrid = grid;
   setModelSource(map);
-  showPreparedModelOverlays(map, (payload && payload.overlays) || null);
+  let overlays = (payload && payload.overlays) || null;
+  if (!overlays && payload && payload.contoursJson) {
+    try { overlays = JSON.parse(payload.contoursJson); } catch (_) { overlays = null; }
+  }
+  showPreparedModelOverlays(map, overlays);
   state.models.layer.showPrepared(payload);
   state.models.layer.setOpacity(state.opacity);
   state.models.layer.setSmooth(state.smooth);
@@ -7239,6 +7447,10 @@ const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 2;
 // overhead so the budget errs safe.
 const MODEL_LOOP_FILL_BUDGET = 512 * 1024 * 1024;
 const MODEL_LOOP_FILL_BUDGET_MOBILE = 32 * 1024 * 1024;
+// Long-loop contours borrow from (rather than add to) the existing playback
+// budget. JSON text is conservatively counted as two bytes per character.
+const MODEL_LOOP_CONTOUR_RESERVE = 32 * 1024 * 1024;
+const MODEL_LOOP_CONTOUR_RESERVE_MOBILE = 8 * 1024 * 1024;
 const MODEL_LOOP_BYTES_PER_CELL = 3;
 // Barb/contour overlays ride along on loop frames only while they stay cheap:
 // a per-frame GeoJSON feature cap (global grids blow past it — a 0.6°-stride
@@ -7282,7 +7494,10 @@ const mqSmallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
 // keep native resolution, very long global runs pool a step or two coarser.
 function poolGridForLoop(grid, frameCount) {
   const small = mqSmallScreen.matches;
-  const budget = small ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
+  let budget = small ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
+  if (frameCount > MODEL_LOOP_OVERLAY_MAX_FRAMES) {
+    budget -= small ? MODEL_LOOP_CONTOUR_RESERVE_MOBILE : MODEL_LOOP_CONTOUR_RESERVE;
+  }
   const budgetCells = Math.max(
     120 * 60, // quality floor — never pool below roughly a 3°-cell global grid
     Math.floor(budget / Math.max(1, frameCount) / MODEL_LOOP_BYTES_PER_CELL)
@@ -7528,6 +7743,15 @@ async function buildPlaybackProvider(opts = {}) {
           if (overlays && countOverlayFeatures(overlays) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
             payload.overlays = overlays;
           }
+        } else if (grid.overlays) {
+          // Keep contours on long runs without retaining hundreds of deep
+          // GeoJSON object graphs. Only the displayed frame is materialized.
+          const contours = prepareModelPlaybackContours(grid);
+          if (contours && countOverlayFeatures(contours) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
+            const json = JSON.stringify(contours);
+            const reserve = isSmallScreenNow() ? MODEL_LOOP_CONTOUR_RESERVE_MOBILE : MODEL_LOOP_CONTOUR_RESERVE;
+            if (json.length * 2 <= reserve / Math.max(1, frameCount)) payload.contoursJson = json;
+          }
         }
         return payload;
       },
@@ -7671,7 +7895,7 @@ function createPlayback() {
       this.buildProgress();
       el.playScrub.max = String(this.frames.length - 1);
       el.playScrub.value = '0';
-      el.playLabel.textContent = `loading 0/${this.frames.length}…`;
+      el.playLabel.textContent = `${scanFrameLabel(this.frames[0])} · 0/${this.frames.length} loaded`;
       el.dockTime.textContent = scanFrameLabel(this.frames[0]);
       setStatus('loading playback…', true);
 
@@ -7701,7 +7925,7 @@ function createPlayback() {
       this.buildProgress();
       el.playScrub.max = String(Math.max(0, this.frames.length - 1));
       el.playScrub.value = '0';
-      el.playLabel.textContent = `loading 0/${this.frames.length}…`;
+      el.playLabel.textContent = `${scanFrameLabel(this.frames[0])} · 0/${this.frames.length} loaded`;
       el.dockTime.textContent = scanFrameLabel(this.frames[0]);
       setStatus('loading playback…', true);
       this.loadInChunks();
@@ -7805,7 +8029,8 @@ function createPlayback() {
       } else if (i === this.idx) {
         this.renderFrame();
       } else if (!this.playing) {
-        el.playLabel.textContent = `loading ${this.loadedCount}/${this.frames.length}…`;
+        const f = this.frames[this.idx] || this.frames[0];
+        el.playLabel.textContent = `${scanFrameLabel(f)} · ${this.loadedCount}/${this.frames.length} loaded`;
       }
     },
 
@@ -7917,7 +8142,7 @@ function createPlayback() {
       if (!this.frames[i] || !this.frames[i].loaded) {
         this.idx = i;
         el.playScrub.value = String(i);
-        el.playLabel.textContent = `${i + 1}/${this.frames.length} · ${scanFrameLabel(this.frames[i])} · loading`;
+        el.playLabel.textContent = `${scanFrameLabel(this.frames[i])} · ${this.loadedCount}/${this.frames.length} loaded`;
         this.loadOne(i, this.loadSeq);
         if (this.provider && this.provider.streaming) this.prefetchAhead();
         return;

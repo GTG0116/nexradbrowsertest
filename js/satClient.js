@@ -9,10 +9,20 @@ let worker = null;
 let seq = 0;
 const pending = new Map(); // id -> { resolve, reject, onProgress }
 
+function failWorker(target, error) {
+  // Ignore a late error event from a worker that has already been replaced.
+  if (worker !== target) return;
+  for (const p of pending.values()) p.reject(error);
+  pending.clear();
+  try { target.terminate(); } catch (_) { /* already stopped */ }
+  worker = null;
+}
+
 function ensureWorker() {
   if (worker) return worker;
-  worker = new Worker(new URL('./satellite.worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = (e) => {
+  const next = new Worker(new URL('./satellite.worker.js', import.meta.url), { type: 'module' });
+  worker = next;
+  next.onmessage = (e) => {
     const m = e.data;
     const p = pending.get(m.id);
     if (!p) return;
@@ -23,23 +33,50 @@ function ensureWorker() {
   };
   // A worker-level crash rejects everything in flight so callers surface an error
   // instead of hanging; the next call lazily respawns the worker.
-  worker.onerror = (ev) => {
+  next.onerror = (ev) => {
     const err = new Error(`satellite worker error: ${ev.message || 'crashed'}`);
-    for (const p of pending.values()) p.reject(err);
-    pending.clear();
-    worker.terminate();
-    worker = null;
+    failWorker(next, err);
   };
-  return worker;
+  // Structured-clone failures are reported separately from runtime errors in
+  // some browsers. Treat them the same way; otherwise all requests stay pending.
+  next.onmessageerror = () => {
+    failWorker(next, new Error('satellite worker returned an unreadable response'));
+  };
+  return next;
 }
 
 function call(msg, onProgress) {
-  const w = ensureWorker();
-  const id = ++seq;
   return new Promise((resolve, reject) => {
+    let w;
+    try {
+      w = ensureWorker();
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const id = ++seq;
     pending.set(id, { resolve, reject, onProgress });
-    w.postMessage({ ...msg, id });
+    try {
+      w.postMessage({ ...msg, id });
+    } catch (error) {
+      // postMessage can throw synchronously (for example after a worker was
+      // terminated by the browser). Every message here is internally cloneable,
+      // so retire that worker and reject all jobs it can no longer answer.
+      failWorker(w, error);
+    }
   });
+}
+
+function postControl(message) {
+  const target = worker;
+  if (!target) return;
+  try {
+    target.postMessage(message);
+  } catch (error) {
+    // A crash can become observable between the null check and postMessage.
+    // Retire the dead worker so cache housekeeping never breaks a mode switch.
+    failWorker(target, error);
+  }
 }
 
 export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress) {
@@ -51,28 +88,43 @@ export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress) {
 // ten separately-fetched HSD segments each, so a transient S3 hiccup can drop a
 // band; a single retry of whatever is still missing turns those flaky switches
 // into reliable ones instead of leaving the newly-selected product blank.
-export function ensureBandsAsync(scene, satKey, sectorKey, bands) {
-  const need = bands.filter((b) => !scene.channels[b]);
-  if (!need.length) return Promise.resolve(scene);
+export async function ensureBandsAsync(scene, satKey, sectorKey, bands) {
+  const need = [...new Set(bands)].filter((b) => !scene.channels[b]);
+  if (!need.length) return scene;
   const request = (want) =>
     call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: want })
       .then((m) => { Object.assign(scene.channels, m.channels); });
-  return request(need)
-    .then(() => {
-      const still = need.filter((b) => !scene.channels[b]);
-      return still.length ? request(still) : null;
-    })
-    .catch(() => {})
-    .then(() => scene);
+
+  let lastError = null;
+  // Retry both explicit worker failures and successful-but-partial Himawari
+  // responses. The old chain only retried the partial-success case; a rejected
+  // first attempt jumped straight to a catch that silently reported success.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const still = need.filter((b) => !scene.channels[b]);
+    if (!still.length) return scene;
+    try {
+      await request(still);
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const missing = need.filter((b) => !scene.channels[b]);
+  if (missing.length) {
+    const detail = lastError && lastError.message ? `: ${lastError.message}` : '';
+    throw new Error(`satellite band${missing.length === 1 ? '' : 's'} ${missing.join(', ')} unavailable after retry${detail}`);
+  }
+  return scene;
 }
 
 // Drop a scene's cached decode state in the worker (frees a GOES file's bytes).
 export function evictScene(key) {
-  if (worker) worker.postMessage({ type: 'evict', key });
+  postControl({ type: 'evict', key });
 }
 
 // Release every decoded source file when Satellite is no longer active. The
 // worker is kept alive for fast reuse, but its large scene/parser cache is not.
 export function clearSceneCache() {
-  if (worker) worker.postMessage({ type: 'clear' });
+  postControl({ type: 'clear' });
 }
