@@ -4703,6 +4703,17 @@ body.storm-active .playback-bar {
   box-shadow: var(--glow);
 }
 
+@media (max-width: 760px) {
+  .export-scrim { padding: 12px; }
+  .export-card { width: 100%; max-height: 94vh; border-radius: 16px; }
+  .export-head { padding: 17px 18px; }
+  .export-head h2 { font-size: 17px; }
+  .export-x { width: 36px; height: 36px; font-size: 18px; }
+  .export-preview { padding: 14px; }
+  .export-actions { gap: 12px; padding: 16px 18px 18px; }
+  .export-btn { min-height: 46px; padding: 12px 16px; font-size: 15px; }
+}
+
 /* ---------------------------------------------------------------------------
    Micro-interactions — a consistent, subtle press response across the touch UI
    so every control feels alive and "buttery". Placed last so it reliably wins on

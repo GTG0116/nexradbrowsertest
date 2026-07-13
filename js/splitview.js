@@ -27,7 +27,7 @@ const EMPTY_FC = { type: 'FeatureCollection', features: [] };
 // Alternate-pane grids can be tens of megabytes (MRMS is especially large).
 // Keep only the current working set instead of retaining every frame/hour that
 // a long split-view session visits.
-const GRID_CACHE_MAX = 6;
+const GRID_CACHE_MAX = 2;
 
 function outlookValue(productId, detailId) {
   return `${productId}${OUTLOOK_SEP}${detailId}`;
@@ -167,11 +167,19 @@ export class SplitView {
     this.activePane = 1;
 
     const { state, MAPBOX_TOKEN, basemapStyleUrl } = this.ctx;
+    const main = state.map;
+    const camera = {
+      center: main.getCenter(), zoom: main.getZoom(),
+      bearing: main.getBearing(), pitch: main.getPitch(),
+    };
     const wrap = document.getElementById('mapWrap');
     wrap.classList.add('split');
     wrap.classList.toggle('quad', count === 4);
+    // Commit pane 1 to its new CSS box before the other maps copy its camera.
+    // This prevents its canvas/display area from retaining the one-pane size.
+    main.resize();
+    main.jumpTo(camera);
 
-    const main = state.map;
     for (const n of [2, 3, 4]) {
       const cont = paneContainer(n);
       if (cont) cont.hidden = n > count;
@@ -194,7 +202,8 @@ export class SplitView {
         projection: 'mercator',
         attributionControl: false,
         accessToken: MAPBOX_TOKEN,
-        preserveDrawingBuffer: true,
+        preserveDrawingBuffer: false,
+        maxTileCacheSize: count === 4 ? 24 : 48,
       });
       this.maps[n] = map;
       if (n === 2) this.map = map;
@@ -226,8 +235,10 @@ export class SplitView {
     for (const delay of [0, 60, 180]) {
       setTimeout(() => {
         if (!this.active || this.paneCount !== count) return;
-        this._allMaps().forEach((m) => m.resize());
-        this._resyncCamera();
+        this._allMaps().forEach((m) => {
+          m.resize();
+          try { m.jumpTo(camera); } catch (_) { /* style still loading */ }
+        });
       }, delay);
     }
   }

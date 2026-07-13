@@ -72,7 +72,9 @@ function constrainedSatelliteMaxDim() {
   const phone = window.matchMedia && window.matchMedia('(max-width: 759.98px)').matches;
   const touchTablet = navigator.maxTouchPoints > 0 && Math.min(window.innerWidth, window.innerHeight) <= 1024;
   const lowMemory = Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4;
-  return phone || touchTablet || lowMemory ? 1800 : 0;
+  // 1200 keeps the channel arrays and the subsequent RGBA texture comfortably
+  // below iOS WebKit's process limit, including multi-band RGB products.
+  return phone || touchTablet || lowMemory ? 1200 : 0;
 }
 
 function postControl(message) {

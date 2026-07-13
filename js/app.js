@@ -32,7 +32,7 @@ import {
 } from './mesoanalysis.js';
 import { createGridLayer, prepareGridTexture } from './gridLayer.js';
 import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
-  prepareModelOverlayData, prepareModelPlaybackContours, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
+  prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
 import { MapTools } from './maptools.js';
@@ -3545,6 +3545,11 @@ async function loadSatScene(key) {
       if (!current()) return;
       if (productId === state.sat.productId) break;
     }
+    // WebKit's process limit is much lower than desktop browsers'. The worker's
+    // parsed NetCDF/Himawari source can be far larger than the downsampled scene
+    // transferred to the page, so release it before allocating the RGBA texture.
+    // A later product switch can reload the source on demand.
+    if (CONSTRAINED_DEVICE) clearSceneCache();
     setStatus(`rendering ${satProviderName()}…`, true);
     if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     state.sat.scene = scene;
@@ -7455,10 +7460,6 @@ const MODEL_PLAYBACK_CONCURRENCY = isSmallScreenNow() ? 1 : 2;
 // overhead so the budget errs safe.
 const MODEL_LOOP_FILL_BUDGET = 512 * 1024 * 1024;
 const MODEL_LOOP_FILL_BUDGET_MOBILE = 32 * 1024 * 1024;
-// Long-loop contours borrow from (rather than add to) the existing playback
-// budget. JSON text is conservatively counted as two bytes per character.
-const MODEL_LOOP_CONTOUR_RESERVE = 32 * 1024 * 1024;
-const MODEL_LOOP_CONTOUR_RESERVE_MOBILE = 8 * 1024 * 1024;
 const MODEL_LOOP_BYTES_PER_CELL = 3;
 // Barb/contour overlays ride along on loop frames only while they stay cheap:
 // a per-frame GeoJSON feature cap (global grids blow past it — a 0.6°-stride
@@ -7503,9 +7504,6 @@ const mqSmallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
 function poolGridForLoop(grid, frameCount) {
   const small = mqSmallScreen.matches;
   let budget = small ? MODEL_LOOP_FILL_BUDGET_MOBILE : MODEL_LOOP_FILL_BUDGET;
-  if (frameCount > MODEL_LOOP_OVERLAY_MAX_FRAMES) {
-    budget -= small ? MODEL_LOOP_CONTOUR_RESERVE_MOBILE : MODEL_LOOP_CONTOUR_RESERVE;
-  }
   const budgetCells = Math.max(
     120 * 60, // quality floor — never pool below roughly a 3°-cell global grid
     Math.floor(budget / Math.max(1, frameCount) / MODEL_LOOP_BYTES_PER_CELL)
@@ -7733,7 +7731,7 @@ async function buildPlaybackProvider(opts = {}) {
       concurrency: MODEL_PLAYBACK_CONCURRENCY,
       chunkSize: MODEL_PLAYBACK_CHUNK,
       chunkPause: MODEL_PLAYBACK_CHUNK_PAUSE,
-      frames: hours.map((fh) => ({
+      frames: hours.map((fh, loopIndex) => ({
         label: 'F' + p2(fh),
         time: new Date(run.time.getTime() + fh * 3600 * 1000),
         ck: `${state.models.modelKey}:${state.models.productId}:${state.models.stormId || ''}:${run.key}#${fh}`,
@@ -7741,26 +7739,21 @@ async function buildPlaybackProvider(opts = {}) {
         modelKey: state.models.modelKey,
         productId: state.models.productId,
         run,
+        loopIndex,
       })),
       async load(f) {
         const sourceGrid = await loadModel(f.modelKey, f.productId, f.run, f.fhour);
         const grid = poolGridForLoop(sourceGrid, Math.min(frameCount, residentFrames));
         const payload = prepareGridTexture(grid, resolveGridProduct(grid.product), { packed: true });
         payload.meta = { product: grid.product, time: grid.time, fhour: f.fhour };
-        // Barb/contour overlays only when the whole run can afford them: bounded
-        // frame count AND a per-frame GeoJSON budget (grid geometry makes the
-        // count identical for every frame of a run, so the whole loop uniformly
-        // has overlays or uniformly doesn't — no mid-loop flicker).
-        if (grid.overlays && frameCount <= MODEL_LOOP_OVERLAY_MAX_FRAMES) {
+        // Cap only the expensive loop overlays. The fill timeline itself always
+        // spans the complete run, so later uncapped forecast frames remain
+        // available without retaining contour/barb GeoJSON for all of them.
+        if (grid.overlays && f.loopIndex < MODEL_LOOP_OVERLAY_MAX_FRAMES) {
           const overlays = prepareModelOverlayData(grid);
           if (overlays && countOverlayFeatures(overlays) <= MODEL_LOOP_OVERLAY_FRAME_FEATURES) {
             payload.overlays = overlays;
           }
-        } else if (grid.overlays) {
-          // Streaming bounds the resident set, so contour GeoJSON can stay with
-          // every cached frame instead of disappearing during long playback.
-          const contours = prepareModelPlaybackContours(grid);
-          if (contours) payload.overlays = contours;
         }
         return payload;
       },
@@ -8732,17 +8725,26 @@ function setupMapTools() {
         return;
       }
       if (!state.xsect.active()) clearOtherTools('xsect');
+      // Arm and paint the selected state immediately. Finding a fuller adjacent
+      // VST can involve several fetches and must not hold the button in limbo.
+      if (!state.xsect.active()) {
+        state.xsect.toggle();
+        syncToolButtons();
+      } else {
+        state.xsect.toggle();
+        syncToolButtons();
+        return;
+      }
       // Pick the best complete VST to slice, but never let a fetch/decode failure
       // block the tool from arming — toggle() has its own volume guard. Without
       // this, a rejected prepare left the tool (and the mobile dock slot that
       // proxies to it) looking like it simply refused to enable.
-      if (!state.xsect.active()) {
+      if (state.xsect.active()) {
         state._xsectTogglePending = true;
         try { await prepareCrossSectionVolume(); }
         catch (e) { console.warn('cross-section volume prep failed', e); }
         finally { state._xsectTogglePending = false; }
       }
-      state.xsect.toggle();
       syncToolButtons();
     });
   }
