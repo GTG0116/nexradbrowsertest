@@ -24,6 +24,9 @@
 
 const ACTIVE_URL =
   'https://api.weather.gov/alerts/active?status=actual&message_type=alert,update';
+const HISTORY_URL = 'https://api.weather.gov/alerts';
+const HISTORY_LOOKBACK_MS = 36 * 60 * 60 * 1000;
+const HISTORY_LOOKAHEAD_MS = 30 * 60 * 1000;
 const REFRESH_MS = 120000;
 const zoneGeometryCache = new Map();
 
@@ -651,6 +654,10 @@ export class AlertsController {
     this.enabled = true;
     this.selectedId = null;
     this._loadPromise = null;
+    // null means the normal live feed. In radar Archive mode this is the exact
+    // scan time; requests themselves are bucketed so nearby steps reuse data.
+    this.time = null;
+    this._loadedContext = null;
 
     // Extra maps that mirror the alert polygons (e.g. the split-view second
     // pane). Each must already carry an `alerts` GeoJSON source + fill/line
@@ -829,12 +836,50 @@ export class AlertsController {
     if (this._loadPromise) return this._loadPromise;
     this._loadPromise = this._load();
     try { return await this._loadPromise; }
-    finally { this._loadPromise = null; }
+    finally {
+      this._loadPromise = null;
+      if (this._reloadAfterLoad) {
+        this._reloadAfterLoad = false;
+        this.load();
+      }
+    }
+  }
+
+  // Follow a historical radar scan, or return to the live alert feed with null.
+  // NWS keeps only the most recent seven days on this endpoint, so older radar
+  // dates are best-effort and surface the API's unavailable message normally.
+  setTime(time) {
+    const next = time instanceof Date && Number.isFinite(time.getTime())
+      ? new Date(time.getTime()) : null;
+    if ((!next && !this.time) || (next && this.time && next.getTime() === this.time.getTime())) return;
+    const bucket = next ? Math.floor(next.getTime() / (30 * 60 * 1000)) : null;
+    const context = next ? `history:${bucket}` : 'live';
+    const changed = context !== this._loadedContext;
+    this.time = next;
+    this.closePreview();
+    this.closeDetail();
+    if (changed) {
+      if (this._loadPromise && context !== this._loadingContext) this._reloadAfterLoad = true;
+      else this.load();
+    } else {
+      this.refreshVisible();
+    }
   }
 
   async _load() {
+    const requestedTime = this.time ? new Date(this.time.getTime()) : null;
+    const requestedBucket = requestedTime
+      ? Math.floor(requestedTime.getTime() / (30 * 60 * 1000)) : null;
+    const requestedContext = requestedTime ? `history:${requestedBucket}` : 'live';
+    this._loadingContext = requestedContext;
     try {
-      const features = await fetchActiveAlerts();
+      const features = await fetchAlerts(requestedTime);
+      // A scan change can supersede a request while its zones are resolving.
+      // Never flash alerts from the wrong time onto the map.
+      const currentBucket = this.time
+        ? Math.floor(this.time.getTime() / (30 * 60 * 1000)) : null;
+      const currentContext = this.time ? `history:${currentBucket}` : 'live';
+      if (currentContext !== requestedContext) return;
       this.alerts = features
         .filter((f) => f.geometry) // inline polygons plus resolved county/zone geometries
         // Keep the map limited to the alert types shown in the provided legend
@@ -851,6 +896,7 @@ export class AlertsController {
           bounds: geomBounds(f.geometry),
         }))
         .filter((a) => a.bounds);
+      this._loadedContext = requestedContext;
       this.refreshVisible();
     } catch (e) {
       console.error('alerts load failed', e);
@@ -872,7 +918,19 @@ export class AlertsController {
       s = b.getSouth(),
       e = b.getEast(),
       n = b.getNorth();
+    const superseded = new Set();
+    if (this.time) for (const a of this.alerts) {
+      const p = a.feature.properties || {};
+      const sent = new Date(p.sent || p.effective || 0).getTime();
+      if (Number.isFinite(sent) && sent > this.time.getTime()) continue;
+      for (const ref of p.references || []) {
+        const id = typeof ref === 'string' ? ref : ref && (ref.identifier || ref['@id']);
+        if (id) superseded.add(id);
+      }
+    }
     return this.alerts
+      .filter((a) => !this.time || alertActiveAt(a.feature, this.time))
+      .filter((a) => !superseded.has(a.id))
       .filter((a) => {
         // a.bounds = [minLat, minLon, maxLat, maxLon]; reject when the alert's
         // bbox is entirely outside the current view.
@@ -1358,9 +1416,37 @@ export class AlertsController {
   }
 }
 
-async function fetchActiveAlerts() {
+export function alertsRequestUrl(at) {
+  if (!(at instanceof Date) || !Number.isFinite(at.getTime())) return ACTIVE_URL;
+  const bucketStart = Math.floor(at.getTime() / (30 * 60 * 1000)) * (30 * 60 * 1000);
+  // api.weather.gov rejects fractional seconds, including the `.000Z` emitted
+  // by Date#toISOString for these exact bucket boundaries.
+  const nwsTime = (ms) => new Date(ms).toISOString().replace('.000Z', 'Z');
+  const params = new URLSearchParams({
+    start: nwsTime(bucketStart - HISTORY_LOOKBACK_MS),
+    end: nwsTime(bucketStart + HISTORY_LOOKAHEAD_MS),
+    status: 'actual',
+    message_type: 'alert,update,cancel',
+  });
+  return `${HISTORY_URL}?${params}`;
+}
+
+export function alertActiveAt(feature, at) {
+  if (!feature || !feature.properties || !(at instanceof Date)) return false;
+  const p = feature.properties;
+  if (String(p.messageType || '').toLowerCase() === 'cancel') return false;
+  const issued = new Date(p.sent || p.effective || p.onset || 0).getTime();
+  const onset = new Date(p.onset || p.effective || p.sent || 0).getTime();
+  const start = Math.max(issued, onset);
+  const end = p.ends || p.expires ? new Date(p.ends || p.expires).getTime() : Infinity;
+  const t = at.getTime();
+  return Number.isFinite(t) && Number.isFinite(start) && start <= t &&
+    (!Number.isFinite(end) || end > t);
+}
+
+async function fetchAlerts(at = null) {
   const features = [];
-  let url = ACTIVE_URL;
+  let url = alertsRequestUrl(at);
   for (let page = 0; page < 8 && url; page++) {
     const res = await fetch(url, { headers: { Accept: 'application/geo+json' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -91,7 +91,7 @@ self.onmessage = async (e) => {
     }
     if (type === 'load') {
       const epoch = cacheEpoch;
-      const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress);
+      const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim);
       if (epoch === cacheEpoch) remember(msg.key, scene);
       const { slim, transfer } = slimScene(scene, msg.bands, msg.maxDim);
       self.postMessage({ id, ok: true, scene: slim }, transfer);
@@ -103,7 +103,7 @@ self.onmessage = async (e) => {
       let added = msg.bands;
       if (!scene) {
         // Evicted (or this worker never had it): reload just the bands wanted.
-        scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress);
+        scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim);
         if (epoch === cacheEpoch) remember(msg.key, scene);
       } else {
         const before = new Set(Object.keys(scene.channels));

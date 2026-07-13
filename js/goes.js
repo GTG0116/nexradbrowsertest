@@ -261,16 +261,30 @@ export async function fetchBytes(bucket, key, onProgress) {
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
-  const chunks = [];
+  // When S3 supplies the size, stream directly into the final buffer. The old
+  // chunk list briefly held the complete CONUS file twice while concatenating
+  // it, which can push mobile WebKit over its process memory limit.
+  let out = total ? new Uint8Array(total) : null;
+  const chunks = total ? null : [];
   let received = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
+    if (out) {
+      if (received + value.length > out.length) {
+        const grown = new Uint8Array(Math.max(received + value.length, out.length * 2));
+        grown.set(out);
+        out = grown;
+      }
+      out.set(value, received);
+    } else {
+      chunks.push(value);
+    }
     received += value.length;
     if (onProgress) onProgress(received / total);
   }
-  const out = new Uint8Array(received);
+  if (out) return received === out.length ? out : out.slice(0, received);
+  out = new Uint8Array(received);
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
@@ -305,18 +319,23 @@ export async function fetchBytesRetry(bucket, key, { retries = 3, onProgress } =
 
 // Read one ABI channel into physical units (reflectance factor for the visible/
 // near-IR bands, brightness temperature K for the IR bands). Fill → NaN.
-async function readChannel(h5, band) {
+async function readChannel(h5, band, variable = null, stride = 1) {
   const name = `CMI_C${pad(band)}`;
-  const v = await h5.readVariable(name);
+  const v = variable || await h5.readVariable(name);
   const a = h5.readAttributes(name);
   const scale = a.scale_factor != null ? a.scale_factor : 1;
   const offset = a.add_offset != null ? a.add_offset : 0;
   const fill = v.fill;
-  const n = v.data.length;
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const raw = v.data[i];
-    out[i] = raw === fill ? NaN : raw * scale + offset;
+  const [H, W] = v.dims;
+  const outW = Math.ceil(W / stride), outH = Math.ceil(H / stride);
+  const out = new Float32Array(outW * outH);
+  for (let y = 0; y < outH; y++) {
+    const srcRow = Math.min(H - 1, y * stride) * W;
+    const dstRow = y * outW;
+    for (let x = 0; x < outW; x++) {
+      const raw = v.data[srcRow + Math.min(W - 1, x * stride)];
+      out[dstRow + x] = raw === fill ? NaN : raw * scale + offset;
+    }
   }
   return out;
 }
@@ -528,7 +547,7 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
 // Download + decode a scene, reading only the channels requested. Returns the
 // grid geometry, the geostationary projection constants, and the per-band
 // physical arrays — everything satProducts.buildRGBA / satelliteLayer need.
-export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
+export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDim = 0) {
   const sat = SATELLITES[satKey];
   const sector = SECTORS[sectorKey];
   if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress);
@@ -540,18 +559,22 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
   const ya = h5.readAttributes('y');
 
   // Grid geometry comes from the first band we read.
-  const first = await h5.readVariable(`CMI_C${pad(bands[0])}`);
+  let first = await h5.readVariable(`CMI_C${pad(bands[0])}`);
   const [H, W] = first.dims;
+  const stride = maxDim > 0 ? Math.max(1, Math.ceil(Math.max(W, H) / maxDim)) : 1;
+  const outW = Math.ceil(W / stride), outH = Math.ceil(H / stride);
 
   const channels = {};
-  for (const b of bands) channels[b] = await readChannel(h5, b);
+  channels[bands[0]] = await readChannel(h5, bands[0], first, stride);
+  first = null;
+  for (const b of bands.slice(1)) channels[b] = await readChannel(h5, b, null, stride);
 
   const t = timeForKey(key);
   return {
-    width: W,
-    height: H,
-    xScale: xa.scale_factor, xOffset: xa.add_offset,
-    yScale: ya.scale_factor, yOffset: ya.add_offset,
+    width: outW,
+    height: outH,
+    xScale: xa.scale_factor * stride, xOffset: xa.add_offset,
+    yScale: ya.scale_factor * stride, yOffset: ya.add_offset,
     proj: {
       lon0: (proj.longitude_of_projection_origin || sat.lon0) * Math.PI / 180,
       H: (proj.perspective_point_height || 35786023) + (proj.semi_major_axis || 6378137),
@@ -563,6 +586,7 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress) {
     time: t,
     key,
     _h5: h5, // kept so more bands can be decoded later without re-downloading
+    _stride: stride,
   };
 }
 
@@ -585,7 +609,7 @@ export async function ensureBands(scene, bands) {
   }
   if (!scene._h5) return scene;
   for (const b of bands) {
-    if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b);
+    if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b, null, scene._stride || 1);
   }
   return scene;
 }

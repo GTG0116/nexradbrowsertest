@@ -6666,7 +6666,16 @@ function setRadarArchive(on) {
     if (on) stopLive();   // free to browse — no forced-latest, no auto-refresh
     else startLive();     // snap straight back to live
   }
+  syncRadarAlertTime();
   updateMobileTopBar();
+}
+
+// Keep the alert layer on the same clock as the selected archived radar scan.
+// Requests are bucketed in the controller, while visibility uses the exact scan.
+function syncRadarAlertTime() {
+  if (!state.alerts) return;
+  const pt = state.mode === 'radar' && state.radarArchive ? productTime() : null;
+  state.alerts.setTime(pt && pt.time ? pt.time : null);
 }
 
 // Drag the settings sheet down to dismiss it — a more discoverable close than
@@ -8447,6 +8456,7 @@ function productTime() {
 // in 'product' mode (the default) it shows the selected frame's scan / valid time
 // with a short tag, falling back to the wall clock until a frame has loaded.
 function tickClock() {
+  syncRadarAlertTime();
   // Keep the mobile top bar's product day/time fresh (and time-zone correct).
   if (el.mtbTimeText && mqSmallScreen.matches) {
     const pt = productTime();
