@@ -258,6 +258,10 @@ export async function fetchBytes(bucket, key, onProgress) {
     err.status = res.status;
     throw err;
   }
+  return readBody(res, onProgress);
+}
+
+async function readBody(res, onProgress) {
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
@@ -317,25 +321,75 @@ export async function fetchBytesRetry(bucket, key, { retries = 3, onProgress } =
   throw lastErr;
 }
 
+// Open a NetCDF-4 object for partial reading.
+//
+// An MCMIP file carries all 16 ABI channels, but a product needs one to four of
+// them — and the whole object is 52 MB for CONUS and 320 MB for a full disk.
+// Pulling all of it down to use a fifteenth of it was the single largest
+// allocation the app made, and on mobile WebKit that allocation (plus the
+// in-flight response) is enough to have the tab killed — switching to Satellite
+// simply crashed the app. S3 serves HTTP range requests (and allows the Range
+// header via CORS), so instead read the header, then only the byte ranges the
+// requested bands' chunks actually occupy: a couple of MB per CONUS band, ~20 MB
+// per full-disk band, streamed a piece at a time.
+//
+// If the server won't serve ranges (or anything about the probe is unexpected),
+// fall back to downloading the whole object exactly as before.
+//
+// The first read covers the NetCDF header: variable names, attributes and the
+// chunk B-tree roots all live in the first few hundred KB of these files.
+const HDF5_HEAD_BYTES = 1024 * 1024;
+async function openNetCDF(bucket, key, onProgress) {
+  const url = `${bucket}/${key}`;
+  // A whole-object download is the first half of the work when it happens at
+  // all; decoding the bands (below) is the rest.
+  const downloadProgress = onProgress ? (p) => onProgress(p * 0.5) : null;
+  let res;
+  try {
+    res = await fetch(url, { headers: { Range: `bytes=0-${HDF5_HEAD_BYTES - 1}` } });
+  } catch (_) {
+    return new HDF5File(await fetchBytes(bucket, key, downloadProgress));
+  }
+  if (!res.ok) {
+    const err = new Error(`GOES download failed: ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  // 200 means the range was ignored and this response is the whole object;
+  // consume it rather than paying for the download twice.
+  if (res.status !== 206) return new HDF5File(await readBody(res, downloadProgress));
+
+  const m = /\/\s*(\d+)\s*$/.exec(res.headers.get('content-range') || '');
+  const size = m ? Number(m[1]) : 0;
+  const head = new Uint8Array(await res.arrayBuffer());
+  if (!size || size <= head.length) return new HDF5File(head);
+  return HDF5File.ranged(size, head, async (start, end) => {
+    const part = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
+    if (!part.ok) {
+      const err = new Error(`GOES range read failed: ${part.status}`);
+      err.status = part.status;
+      throw err;
+    }
+    return new Uint8Array(await part.arrayBuffer());
+  });
+}
+
 // Read one ABI channel into physical units (reflectance factor for the visible/
 // near-IR bands, brightness temperature K for the IR bands). Fill → NaN.
-async function readChannel(h5, band, variable = null, stride = 1) {
+// `stride` decimates during the read itself, so a phone never materialises the
+// full-resolution array on its way to the downsampled one it displays.
+async function readChannel(h5, band, stride = 1) {
   const name = `CMI_C${pad(band)}`;
-  const v = variable || await h5.readVariable(name);
-  const a = h5.readAttributes(name);
+  const v = await h5.readVariable(name, { stride });
+  const a = await h5.readAttributesAsync(name);
   const scale = a.scale_factor != null ? a.scale_factor : 1;
   const offset = a.add_offset != null ? a.add_offset : 0;
   const fill = v.fill;
-  const [H, W] = v.dims;
-  const outW = Math.ceil(W / stride), outH = Math.ceil(H / stride);
-  const out = new Float32Array(outW * outH);
-  for (let y = 0; y < outH; y++) {
-    const srcRow = Math.min(H - 1, y * stride) * W;
-    const dstRow = y * outW;
-    for (let x = 0; x < outW; x++) {
-      const raw = v.data[srcRow + Math.min(W - 1, x * stride)];
-      out[dstRow + x] = raw === fill ? NaN : raw * scale + offset;
-    }
+  const n = v.data.length;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const raw = v.data[i];
+    out[i] = raw === fill ? NaN : raw * scale + offset;
   }
   return out;
 }
@@ -396,6 +450,22 @@ function deriveGrid(hdr, commonCFAC) {
     W: Math.round(hdr.cols * rC), H: Math.round(hdr.lines * rL),
     CFAC: commonCFAC, LFAC: commonCFAC,
     COFF: (hdr.COFF - 0.5) * rC + 0.5, LOFF: (hdr.LOFF - 0.5) * rL + 0.5,
+  };
+}
+
+// Coarsen a common grid so its longest side fits `maxDim`. The resample below
+// works from the CGMS scale/offset, so a scaled grid lands the samples in the
+// same places as decimating afterwards would — but each band allocates a
+// 5500² Float32 array (121 MB) fewer. A four-band RGB recipe on a phone was
+// asking for close to half a gigabyte of scratch before this.
+function fitGrid(grid, maxDim) {
+  if (!grid || !(maxDim > 0)) return grid;
+  const stride = Math.max(1, Math.ceil(Math.max(grid.W, grid.H) / maxDim));
+  if (stride === 1) return grid;
+  return {
+    W: Math.ceil(grid.W / stride), H: Math.ceil(grid.H / stride),
+    CFAC: grid.CFAC / stride, LFAC: grid.LFAC / stride,
+    COFF: (grid.COFF - 0.5) / stride + 0.5, LOFF: (grid.LOFF - 0.5) / stride + 0.5,
   };
 }
 
@@ -507,11 +577,11 @@ function himawariMetaFromKey(key) {
   return { y, mm, dd, hhmm, frame: +frame, sectorKey, key, time: new Date(base + (+frame - 1) * 150000) };
 }
 
-async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
+async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim = 0) {
   const meta = HIMAWARI_SCENE_FILES.get(key) || himawariMetaFromKey(key);
   if (!meta) throw new Error('bad Himawari scene key');
   const sector = SECTORS[sectorKey];
-  const gridRef = { grid: sector.grid || null };
+  const gridRef = { grid: fitGrid(sector.grid, maxDim) || null };
   // Regional grids come from the headers. Establish the common grid once, up
   // front, from a single segment header (band 13 is always produced) so the
   // per-band decodes below can run in parallel without racing to set it and so a
@@ -521,7 +591,7 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
   if (!gridRef.grid) {
     try {
       const bytes = await fetchBytesRetry(sat.bucket, himawariSegKey(meta, sector, 13, 1));
-      gridRef.grid = deriveGrid(parseHsdHeader(bytes), sector.commonCFAC);
+      gridRef.grid = fitGrid(deriveGrid(parseHsdHeader(bytes), sector.commonCFAC), maxDim);
     } catch (_) { /* leave empty; the channel will be blank */ }
   }
   const channels = {};
@@ -550,24 +620,29 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress) {
 export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDim = 0) {
   const sat = SATELLITES[satKey];
   const sector = SECTORS[sectorKey];
-  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress);
-  const bytes = await fetchBytes(sat.bucket, key, onProgress);
-  const h5 = new HDF5File(bytes);
+  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim);
+  const h5 = await openNetCDF(sat.bucket, key, onProgress);
 
-  const proj = h5.readAttributes('goes_imager_projection');
-  const xa = h5.readAttributes('x');
-  const ya = h5.readAttributes('y');
+  const proj = await h5.readAttributesAsync('goes_imager_projection');
+  const xa = await h5.readAttributesAsync('x');
+  const ya = await h5.readAttributesAsync('y');
 
-  // Grid geometry comes from the first band we read.
-  let first = await h5.readVariable(`CMI_C${pad(bands[0])}`);
-  const [H, W] = first.dims;
+  // Grid geometry comes from the dataspace of the first band, read before any
+  // of its data so the decimation factor is known up front.
+  const shape = await h5.variableShape(`CMI_C${pad(bands[0])}`);
+  const [H, W] = shape;
   const stride = maxDim > 0 ? Math.max(1, Math.ceil(Math.max(W, H) / maxDim)) : 1;
   const outW = Math.ceil(W / stride), outH = Math.ceil(H / stride);
 
   const channels = {};
-  channels[bands[0]] = await readChannel(h5, bands[0], first, stride);
-  first = null;
-  for (const b of bands.slice(1)) channels[b] = await readChannel(h5, b, null, stride);
+  // Ranged reads have no single download to measure, so the bar advances per
+  // band; a fallback whole-object download already used the first half of it.
+  const base = h5.loader ? 0 : 0.5;
+  let done = 0;
+  for (const b of bands) {
+    channels[b] = await readChannel(h5, b, stride);
+    if (onProgress) onProgress(base + (1 - base) * (++done / bands.length));
+  }
 
   const t = timeForKey(key);
   return {
@@ -609,7 +684,7 @@ export async function ensureBands(scene, bands) {
   }
   if (!scene._h5) return scene;
   for (const b of bands) {
-    if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b, null, scene._stride || 1);
+    if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b, scene._stride || 1);
   }
   return scene;
 }

@@ -82,35 +82,169 @@ function unshuffle(bytes, elsize) {
   return out;
 }
 
+// Thrown by the byte accessors when the requested span is not resident in a
+// range-loaded file. The async drivers (`_resolve`, `readVariable`) catch it,
+// pull that part of the object over HTTP and retry the parse — a page-fault
+// handler for a sparsely loaded file.
+class MissingBytes extends Error {
+  constructor(start, end) {
+    super(`hdf5: bytes ${start}-${end} not loaded`);
+    this.start = start;
+    this.end = end;
+  }
+}
+
+function makeSegment(start, bytes, pinned) {
+  return {
+    start,
+    end: start + bytes.length,
+    bytes,
+    view: new DataView(bytes.buffer, bytes.byteOffset, bytes.length),
+    pinned: !!pinned,
+  };
+}
+
+// How much to pull on a metadata fault, and how far apart two data chunks may
+// sit before they stop sharing one request. Both are tuned for S3: a request is
+// worth ~100 ms of latency, so reading a little extra beats a second round trip.
+const FAULT_WINDOW = 512 * 1024;
+const COALESCE_GAP = 512 * 1024;
+// Ceiling on one coalesced data read, so a full-disk band streams through in a
+// few bounded pieces instead of one ~20 MB allocation.
+const MAX_DATA_READ = 8 * 1024 * 1024;
+
 export class HDF5File {
+  // `buffer` is the complete object. For a file read over HTTP range requests
+  // use HDF5File.ranged() instead.
   constructor(buffer) {
-    this.bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    this.dv = new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.length);
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    this._init(bytes.length, [makeSegment(0, bytes, true)], null);
+  }
+
+  // A file whose bytes are fetched on demand: `head` is the leading slice
+  // already read (enough for the superblock), `loader(start, end)` resolves to
+  // the bytes of any other span. Only the metadata and the chunks of the
+  // variables actually read are ever downloaded.
+  static ranged(size, head, loader) {
+    const f = Object.create(HDF5File.prototype);
+    f._init(size, [makeSegment(0, head, true)], loader);
+    return f;
+  }
+
+  _init(size, segments, loader) {
+    this.size = size;
+    this.segs = segments;
+    this.loader = loader || null;
+    this._seg = segments[0] || null;
     this._parseSuperblock();
     this._links = null; // name -> object-header address (lazy)
   }
 
+  // Locate the resident segment holding [o, o+n). Multi-byte reads never
+  // straddle a segment because overlapping/adjacent segments are merged on
+  // insert, so a straddling read simply faults and is retried on merged bytes.
+  _at(o, n) {
+    const s = this._seg;
+    if (s && o >= s.start && o + n <= s.end) return s;
+    for (const seg of this.segs) {
+      if (o >= seg.start && o + n <= seg.end) { this._seg = seg; return seg; }
+    }
+    throw new MissingBytes(o, o + n);
+  }
+
   // ---- little-endian primitives ----
-  u8(o) { return this.bytes[o]; }
-  u16(o) { return this.dv.getUint16(o, true); }
-  u32(o) { return this.dv.getUint32(o, true); }
-  u64(o) { return Number(this.dv.getBigUint64(o, true)); }
-  i16(o) { return this.dv.getInt16(o, true); }
-  i32(o) { return this.dv.getInt32(o, true); }
-  i8(o) { return this.dv.getInt8(o); }
-  f32(o) { return this.dv.getFloat32(o, true); }
-  f64(o) { return this.dv.getFloat64(o, true); }
-  str(o, n) { return new TextDecoder().decode(this.bytes.subarray(o, o + n)).replace(/\0.*$/, ''); }
-  sig4(o) { return String.fromCharCode(this.bytes[o], this.bytes[o + 1], this.bytes[o + 2], this.bytes[o + 3]); }
+  u8(o) { const s = this._at(o, 1); return s.bytes[o - s.start]; }
+  u16(o) { const s = this._at(o, 2); return s.view.getUint16(o - s.start, true); }
+  u32(o) { const s = this._at(o, 4); return s.view.getUint32(o - s.start, true); }
+  u64(o) { const s = this._at(o, 8); return Number(s.view.getBigUint64(o - s.start, true)); }
+  i16(o) { const s = this._at(o, 2); return s.view.getInt16(o - s.start, true); }
+  i32(o) { const s = this._at(o, 4); return s.view.getInt32(o - s.start, true); }
+  i8(o) { const s = this._at(o, 1); return s.view.getInt8(o - s.start); }
+  f32(o) { const s = this._at(o, 4); return s.view.getFloat32(o - s.start, true); }
+  f64(o) { const s = this._at(o, 8); return s.view.getFloat64(o - s.start, true); }
+  // A view of [o, o+n) — no copy for a fully buffered file.
+  slice(o, n) { const s = this._at(o, n); return s.bytes.subarray(o - s.start, o - s.start + n); }
+  str(o, n) { return new TextDecoder().decode(this.slice(o, n)).replace(/\0.*$/, ''); }
+  sig4(o) { const b = this.slice(o, 4); return String.fromCharCode(b[0], b[1], b[2], b[3]); }
+
+  // ---- sparse loading -----------------------------------------------------
+
+  _has(start, end) {
+    for (const seg of this.segs) if (start >= seg.start && end <= seg.end) return true;
+    return false;
+  }
+
+  // Insert a freshly read span, merging it with any overlapping/adjacent
+  // segment of the same kind so later multi-byte reads never straddle a seam.
+  _insert(start, bytes, pinned) {
+    let seg = makeSegment(start, bytes, pinned);
+    for (;;) {
+      const i = this.segs.findIndex((s) =>
+        s.pinned === seg.pinned && s.start <= seg.end && seg.start <= s.end);
+      if (i < 0) break;
+      const other = this.segs.splice(i, 1)[0];
+      if (other.start <= seg.start && other.end >= seg.end) { seg = other; continue; }
+      const start2 = Math.min(seg.start, other.start);
+      const end2 = Math.max(seg.end, other.end);
+      const merged = new Uint8Array(end2 - start2);
+      merged.set(other.bytes, other.start - start2);
+      merged.set(seg.bytes, seg.start - start2); // the newer read wins on overlap
+      seg = makeSegment(start2, merged, seg.pinned);
+    }
+    this.segs.push(seg);
+    this._seg = seg;
+    return seg;
+  }
+
+  async _load(start, end, pinned) {
+    const a = Math.max(0, start);
+    const b = Math.min(this.size, end);
+    if (b <= a || this._has(a, b)) return;
+    if (!this.loader) throw new MissingBytes(a, b);
+    this._insert(a, await this.loader(a, b), pinned);
+  }
+
+  // Drop every unpinned (data) segment. Metadata stays resident so another band
+  // can be decoded later without re-reading the header.
+  releaseData() {
+    this.segs = this.segs.filter((s) => s.pinned);
+    this._seg = this.segs[0] || null;
+  }
+
+  // Run a synchronous parse, pulling in whatever spans it faults on. Metadata
+  // faults read a window around the address, so a header spread over a few
+  // structures costs a couple of requests rather than one per field.
+  async _resolve(parse) {
+    for (let attempt = 0; attempt < 256; attempt++) {
+      try {
+        return parse();
+      } catch (err) {
+        if (!(err instanceof MissingBytes) || !this.loader) throw err;
+        // A read past the end of the object is a genuinely corrupt/unsupported
+        // structure, not a fault we can satisfy — retrying would spin.
+        if (err.start >= this.size) throw err;
+        const start = Math.max(0, Math.floor(err.start / FAULT_WINDOW) * FAULT_WINDOW);
+        const end = Math.max(err.end, start + FAULT_WINDOW);
+        await this._load(start, end, true);
+      }
+    }
+    throw new Error('hdf5: header could not be resolved');
+  }
+
+  // Attributes, resolving range faults. Prefer this over readAttributes() on a
+  // file opened with HDF5File.ranged().
+  readAttributesAsync(name) {
+    return this._resolve(() => this.readAttributes(name));
+  }
 
   _parseSuperblock() {
-    for (let i = 0; i < 8; i++) if (this.bytes[i] !== SIG[i]) throw new Error('not an HDF5 file');
-    const ver = this.bytes[8];
+    for (let i = 0; i < 8; i++) if (this.u8(i) !== SIG[i]) throw new Error('not an HDF5 file');
+    const ver = this.u8(8);
     this.sbVersion = ver;
     if (ver === 0 || ver === 1) {
       // v0/v1 superblock: offsets sit a bit further in.
-      this.offSize = this.bytes[13];
-      this.lenSize = this.bytes[14];
+      this.offSize = this.u8(13);
+      this.lenSize = this.u8(14);
       // root group symbol-table entry → object header address.
       const base = 24 + (ver === 1 ? 4 : 0);
       // skip base addr / free space / eof / driver (4 * offSize) then sym table entry
@@ -118,8 +252,8 @@ export class HDF5File {
       // symbol table entry: link name offset (off), object header addr (off)
       this.rootOH = this.u64(ste + this.offSize);
     } else if (ver === 2 || ver === 3) {
-      this.offSize = this.bytes[9];
-      this.lenSize = this.bytes[10];
+      this.offSize = this.u8(9);
+      this.lenSize = this.u8(10);
       this.rootOH = this.u64(36);
     } else {
       throw new Error('unsupported HDF5 superblock version ' + ver);
@@ -136,7 +270,7 @@ export class HDF5File {
       yield* this._messagesV1(addr);
       return;
     }
-    const flags = this.bytes[addr + 5];
+    const flags = this.u8(addr + 5);
     let p = addr + 6;
     if (flags & 0x20) p += 16; // timestamps
     if (flags & 0x10) p += 4;  // max compact / min dense attrs
@@ -150,7 +284,7 @@ export class HDF5File {
       const [start, end] = queue.shift();
       let pp = start;
       while (pp < end - 3) {
-        const type = this.bytes[pp];
+        const type = this.u8(pp);
         const sz = this.u16(pp + 1);
         let dp = pp + 4;
         if (orderTracked) dp += 2;
@@ -229,7 +363,7 @@ export class HDF5File {
     const rowSize = (row) => (row < 2 ? startBlockSize : startBlockSize * Math.pow(2, row - 1));
 
     const readDirect = (addr, size) => {
-      if (!addr || addr === UNDEF || addr >= this.bytes.length) return;
+      if (!addr || addr === UNDEF || addr >= this.size) return;
       if (this.sig4(addr) !== 'FHDB') return;
       let p = addr + 4 + 1 + this.offSize + offBytes; // sig, ver, heap-hdr-addr, block offset
       if (checksummed) p += 4;
@@ -271,7 +405,7 @@ export class HDF5File {
         if (r && r.name) map[r.name] = r.oh;
       } else if (m.type === 2) { // Link Info → dense storage
         let p = m.dp;
-        const flags = this.bytes[p + 1];
+        const flags = this.u8(p + 1);
         let q = p + 2;
         if (flags & 1) q += this.lenSize; // max creation index
         const heapAddr = this.u64(q);
@@ -287,7 +421,7 @@ export class HDF5File {
     for (const blk of blocks) {
       let p = blk.start;
       while (p < blk.end - 5) {
-        if (this.bytes[p] !== 1) { p++; continue; } // link message version
+        if (this.u8(p) !== 1) { p++; continue; } // link message version
         const r = this._parseLink(p);
         if (r && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(r.name)) {
           map[r.name] = r.oh;
@@ -298,10 +432,10 @@ export class HDF5File {
   }
 
   _parseLink(p) {
-    const lf = this.bytes[p + 1];
+    const lf = this.u8(p + 1);
     let q = p + 2;
     let linkType = 0;
-    if (lf & 0x08) { linkType = this.bytes[q]; q += 1; }
+    if (lf & 0x08) { linkType = this.u8(q); q += 1; }
     if (lf & 0x04) q += 8;          // creation order
     if (lf & 0x10) q += 1;          // link name charset
     const lenSz = lf & 3;
@@ -310,6 +444,10 @@ export class HDF5File {
     else if (lenSz === 1) { nlen = this.u16(q); q += 2; }
     else if (lenSz === 2) { nlen = this.u32(q); q += 4; }
     else { nlen = this.u64(q); q += 8; }
+    // Dense link storage is scanned byte by byte for records, so a garbage
+    // position can declare an absurd name length; decoding one would read far
+    // past the record for nothing. Real link names are short.
+    if (!(nlen > 0 && nlen <= 1024)) return null;
     const name = this.str(q, nlen); q += nlen;
     if (linkType !== 0) return { name, oh: null, end: q };
     const oh = this.u64(q); q += this.offSize;
@@ -334,7 +472,7 @@ export class HDF5File {
         if (a) attrs[a.name] = a.val;
       } else if (m.type === 21) {
         let p = m.dp;
-        const flags = this.bytes[p + 1];
+        const flags = this.u8(p + 1);
         let q = p + 2;
         if (flags & 1) q += 2; // max creation index
         const heapAddr = this.u64(q);
@@ -343,9 +481,9 @@ export class HDF5File {
           for (const blk of blocks) {
             let pp = blk.start;
             while (pp < blk.end - 4) {
-              const v = this.bytes[pp];
+              const v = this.u8(pp);
               if (v !== 1 && v !== 2 && v !== 3) { pp++; continue; }
-              const a = this._tryAttr(pp);
+              const a = this._tryAttr(pp, blk.end);
               if (a) { attrs[a.name] = a.val; pp = a.end; }
               else pp++;
             }
@@ -356,16 +494,23 @@ export class HDF5File {
     return attrs;
   }
 
-  _tryAttr(p) {
+  // Dense attribute storage has no per-record index, so records are found by
+  // trying to parse one at every plausible byte of the heap block. `limit` is
+  // that block's end: a record cannot run past it, and enforcing that is what
+  // keeps a *failed* attempt cheap. Without it a random byte pattern could
+  // declare a multi-billion-element array and the "parse" would spin for
+  // seconds building it before finally faulting — which is exactly what made
+  // reading one band's attributes take ten seconds.
+  _tryAttr(p, limit) {
     try {
-      const a = this._parseAttr(p);
+      const a = this._parseAttr(p, limit);
       if (a && a.name && /^[\x20-\x7e]+$/.test(a.name)) return a;
     } catch (_) { /* not an attribute here */ }
     return null;
   }
 
-  _parseAttr(p) {
-    const ver = this.bytes[p];
+  _parseAttr(p, limit = Infinity) {
+    const ver = this.u8(p);
     let nameSz, dtSz, dsSz, q, dtp, dsp, name;
     if (ver === 1) {
       nameSz = this.u16(p + 2); dtSz = this.u16(p + 4); dsSz = this.u16(p + 6); q = p + 8;
@@ -381,17 +526,24 @@ export class HDF5File {
     } else {
       return null;
     }
-    const cls = this.bytes[dtp] & 0x0f;
-    const dtBits = this.bytes[dtp + 1];
+    // A real record's name, datatype and dataspace all fit inside the block.
+    if (!(nameSz > 0 && dsp <= limit)) return null;
+    const cls = this.u8(dtp) & 0x0f;
+    const dtBits = this.u8(dtp + 1);
     const elsize = this.u32(dtp + 4);
+    if (!(elsize > 0 && elsize <= 65536)) return null;
 
     // dataspace: count elements
-    const dsVer = this.bytes[dsp];
-    const ndim = this.bytes[dsp + 1];
+    const dsVer = this.u8(dsp);
+    const ndim = this.u8(dsp + 1);
+    if (ndim > 4) return null;
     let r = dsp + (dsVer === 1 ? 8 : 4);
     let n = 1;
     for (let i = 0; i < ndim; i++) { n *= this.u64(r); r += 8; }
     if (n < 1) n = 1;
+    // The values must fit in the block too — the check that keeps a misparse
+    // from allocating a huge array before it fails.
+    if (!Number.isFinite(n) || q + n * elsize > limit) return null;
 
     const readOne = (o) => {
       if (cls === 1) return elsize === 4 ? this.f32(o) : this.f64(o);
@@ -415,9 +567,57 @@ export class HDF5File {
 
   // -----------------------------------------------------------------------
   // Variable data — dataspace + datatype + layout, then read the array.
-  // Returns { dims, data: typed array, dtype, signed, elsize, fill }.
+  //
+  // `opts.stride` (2-D variables only) decimates while reading: the output is
+  // every Nth row and column, and is allocated at that size. A phone reading a
+  // 5424² full-disk band at stride 5 never materialises the 58 MB full array.
+  // Returns { dims, data, elsize, signed, dclass, fill, stride, fullDims } where
+  // `dims` describes the array actually returned.
   // -----------------------------------------------------------------------
-  async readVariable(name) {
+  async readVariable(name, opts = {}) {
+    const meta = await this._resolve(() => this._variableMeta(name));
+    const { dims, chunkDims, btreeAddr, contiguousAddr, elsize, signed, dclass, filters, fill } = meta;
+
+    const stride = dims.length === 2 ? Math.max(1, Math.floor(opts.stride) || 1) : 1;
+    const outDims = dims.map((d) => Math.ceil(d / stride));
+    const total = outDims.reduce((a, b) => a * b, 1);
+    const out = this._makeTyped(dclass, signed, elsize, total);
+    const result = { dims: outDims, data: out, elsize, signed, dclass, fill, stride, fullDims: dims };
+
+    if (contiguousAddr != null && contiguousAddr !== UNDEF) {
+      const full = dims.reduce((a, b) => a * b, 1);
+      await this._load(contiguousAddr, contiguousAddr + full * elsize, false);
+      if (stride === 1) {
+        this._copyRaw(this.slice(contiguousAddr, full * elsize), out, 0, full);
+      } else {
+        const [H, W] = dims, [outH, outW] = outDims;
+        const src = this._makeTyped(dclass, signed, elsize, full);
+        this._copyRaw(this.slice(contiguousAddr, full * elsize), src, 0, full);
+        for (let y = 0; y < outH; y++)
+          for (let x = 0; x < outW; x++) out[y * outW + x] = src[y * stride * W + x * stride];
+      }
+      return result;
+    }
+
+    if (btreeAddr != null && btreeAddr !== UNDEF) {
+      await this._readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride);
+      return result;
+    }
+
+    // No data block allocated (all fill): leave zeros / fill.
+    if (fill != null) out.fill(fill);
+    return result;
+  }
+
+  // A variable's full dimensions, without reading any of its data.
+  async variableShape(name) {
+    const meta = await this._resolve(() => this._variableMeta(name));
+    return meta.dims;
+  }
+
+  // Dataspace + datatype + layout + filters of one variable. Synchronous, so it
+  // runs under _resolve() on a range-loaded file.
+  _variableMeta(name) {
     const links = this._ensureLinks();
     const oh = links[name];
     if (oh == null) throw new Error('no such variable: ' + name);
@@ -430,22 +630,22 @@ export class HDF5File {
 
     for (const m of this._messages(oh)) {
       if (m.type === 1) {
-        const ndim = this.bytes[m.dp + 1];
-        let q = m.dp + (this.bytes[m.dp] === 1 ? 8 : 4);
+        const ndim = this.u8(m.dp + 1);
+        let q = m.dp + (this.u8(m.dp) === 1 ? 8 : 4);
         dims = [];
         for (let i = 0; i < ndim; i++) { dims.push(this.u64(q)); q += 8; }
       } else if (m.type === 3) {
-        dclass = this.bytes[m.dp] & 0x0f;
-        signed = (this.bytes[m.dp + 1] & 0x08) !== 0;
+        dclass = this.u8(m.dp) & 0x0f;
+        signed = (this.u8(m.dp + 1) & 0x08) !== 0;
         elsize = this.u32(m.dp + 4);
       } else if (m.type === 8) {
-        const layoutVer = this.bytes[m.dp];
-        const cls = this.bytes[m.dp + 1];
+        const layoutVer = this.u8(m.dp);
+        const cls = this.u8(m.dp + 1);
         if (cls === 1) { // contiguous
           contiguousAddr = this.u64(m.dp + 2);
           contiguousSize = this.u64(m.dp + 2 + this.offSize);
         } else if (cls === 2) { // chunked
-          const dim = this.bytes[m.dp + 2];
+          const dim = this.u8(m.dp + 2);
           btreeAddr = this.u64(m.dp + 3);
           let q = m.dp + 3 + this.offSize;
           chunkDims = [];
@@ -462,22 +662,7 @@ export class HDF5File {
     }
 
     if (!dims) throw new Error('variable has no dataspace: ' + name);
-    const total = dims.reduce((a, b) => a * b, 1);
-    const out = this._makeTyped(dclass, signed, elsize, total);
-
-    if (contiguousAddr != null && contiguousAddr !== UNDEF) {
-      this._copyRaw(this.bytes.subarray(contiguousAddr, contiguousAddr + total * elsize), out, 0, total);
-      return { dims, data: out, elsize, signed, dclass, fill };
-    }
-
-    if (btreeAddr != null && btreeAddr !== UNDEF) {
-      await this._readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed);
-      return { dims, data: out, elsize, signed, dclass, fill };
-    }
-
-    // No data block allocated (all fill): leave zeros / fill.
-    if (fill != null) out.fill(fill);
-    return { dims, data: out, elsize, signed, dclass, fill };
+    return { dims, chunkDims, btreeAddr, contiguousAddr, contiguousSize, elsize, signed, dclass, filters, fill };
   }
 
   _makeTyped(dclass, signed, elsize, n) {
@@ -502,8 +687,8 @@ export class HDF5File {
   }
 
   _parseFilters(dp) {
-    const ver = this.bytes[dp];
-    const nf = this.bytes[dp + 1];
+    const ver = this.u8(dp);
+    const nf = this.u8(dp + 1);
     let q = dp + (ver === 1 ? 8 : 2);
     const out = [];
     for (let i = 0; i < nf; i++) {
@@ -523,17 +708,17 @@ export class HDF5File {
   }
 
   _parseFillValue(dp, elsize, signed, dclass) {
-    const ver = this.bytes[dp];
+    const ver = this.u8(dp);
     if (ver === 1 || ver === 2) {
       // ver, space alloc, fill write, defined, [size, value]
-      const defined = this.bytes[dp + 3];
+      const defined = this.u8(dp + 3);
       if (!defined) return null;
       const size = this.u32(dp + 4);
       if (!size) return null;
       return this._readScalar(dp + 8, elsize, signed, dclass);
     }
     // ver 3
-    const flags = this.bytes[dp + 1];
+    const flags = this.u8(dp + 1);
     if (!(flags & 0x20)) return null; // fill value defined?
     const size = this.u32(dp + 2);
     if (!size) return null;
@@ -550,47 +735,80 @@ export class HDF5File {
 
   // Walk the version-1 chunk B-tree, gather leaf chunk descriptors, then
   // (asynchronously) inflate/unshuffle each and scatter it into `out`.
-  async _readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed) {
+  //
+  // On a range-loaded file the tree's internal nodes sit next to the data they
+  // index, so the walk itself faults a few small reads; the leaves are then
+  // grouped into a handful of large sequential reads (a NetCDF-4 variable's
+  // chunks are written contiguously), and each group is released as soon as its
+  // chunks are decoded so only one group is resident at a time.
+  async _readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride = 1) {
     const rank = dims.length;
-    const leaves = [];
-    const visit = (addr) => {
-      if (this.sig4(addr) !== 'TREE') return;
-      const level = this.bytes[addr + 5];
-      const nused = this.u16(addr + 6);
-      let p = addr + 8 + 2 * this.offSize; // skip left/right sibling
-      for (let i = 0; i < nused; i++) {
-        const chunkSize = this.u32(p);
-        const filterMask = this.u32(p + 4);
-        let q = p + 8;
-        const offs = [];
-        for (let d = 0; d < rank + 1; d++) { offs.push(this.u64(q)); q += 8; }
-        const child = this.u64(q); q += this.offSize;
-        if (level === 0) leaves.push({ chunkSize, filterMask, offs, addr: child });
-        else visit(child);
-        p = q;
-      }
+    const collect = () => {
+      const leaves = [];
+      const visit = (addr) => {
+        if (this.sig4(addr) !== 'TREE') return;
+        const level = this.u8(addr + 5);
+        const nused = this.u16(addr + 6);
+        let p = addr + 8 + 2 * this.offSize; // skip left/right sibling
+        for (let i = 0; i < nused; i++) {
+          const chunkSize = this.u32(p);
+          const filterMask = this.u32(p + 4);
+          let q = p + 8;
+          const offs = [];
+          for (let d = 0; d < rank + 1; d++) { offs.push(this.u64(q)); q += 8; }
+          const child = this.u64(q); q += this.offSize;
+          if (level === 0) leaves.push({ chunkSize, filterMask, offs, addr: child });
+          else visit(child);
+          p = q;
+        }
+      };
+      visit(btreeAddr);
+      return leaves;
     };
-    visit(btreeAddr);
+    const leaves = await this._resolve(collect);
 
     const rowStride = []; // element strides for the full array
     rowStride[rank - 1] = 1;
     for (let d = rank - 2; d >= 0; d--) rowStride[d] = rowStride[d + 1] * dims[d + 1];
 
-    // Process chunks (await inflation as needed).
+    // Sequential in file order, so the coalesced reads below are sequential too.
+    leaves.sort((a, b) => a.addr - b.addr);
+
+    let group = [];
+    const flush = async () => {
+      if (!group.length) return;
+      const start = group[0].addr;
+      const end = group[group.length - 1].addr + group[group.length - 1].chunkSize;
+      await this._load(start, end, false);
+      for (const lf of group) {
+        const applied = (id) => filters.some((f, i) => f.id === id && !(lf.filterMask & (1 << i)));
+        let raw = this.slice(lf.addr, lf.chunkSize);
+        // Fletcher32 is stored after the compressed chunk bytes. Chrome's
+        // DecompressionStream rejects those valid trailing checksum bytes, so strip
+        // them before deflate instead of depending on browser-specific tolerance.
+        if (applied(3) && raw.length >= 4) raw = raw.subarray(0, raw.length - 4);
+        if (applied(1)) raw = await inflate(raw);
+        if (applied(2)) raw = unshuffle(raw, elsize);
+        this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride);
+      }
+      group = [];
+      this.releaseData();
+    };
+
     for (const lf of leaves) {
-      const applied = (id) => filters.some((f, i) => f.id === id && !(lf.filterMask & (1 << i)));
-      let raw = this.bytes.subarray(lf.addr, lf.addr + lf.chunkSize);
-      // Fletcher32 is stored after the compressed chunk bytes. Chrome's
-      // DecompressionStream rejects those valid trailing checksum bytes, so strip
-      // them before deflate instead of depending on browser-specific tolerance.
-      if (applied(3) && raw.length >= 4) raw = raw.subarray(0, raw.length - 4);
-      if (applied(1)) raw = await inflate(raw);
-      if (applied(2)) raw = unshuffle(raw, elsize);
-      this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed);
+      if (group.length) {
+        const last = group[group.length - 1];
+        const span = lf.addr + lf.chunkSize - group[0].addr;
+        if (lf.addr - (last.addr + last.chunkSize) > COALESCE_GAP || span > MAX_DATA_READ) await flush();
+      }
+      group.push(lf);
     }
+    await flush();
   }
 
-  _scatterChunk(rawBytes, offs, dims, chunkDims, rowStride, elsize, out, dclass, signed) {
+  // `stride` (2-D only) writes just the sampled rows/columns; `out` is then the
+  // decimated array, ceil(dim / stride) on each axis.
+  _scatterChunk(rawBytes, offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride = 1) {
     const view = new DataView(rawBytes.buffer, rawBytes.byteOffset, rawBytes.length);
     const get =
       dclass === 1 ? (elsize === 4 ? (o) => view.getFloat32(o, true) : (o) => view.getFloat64(o, true))
@@ -604,13 +822,17 @@ export class HDF5File {
       const [H, W] = dims;
       const [CH, CW] = chunkDims;
       const r0 = offs[0], c0 = offs[1];
-      for (let r = 0; r < CH; r++) {
+      const outW = Math.ceil(W / stride);
+      // First sampled row/column at or after the chunk's origin.
+      const rStart = stride === 1 ? 0 : (stride - (r0 % stride)) % stride;
+      const cStart = stride === 1 ? 0 : (stride - (c0 % stride)) % stride;
+      const cols = Math.min(CW, W - c0);
+      for (let r = rStart; r < CH; r += stride) {
         const gr = r0 + r;
         if (gr >= H) break;
-        let src = (r * CW) * elsize;
-        let dst = gr * W + c0;
-        const cols = Math.min(CW, W - c0);
-        for (let c = 0; c < cols; c++, src += elsize) out[dst + c] = get(src);
+        const rowSrc = r * CW * elsize;
+        const dst = (gr / stride) * outW + (c0 + cStart) / stride;
+        for (let c = cStart, k = 0; c < cols; c += stride, k++) out[dst + k] = get(rowSrc + c * elsize);
       }
       return;
     }
