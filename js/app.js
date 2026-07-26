@@ -3545,11 +3545,12 @@ async function loadSatScene(key) {
       if (!current()) return;
       if (productId === state.sat.productId) break;
     }
-    // WebKit's process limit is much lower than desktop browsers'. The worker's
-    // parsed NetCDF/Himawari source can be far larger than the downsampled scene
-    // transferred to the page, so release it before allocating the RGBA texture.
-    // A later product switch can reload the source on demand.
-    if (CONSTRAINED_DEVICE) clearSceneCache();
+    // The worker's cached scene used to pin the whole downloaded source file —
+    // 52 MB for a CONUS scan, 320 MB for a full disk — which WebKit's process
+    // limit would not tolerate alongside the RGBA texture, so phones dropped it
+    // after every load. goes.js now reads those files by range: the retained
+    // source is a few MB of header, and keeping it lets a product switch add a
+    // band without re-reading anything it already has.
     setStatus(`rendering ${satProviderName()}…`, true);
     if (ownsLoadChrome(chrome)) el.decoding.classList.add('show');
     state.sat.scene = scene;
