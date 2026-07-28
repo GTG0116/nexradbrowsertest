@@ -33,10 +33,10 @@ export function glmTimeForKey(key) {
   return d;
 }
 
-async function listHour(bucket, dateUTC, hour) {
+async function listHour(bucket, dateUTC, hour, signal = null) {
   const prefix = `GLM-L2-LCFA/${dateUTC.getUTCFullYear()}/${pad(dayOfYear(dateUTC), 3)}/${pad(hour)}/`;
   const url = `${bucket}/?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`;
-  const res = await fetch(url);
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`GLM list failed: ${res.status}`);
   const xml = await res.text();
   const keys = [];
@@ -50,16 +50,23 @@ async function listHour(bucket, dateUTC, hour) {
 // hour boundary, so both hour folders are listed (they are cached below, so a
 // minute-by-minute meso loop lists each folder once).
 const hourCache = new Map();
-async function cachedHour(bucket, date, hour) {
+async function cachedHour(bucket, date, hour, signal = null) {
   const ck = `${bucket}|${date.getUTCFullYear()}|${dayOfYear(date)}|${hour}`;
   if (!hourCache.has(ck)) {
-    hourCache.set(ck, listHour(bucket, date, hour).catch(() => []));
+    // A listing that failed (or was cut short by the caller's time budget) must
+    // not stay cached as "this hour has no lightning" — that would leave every
+    // later frame in the loop silently lightning-free. Drop it so the next call
+    // lists the folder again.
+    hourCache.set(ck, listHour(bucket, date, hour, signal).catch(() => {
+      hourCache.delete(ck);
+      return [];
+    }));
     if (hourCache.size > 8) hourCache.delete(hourCache.keys().next().value);
   }
   return hourCache.get(ck);
 }
 
-export async function listGlmGranules(satKey, from, to) {
+export async function listGlmGranules(satKey, from, to, signal = null) {
   const sat = SATELLITES[satKey];
   if (!sat || (sat.family || 'goes') !== 'goes') return [];
   const hours = new Set();
@@ -67,7 +74,7 @@ export async function listGlmGranules(satKey, from, to) {
     hours.add(t);
   const lists = await Promise.all([...hours].map((t) => {
     const d = new Date(t);
-    return cachedHour(sat.bucket, d, d.getUTCHours());
+    return cachedHour(sat.bucket, d, d.getUTCHours(), signal);
   }));
   const out = [];
   for (const keys of lists) {
@@ -90,10 +97,10 @@ export async function listGlmGranules(satKey, from, to) {
 const granuleCache = new Map();
 const GRANULE_CACHE_MAX = 48;
 
-async function readGranule(bucket, key) {
+async function readGranule(bucket, key, signal = null) {
   if (granuleCache.has(key)) return granuleCache.get(key);
   const load = (async () => {
-    const res = await fetch(`${bucket}/${key}`);
+    const res = await fetch(`${bucket}/${key}`, signal ? { signal } : undefined);
     if (!res.ok) throw new Error(`GLM download failed: ${res.status}`);
     const h5 = new HDF5File(new Uint8Array(await res.arrayBuffer()));
     const lat = await h5.readVariable('flash_lat');
@@ -122,17 +129,35 @@ async function readGranule(bucket, key) {
 // Every good flash detected in [from, to). A granule that fails to load is
 // skipped rather than failing the retrieval — lightning is an enhancement to the
 // infrared estimate, not a requirement for it.
-export async function loadFlashes(satKey, from, to, { concurrency = 6 } = {}) {
+//
+// `budgetMs` bounds the whole read. Five minutes of flashes is fifteen granules
+// per frame, and nothing in fetch times out on its own: one request left hanging
+// by a phone's connection would otherwise stall the caller for as long as the
+// browser holds it open, and a display waiting on this would never paint. When
+// the budget runs out the in-flight reads are aborted and whatever arrived is
+// returned — a partial density, or none.
+export async function loadFlashes(satKey, from, to, { concurrency = 6, budgetMs = 0 } = {}) {
   const sat = SATELLITES[satKey];
   if (!sat) return { lat: new Float32Array(0), lon: new Float32Array(0), granules: 0 };
-  const granules = await listGlmGranules(satKey, from, to);
+  const controller = budgetMs > 0 && typeof AbortController === 'function' ? new AbortController() : null;
+  const signal = controller ? controller.signal : null;
+  const expiry = controller ? setTimeout(() => controller.abort(), budgetMs) : null;
+  try {
+    return await collectFlashes(sat, satKey, from, to, concurrency, signal);
+  } finally {
+    if (expiry !== null) clearTimeout(expiry);
+  }
+}
+
+async function collectFlashes(sat, satKey, from, to, concurrency, signal) {
+  const granules = await listGlmGranules(satKey, from, to, signal).catch(() => []);
   const parts = [];
   let next = 0;
   const lane = async () => {
     for (;;) {
       const i = next++;
       if (i >= granules.length) return;
-      try { parts.push(await readGranule(sat.bucket, granules[i].key)); } catch (_) { /* skip */ }
+      try { parts.push(await readGranule(sat.bucket, granules[i].key, signal)); } catch (_) { /* skip */ }
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, granules.length) }, lane));

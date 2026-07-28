@@ -194,7 +194,10 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
     HDF5 reader, grids five minutes of good-quality flashes onto the scene, and
     lets that density both raise the rate and overrule the screens — lightning is
     the one direct observation of convective intensity a geostationary platform
-    has, and it is what keeps a real core raining;
+    has, and it is what keeps a real core raining. Fifteen granules per frame is
+    also the slowest part of the product on a phone, so the read runs on a time
+    budget: when it expires the frame is drawn from the imagery alone rather than
+    waiting on requests the connection is not going to finish;
   - a rate compression about 4 mm/hr, because the power law's cold tail swings
     far more day to day than the radar's does.
 

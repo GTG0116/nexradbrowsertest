@@ -18,7 +18,7 @@ import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, scen
 import { loadSceneAsync, ensureBandsAsync, evictScene, clearSceneCache } from './satClient.js';
 import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS,
   SAT_PRECIP, SAT_PRECIP_ID, precipGradientCSS } from './satProducts.js';
-import { computePrecipRate, flashDensityGrid, PRECIP_GLM_MINUTES } from './satPrecip.js';
+import { computePrecipRate, flashDensityGrid, PRECIP_GLM_MINUTES, PRECIP_IR_BAND } from './satPrecip.js';
 import { loadFlashes } from './glm.js';
 import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { MIRS_PRODUCTS, MIRS_ORDER, isMirsSat, listMirsScenes, loadMirsGrid, mirsGridBBox } from './mirs.js';
@@ -3125,16 +3125,24 @@ function satPrecipAvailable(satKey = state.sat.satKey, sectorKey = state.sat.sec
   return !!sat && (sat.family || 'goes') === 'goes' && (sectorKey === 'meso1' || sectorKey === 'meso2');
 }
 
+// How long the lightning read may hold up the picture. Five minutes of GLM is
+// fifteen granules per frame, and on a phone's connection that is where this
+// product spends its time; past this the rain rate is drawn from the imagery
+// alone rather than leaving the frame blank for as long as the requests hang.
+const PRECIP_GLM_BUDGET_MS = 8000;
+
 // Build (once per scene) the rain-rate field the PRECIP product colours. The
 // infrared part is local work; the lightning part is a short window of GLM
-// granules, and a failure there degrades to an imagery-only estimate rather than
-// failing the product.
+// granules, and a failure there — or a connection too slow to finish it inside
+// the budget — degrades to an imagery-only estimate rather than failing the
+// product or holding the frame back.
 async function ensureSatPrecipField(scene, satKey) {
   if (!scene || scene.channels.RR) return scene;
   const end = scene.time || new Date();
   let density = null;
   try {
-    const flashes = await loadFlashes(satKey, new Date(end.getTime() - PRECIP_GLM_MINUTES * 60000), end);
+    const flashes = await loadFlashes(satKey, new Date(end.getTime() - PRECIP_GLM_MINUTES * 60000), end,
+      { budgetMs: PRECIP_GLM_BUDGET_MS });
     density = flashDensityGrid(scene, flashes, PRECIP_GLM_MINUTES, lonLatToColRow);
   } catch (error) {
     console.warn('GLM lightning unavailable; precip estimate is infrared-only', error);
@@ -3146,9 +3154,25 @@ async function ensureSatPrecipField(scene, satKey) {
 // Everything a satellite product needs on a scene before it can be rendered: the
 // channels it reads, plus the derived field if it is a derived product.
 async function ensureSatProductData(scene, satKey, sectorKey, productId) {
+  if (productId === SAT_PRECIP_ID) return ensureSatPrecipData(scene, satKey, sectorKey);
   await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(productId));
-  if (productId === SAT_PRECIP_ID) await ensureSatPrecipField(scene, satKey);
   return scene;
+}
+
+// The precipitation retrieval reads three channels, but only the 10.3 µm window
+// is load-bearing: satPrecip.js runs without the split-window cirrus screen and
+// the water-vapour overshooting-top boost, it just runs coarser. Losing one of
+// those two to a flaky connection used to fail the whole product — a blank frame
+// where a slightly rougher estimate was available — so they are retried alone
+// and then given up on.
+async function ensureSatPrecipData(scene, satKey, sectorKey) {
+  try {
+    await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(SAT_PRECIP_ID));
+  } catch (error) {
+    console.warn('satellite precip: full band set unavailable, falling back to the window channel', error);
+    await ensureBandsAsync(scene, satKey, sectorKey, [PRECIP_IR_BAND]);
+  }
+  return ensureSatPrecipField(scene, satKey);
 }
 
 function selectedConusView() {

@@ -35,8 +35,11 @@
 // tuned against.
 
 // The channels the retrieval reads: 6.2 µm upper-level water vapour, 10.3 µm
-// "clean" IR window, 12.3 µm "dirty" IR window.
-export const PRECIP_BANDS = [8, 13, 15];
+// "clean" IR window, 12.3 µm "dirty" IR window. The window channel carries the
+// core curve and is the one the field cannot be built without; the other two
+// drive screens that computePrecipRate skips when they are absent.
+export const PRECIP_IR_BAND = 13;
+export const PRECIP_BANDS = [8, PRECIP_IR_BAND, 15];
 
 // How far back from the scan time GLM flashes are accumulated. Long enough for a
 // stable density in a sector that is rescanned every minute, short enough that
