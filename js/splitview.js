@@ -13,7 +13,7 @@ import { MRMS_PRODUCTS, MRMS_ORDER, listMrms, loadMrms } from './mrms.js';
 import { MODEL_PRODUCTS, MODEL_CATEGORIES, loadModel, modelSupports } from './models.js';
 import { OBS_PRODUCTS, OBS_CATEGORIES } from './observations.js';
 import { OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
-import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA } from './satProducts.js';
+import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, SAT_PRECIP, SAT_PRECIP_ID, bandsFor, buildRGBA } from './satProducts.js';
 import { sceneBBox } from './goes.js';
 import { ensureBandsAsync } from './satClient.js';
 import { applyMapStyle, liftBoundaryLayers } from './mapStyle.js';
@@ -600,7 +600,12 @@ export class SplitView {
     if (m === 'satellite') {
       const ch = SAT_CHANNELS.map((c) => ['C' + p2(c.band), 'C' + p2(c.band)]);
       const rgb = SAT_RGB_ORDER.map((id) => ['RGB_' + id, SAT_RGB[id].short]);
-      return [...ch, ...rgb];
+      // The derived precipitation retrieval only exists on the sectors the host
+      // offers it on; pairing it against an ABI channel in the other pane is one
+      // of the more useful things a split can show.
+      const derived = this.ctx.satPrecipAvailable && this.ctx.satPrecipAvailable()
+        ? [[SAT_PRECIP_ID, SAT_PRECIP.short]] : [];
+      return [...ch, ...rgb, ...derived];
     }
     return [];
   }
@@ -889,7 +894,12 @@ export class SplitView {
       layer.setSmooth(state.smooth);
       if (this.ctx.onPaneRendered) this.ctx.onPaneRendered(pane);
     };
-    ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(id)).then(draw).catch((e) => console.error(e));
+    // Derived products (the precipitation retrieval) need more than their bands
+    // decoded, so prefer the host's own preparation step when it supplies one.
+    const prepare = this.ctx.ensureSatProduct
+      ? this.ctx.ensureSatProduct(scene, state.sat.satKey, state.sat.sectorKey, id)
+      : ensureBandsAsync(scene, state.sat.satKey, state.sat.sectorKey, bandsFor(id));
+    prepare.then(draw).catch((e) => console.error(e));
   }
 
   async _renderGrid(mode, pane) {
@@ -1051,6 +1061,12 @@ export class SplitView {
     if (!scene) return null;
     const cr = this.ctx.lonLatToColRow ? this.ctx.lonLatToColRow(scene, lat, lon) : null;
     if (!cr) return { out: true };
+    if (id === SAT_PRECIP_ID) {
+      const rr = scene.channels.RR;
+      const v = rr ? rr[Math.round(cr.row) * scene.width + Math.round(cr.col)] : NaN;
+      if (!Number.isFinite(v)) return { main: 'no data', sub: SAT_PRECIP_ID };
+      return { main: `${v.toFixed(v < 10 ? 1 : 0)} mm/hr`, sub: 'sat. precip estimate' };
+    }
     if (!id.startsWith('C')) {
       const rgb = SAT_RGB[id.replace(/^RGB_/, '')];
       return { main: rgb ? rgb.short : id, sub: 'RGB composite' };

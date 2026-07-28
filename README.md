@@ -145,6 +145,19 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   **fractal heaps**, chunked data indexed by a v1 B-tree, and the **shuffle +
   deflate** filter pipeline (deflate via the platform `DecompressionStream`). No
   HDF5 library — just the bytes.
+- **Windowed decode for cropped views.** Reading a whole sector to draw a corner
+  of it was the biggest cost a large sector paid. When the view is a regional
+  CONUS framing or a cyclone box, the lon/lat box is resolved against the fixed
+  grid *before* any data is read (`windowForBBox`), and the reader downloads,
+  inflates and scatters only the chunks that rectangle crosses; the rest of the
+  scene comes back as no-data and renders transparent. A NetCDF CONUS band is 29
+  chunks of 52 full-width rows, so a regional view keeps the handful its latitude
+  band crosses. Measured against the live buckets: a four-band GeoColor CONUS
+  load drops from 18.0 MB to 6.6 MB (Southern Plains) or 4.8 MB (Mid-Atlantic),
+  and a cyclone-sized box on a GOES full disk from 26.5 MB / 2.5 s to 5.5 MB /
+  0.53 s. Himawari's full disk gets the same treatment one level up: its ten HSD
+  segments are equal row bands, so a crop skips the ones it does not cross before
+  they are downloaded.
 - **Sectors**: GOES full-disk, CONUS, and both mesoscale floaters, plus a set of
   familiar **regional CONUS framings** (Southern Plains, Midwest, Northeast …).
   Himawari offers the Full Disk plus the higher-resolution **Japan** and
@@ -159,6 +172,42 @@ sources, selectable from the **RADAR / SAT / MRMS** switch in the Source panel.
   across the solar terminator, shaded per pixel from the scene's scan time), True
   Color (with synthetic green), Natural Color, Day Cloud Phase, Air Mass and Night
   Microphysics.
+- **Satellite precipitation rate** (`js/satPrecip.js`, `js/glm.js`) — a derived
+  product on the GOES **mesoscale sectors**, where the 1-minute refresh is
+  pointed at the convection anyway. Geostationary imagers do not see rain, they
+  see cloud tops, so this is an inference, built the way NESDIS's Auto-Estimator
+  and Hydro-Estimator build theirs:
+  - a core rate from the 10.3 µm clean-IR brightness temperature via the
+    **Auto-Estimator power law** (Vicente et al. 1998), `R = 1.1183×10¹¹ ·
+    exp(−3.6382×10⁻² · T^1.2)`;
+  - the **Hydro-Estimator's context correction** — each pixel against the mean
+    temperature of the cloud within ~60 km. Raining cores are colder than their
+    surroundings; the anvil streaming downwind is not. Without it every cirrus
+    shield rains, which is the classic failure of IR-only QPE;
+  - a **split-window thin-cirrus screen** on 10.3 − 12.3 µm, which removes the
+    semi-transparent cloud the context test leaves behind (the sharpest control
+    in the retrieval — loosening it roughly halves the categorical skill);
+  - an **overshooting-top boost** from 6.2 µm water vapour against the window
+    channel, flagging tops that have punched into the stratosphere;
+  - a **GLM lightning enhancement**. `js/glm.js` reads the 20-second
+    `GLM-L2-LCFA` flash granules from the same bucket through the same in-house
+    HDF5 reader, grids five minutes of good-quality flashes onto the scene, and
+    lets that density both raise the rate and overrule the screens — lightning is
+    the one direct observation of convective intensity a geostationary platform
+    has, and it is what keeps a real core raining;
+  - a rate compression about 4 mm/hr, because the power law's cold tail swings
+    far more day to day than the radar's does.
+
+  It is coloured on MRMS PrecipRate's own ramp so the two can be compared by eye,
+  in split view or by flipping to MRMS mode. **It is not a QPE product**: warm-rain
+  processes (shallow showers, orographic rain, drizzle) have warm tops and read as
+  no rain, cold non-precipitating cirrus can still read as light rain, and the
+  operational Hydro-Estimator's NWP moisture correction is absent, so the bias
+  moves with the environment. `tools/compare-precip-mrms.mjs` scores it against
+  MRMS PrecipRate on live data, which is what the constants are tuned against;
+  across three independent days of mesoscale sectors it runs at a mean-rate bias
+  of 0.7–1.6×, correlation 0.15–0.42 against 1 km radar, and CSI ≈ 0.26–0.36 at
+  0.5 mm/hr.
 - **GPU geostationary projection** (`js/satelliteLayer.js`): a fragment shader
   inverts web-mercator to lon/lat and runs the geostationary fixed-grid navigation
   *backwards* per pixel, so the imagery stays crisp at any zoom.
