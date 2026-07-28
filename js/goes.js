@@ -389,20 +389,79 @@ function decodeBudget(maxDim, bandCount) {
 // near-IR bands, brightness temperature K for the IR bands). Fill → NaN.
 // `stride` decimates during the read itself, so a phone never materialises the
 // full-resolution array on its way to the downsampled one it displays.
-async function readChannel(h5, band, stride = 1) {
+// `window` (full-resolution grid cells) restricts the read to one rectangle;
+// everything outside it stays NaN, and its chunks are never downloaded.
+async function readChannel(h5, band, stride = 1, window = null) {
   const name = `CMI_C${pad(band)}`;
-  const v = await h5.readVariable(name, { stride });
+  const v = await h5.readVariable(name, { stride, window });
   const a = await h5.readAttributesAsync(name);
   const scale = a.scale_factor != null ? a.scale_factor : 1;
   const offset = a.add_offset != null ? a.add_offset : 0;
   const fill = v.fill;
   const n = v.data.length;
   const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const raw = v.data[i];
-    out[i] = raw === fill ? NaN : raw * scale + offset;
+  const w = v.window;
+  if (!w) {
+    for (let i = 0; i < n; i++) {
+      const raw = v.data[i];
+      out[i] = raw === fill ? NaN : raw * scale + offset;
+    }
+    return out;
+  }
+  // Only the decoded rectangle carries data, so the unit conversion — a pass
+  // over several million cells at full CONUS size — runs over it alone.
+  out.fill(NaN);
+  const rowW = v.dims[1];
+  for (let y = w.y; y < w.y + w.height; y++) {
+    const base = y * rowW;
+    for (let x = w.x; x < w.x + w.width; x++) {
+      const raw = v.data[base + x];
+      if (raw !== fill) out[base + x] = raw * scale + offset;
+    }
   }
   return out;
+}
+
+// The grid rectangle covering a lon/lat box, in full-resolution scene cells.
+//
+// Decoding a whole sector to display a corner of it is the single biggest cost
+// a cropped satellite view pays: a CONUS regional view or a cyclone box on a
+// full disk needs a small band of the fixed grid, but every chunk of every
+// requested channel was being downloaded and inflated. The box is walked around
+// its perimeter through the same inverse navigation the display crop uses, so
+// the decoded rectangle always contains the rectangle that ends up on screen.
+//
+// Returns null when the box covers most of the grid (no work worth skipping),
+// when it misses the disk entirely, or when there is no box at all.
+export function windowForBBox(geom, bbox, padCells = 8) {
+  if (!bbox) return null;
+  const [w, s, e, n] = bbox;
+  let minC = Infinity, minR = Infinity, maxC = -Infinity, maxR = -Infinity;
+  const take = (lat, lon) => {
+    const p = lonLatToColRow(geom, lat, lon);
+    if (!p) return;
+    if (p.col < minC) minC = p.col;
+    if (p.col > maxC) maxC = p.col;
+    if (p.row < minR) minR = p.row;
+    if (p.row > maxR) maxR = p.row;
+  };
+  const STEPS = 24;
+  for (let i = 0; i <= STEPS; i++) {
+    const a = i / STEPS;
+    take(s + (n - s) * a, w);
+    take(s + (n - s) * a, e);
+    take(s, w + (e - w) * a);
+    take(n, w + (e - w) * a);
+  }
+  if (!Number.isFinite(minC) || !Number.isFinite(minR)) return null;
+  const x = Math.max(0, Math.floor(minC) - padCells);
+  const y = Math.max(0, Math.floor(minR) - padCells);
+  const x1 = Math.min(geom.width, Math.ceil(maxC) + padCells);
+  const y1 = Math.min(geom.height, Math.ceil(maxR) + padCells);
+  if (x1 <= x || y1 <= y) return null;
+  const area = (x1 - x) * (y1 - y);
+  if (area > 0.8 * geom.width * geom.height) return null;
+  return { x, y, width: x1 - x, height: y1 - y };
 }
 
 
@@ -545,7 +604,7 @@ function withSegmentSlot(job) {
 // Build one ABI channel by downloading and decoding the sector's HSD segments
 // for this frame. `gridRef.grid` is established lazily from the first segment for
 // regional sectors. Missing segments (a scene still uploading) leave NaN gaps.
-async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgress) {
+async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgress, segFilter = null) {
   const ahi = ABI_TO_AHI[abiBand];
   const alloc = () => new Float32Array(gridRef.grid.W * gridRef.grid.H).fill(NaN);
   if (ahi == null) return { data: gridRef.grid ? alloc() : null, nav: null };
@@ -574,6 +633,10 @@ async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgres
   };
   const segments = [];
   for (let s = 1; s <= sector.segments; s++) {
+    // Segments are equal vertical strips of the common grid, so one that lies
+    // entirely outside the displayed crop is skipped before it is downloaded —
+    // a cyclone box on the full disk needs one or two of the ten.
+    if (segFilter && !segFilter(s)) { if (onProgress) onProgress(++done / sector.segments); continue; }
     segments.push(withSegmentSlot(() =>
       fetchBytesRetry(bucket, himawariSegKey(meta, sector, ahi, s))
         .catch(() => null)
@@ -634,7 +697,22 @@ function himawariMetaFromKey(key) {
   return { y, mm, dd, hhmm, frame: +frame, sectorKey, key, time: new Date(base + (+frame - 1) * 150000) };
 }
 
-async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim = 0) {
+// Which of a multi-segment sector's strips a crop needs. The segments split the
+// common grid into `sector.segments` equal row bands, so the crop's row range
+// maps straight onto a range of segment numbers. Returns null (keep all) when
+// the grid or the box leaves it undetermined.
+function himawariSegFilter(grid, sector, sat, bbox) {
+  if (!bbox || !grid || !(sector.segments > 1)) return null;
+  const geom = himawariScene({}, {}, null, grid, sat, '');
+  const win = windowForBBox(geom, bbox);
+  if (!win) return null;
+  const rows = grid.H / sector.segments;
+  const first = Math.max(1, Math.floor(win.y / rows) + 1);
+  const last = Math.min(sector.segments, Math.floor((win.y + win.height - 1) / rows) + 1);
+  return (s) => s >= first && s <= last;
+}
+
+async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim = 0, bbox = null) {
   const meta = HIMAWARI_SCENE_FILES.get(key) || himawariMetaFromKey(key);
   if (!meta) throw new Error('bad Himawari scene key');
   const sector = SECTORS[sectorKey];
@@ -660,9 +738,10 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim 
   // instead of the sum of them. The grid is fixed before this point, so the
   // channels never race on it.
   let done = 0;
+  const segFilter = himawariSegFilter(gridRef.grid, sector, sat, bbox);
   const results = await Promise.all(bands.map((b) =>
     himawariChannel(sat.bucket, meta, sector, b, gridRef,
-      onProgress ? () => onProgress(Math.min(1, (done + 0.5) / bands.length)) : null)
+      onProgress ? () => onProgress(Math.min(1, (done + 0.5) / bands.length)) : null, segFilter)
       .then((r) => { done++; if (onProgress) onProgress(done / bands.length); return { b, r }; })
   ));
   for (const { b, r } of results) {
@@ -671,16 +750,18 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim 
   }
   const scene = himawariScene(meta, channels, nav, gridRef.grid, sat, key);
   scene._maxDim = maxDim || 0;
+  scene._segFilter = segFilter;
+  scene._bboxKey = bboxKey(bbox);
   return scene;
 }
 
 // Download + decode a scene, reading only the channels requested. Returns the
 // grid geometry, the geostationary projection constants, and the per-band
 // physical arrays — everything satProducts.buildRGBA / satelliteLayer need.
-export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDim = 0) {
+export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDim = 0, bbox = null) {
   const sat = SATELLITES[satKey];
   const sector = SECTORS[sectorKey];
-  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim);
+  if ((sat.family || 'goes') === 'himawari') return loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim, bbox);
   const h5 = await openNetCDF(sat.bucket, key, onProgress);
 
   const proj = await h5.readAttributesAsync('goes_imager_projection');
@@ -693,6 +774,21 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
   const [H, W] = shape;
   const stride = maxDim > 0 ? Math.max(1, Math.ceil(Math.max(W, H) / maxDim)) : 1;
   const outW = Math.ceil(W / stride), outH = Math.ceil(H / stride);
+
+  const geoProj = {
+    lon0: (proj.longitude_of_projection_origin || sat.lon0) * Math.PI / 180,
+    H: (proj.perspective_point_height || 35786023) + (proj.semi_major_axis || 6378137),
+    rEq: proj.semi_major_axis || 6378137,
+    rPol: proj.semi_minor_axis || 6356752.31414,
+    sweep: proj.sweep_angle_axis || 'x',
+  };
+  // The rectangle the display will actually show, resolved against the *full*
+  // grid before any data is read, so only its chunks are ever fetched.
+  const win = windowForBBox({
+    width: W, height: H, proj: geoProj,
+    xScale: xa.scale_factor, xOffset: xa.add_offset,
+    yScale: ya.scale_factor, yOffset: ya.add_offset,
+  }, bbox);
 
   const channels = {};
   // Ranged reads have no single download to measure, so the bar advances per
@@ -707,7 +803,7 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
   const [width, readCap] = decodeBudget(maxDim, bands.length);
   h5.maxDataRead = readCap;
   await mapLimit(bands, width, async (b) => {
-    channels[b] = await readChannel(h5, b, stride);
+    channels[b] = await readChannel(h5, b, stride, win);
     if (onProgress) onProgress(base + (1 - base) * (++done / bands.length));
   });
 
@@ -717,20 +813,23 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
     height: outH,
     xScale: xa.scale_factor * stride, xOffset: xa.add_offset,
     yScale: ya.scale_factor * stride, yOffset: ya.add_offset,
-    proj: {
-      lon0: (proj.longitude_of_projection_origin || sat.lon0) * Math.PI / 180,
-      H: (proj.perspective_point_height || 35786023) + (proj.semi_major_axis || 6378137),
-      rEq: proj.semi_major_axis || 6378137,
-      rPol: proj.semi_minor_axis || 6356752.31414,
-      sweep: proj.sweep_angle_axis || 'x',
-    },
+    proj: geoProj,
     channels,
     time: t,
     key,
     _h5: h5, // kept so more bands can be decoded later without re-downloading
     _stride: stride,
     _maxDim: maxDim || 0, // so a later ensureBands keeps the same memory budget
+    _window: win,         // so a later ensureBands decodes the same rectangle
+    _bboxKey: bboxKey(bbox),
   };
+}
+
+// A stable identity for the crop a scene was decoded under. A cached scene can
+// only serve a later request for the same rectangle: one decoded for a regional
+// view holds no data outside it, so a wider request has to re-read the file.
+export function bboxKey(bbox) {
+  return bbox ? bbox.map((v) => Math.round(v * 100) / 100).join(',') : '';
 }
 
 // Decode any of the requested bands not already present on the scene, reusing
@@ -747,7 +846,7 @@ export async function ensureBands(scene, bands) {
     // band-by-band.
     const need = bands.filter((b) => !scene.channels[b]);
     const results = await Promise.all(need.map((b) =>
-      himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef)
+      himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef, null, scene._segFilter || null)
         .then((r) => ({ b, r }))));
     for (const { b, r } of results) if (r.data) scene.channels[b] = r.data;
     return scene;
@@ -760,7 +859,7 @@ export async function ensureBands(scene, bands) {
   const [width, readCap] = decodeBudget(scene._maxDim || 0, need.length);
   scene._h5.maxDataRead = readCap;
   await mapLimit(need, width, async (b) => {
-    scene.channels[b] = await readChannel(scene._h5, b, scene._stride || 1);
+    scene.channels[b] = await readChannel(scene._h5, b, scene._stride || 1, scene._window || null);
   });
   return scene;
 }

@@ -89,9 +89,14 @@ function postControl(message) {
   }
 }
 
-export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress) {
-  return call({ type: 'load', satKey, sectorKey, key, bands, maxDim: constrainedSatelliteMaxDim() }, onProgress)
-    .then((m) => m.scene);
+// `bbox` ([w, s, e, n]) is the lon/lat box the view will actually show. When it
+// is given, only the part of the fixed grid covering it is downloaded and
+// decoded — the rest of the scene comes back as NaN, which renders transparent.
+// The box the caller passes must therefore contain everything it intends to
+// draw; pass null for the whole sector.
+export function loadSceneAsync(satKey, sectorKey, key, bands, onProgress, bbox = null) {
+  return call({ type: 'load', satKey, sectorKey, key, bands, bbox, maxDim: constrainedSatelliteMaxDim() }, onProgress)
+    .then((m) => { m.scene._bbox = bbox; return m.scene; });
 }
 
 // Decode any of `bands` not already on the scene, merging the new channel arrays
@@ -103,8 +108,10 @@ export async function ensureBandsAsync(scene, satKey, sectorKey, bands) {
   const need = [...new Set(bands)].filter((b) => !scene.channels[b]);
   if (!need.length) return scene;
   const request = (want) =>
-    call({ type: 'ensure', satKey, sectorKey, key: scene.key, bands: want, maxDim: scene.maxDim || 0 })
-      .then((m) => { Object.assign(scene.channels, m.channels); });
+    call({
+      type: 'ensure', satKey, sectorKey, key: scene.key, bands: want,
+      maxDim: scene.maxDim || 0, bbox: scene._bbox || null,
+    }).then((m) => { Object.assign(scene.channels, m.channels); });
 
   let lastError = null;
   // Retry both explicit worker failures and successful-but-partial Himawari

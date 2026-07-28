@@ -148,6 +148,34 @@ const MAX_DATA_READ = 8 * 1024 * 1024;
 // resident at any instant.
 const INFLATE_CONCURRENCY = 4;
 
+// Clamp a caller's region of interest to the array, as integer full-resolution
+// cells. Returns null for a missing window or one that covers everything (where
+// the bookkeeping would only cost time).
+function clampWindow(win, dims) {
+  if (!win) return null;
+  const [H, W] = dims;
+  const x0 = Math.max(0, Math.min(W - 1, Math.floor(win.x || 0)));
+  const y0 = Math.max(0, Math.min(H - 1, Math.floor(win.y || 0)));
+  const x1 = Math.max(x0 + 1, Math.min(W, Math.ceil((win.x || 0) + (win.width || W))));
+  const y1 = Math.max(y0 + 1, Math.min(H, Math.ceil((win.y || 0) + (win.height || H))));
+  if (x0 === 0 && y0 === 0 && x1 === W && y1 === H) return null;
+  return { x: x0, y: y0, x1, y1, width: x1 - x0, height: y1 - y0 };
+}
+
+// The same rectangle expressed in the strided output's cells — the rows and
+// columns the read actually wrote, so callers can confine their own per-cell
+// passes (unit conversion, colouring) to them.
+function outputWindow(win, stride, outDims) {
+  if (stride === 1) return { x: win.x, y: win.y, width: win.width, height: win.height };
+  const [outH, outW] = outDims;
+  const x = Math.ceil(win.x / stride), y = Math.ceil(win.y / stride);
+  return {
+    x, y,
+    width: Math.max(0, Math.min(outW, Math.ceil(win.x1 / stride)) - x),
+    height: Math.max(0, Math.min(outH, Math.ceil(win.y1 / stride)) - y),
+  };
+}
+
 // Run `task(item)` over `items` with at most `width` of them in flight.
 export async function mapLimit(items, width, task) {
   let next = 0;
@@ -642,8 +670,20 @@ export class HDF5File {
   // `opts.stride` (2-D variables only) decimates while reading: the output is
   // every Nth row and column, and is allocated at that size. A phone reading a
   // 5424² full-disk band at stride 5 never materialises the 58 MB full array.
-  // Returns { dims, data, elsize, signed, dclass, fill, stride, fullDims } where
-  // `dims` describes the array actually returned.
+  //
+  // `opts.window` ({x, y, width, height}, in *full-resolution* cells, 2-D only)
+  // restricts the read to one rectangle of the array. The output keeps the full
+  // (strided) shape and geometry — only the cells inside the window are decoded,
+  // everything else is left at the fill value. Chunks that miss the rectangle
+  // entirely are never fetched, so a windowed read is cheaper in downloaded
+  // bytes as well as in CPU: that is what makes a regional CONUS view or a
+  // cyclone box on a full disk load in a fraction of the whole sector's time.
+  // A window is only honoured when the variable declares a fill value, since the
+  // undecoded cells have to be distinguishable from real data.
+  //
+  // Returns { dims, data, elsize, signed, dclass, fill, stride, fullDims, window }
+  // where `dims` describes the array actually returned and `window` is the region
+  // actually decoded (in output cells), or null when the whole array was read.
   // -----------------------------------------------------------------------
   async readVariable(name, opts = {}) {
     const meta = await this._resolve(() => this._variableMeta(name));
@@ -653,7 +693,15 @@ export class HDF5File {
     const outDims = dims.map((d) => Math.ceil(d / stride));
     const total = outDims.reduce((a, b) => a * b, 1);
     const out = this._makeTyped(dclass, signed, elsize, total);
-    const result = { dims: outDims, data: out, elsize, signed, dclass, fill, stride, fullDims: dims };
+    const window = dims.length === 2 && fill != null ? clampWindow(opts.window, dims) : null;
+    const result = {
+      dims: outDims, data: out, elsize, signed, dclass, fill, stride, fullDims: dims,
+      window: window ? outputWindow(window, stride, outDims) : null,
+    };
+    // Cells the windowed read never visits must read as "no data", not as the
+    // zero the allocation starts at (which scale/offset would turn into a
+    // plausible-looking physical value).
+    if (window) out.fill(fill);
 
     if (contiguousAddr != null && contiguousAddr !== UNDEF) {
       const full = dims.reduce((a, b) => a * b, 1);
@@ -671,7 +719,7 @@ export class HDF5File {
     }
 
     if (btreeAddr != null && btreeAddr !== UNDEF) {
-      await this._readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride);
+      await this._readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride, window);
       return result;
     }
 
@@ -819,7 +867,7 @@ export class HDF5File {
   // grouped into a handful of large sequential reads (a NetCDF-4 variable's
   // chunks are written contiguously), and each group is released as soon as its
   // chunks are decoded so only one group is resident at a time.
-  async _readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride = 1) {
+  async _readChunked(btreeAddr, dims, chunkDims, elsize, filters, out, dclass, signed, stride = 1, window = null) {
     const rank = dims.length;
     const collect = () => {
       const leaves = [];
@@ -843,7 +891,19 @@ export class HDF5File {
       visit(btreeAddr);
       return leaves;
     };
-    const leaves = await this._resolve(collect);
+    let leaves = await this._resolve(collect);
+
+    // Drop the chunks the window misses before anything is downloaded. A NetCDF
+    // CONUS band is 29 chunks of 52 full-width rows, so a regional view keeps
+    // only the handful its latitude band crosses; a cyclone box on a full disk
+    // keeps a few percent of them.
+    if (window && rank === 2) {
+      const [CH, CW] = chunkDims;
+      leaves = leaves.filter((lf) => {
+        const r0 = lf.offs[0], c0 = lf.offs[1];
+        return r0 < window.y1 && r0 + CH > window.y && c0 < window.x1 && c0 + CW > window.x;
+      });
+    }
 
     const rowStride = []; // element strides for the full array
     rowStride[rank - 1] = 1;
@@ -903,14 +963,14 @@ export class HDF5File {
         if (applied(2)) raw = unshuffle(raw, elsize);
         // Chunks cover disjoint regions of the output, so the scatters below are
         // independent even though several inflates are in flight.
-        this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride);
+        this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride, window);
       });
     }
   }
 
   // `stride` (2-D only) writes just the sampled rows/columns; `out` is then the
   // decimated array, ceil(dim / stride) on each axis.
-  _scatterChunk(rawBytes, offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride = 1) {
+  _scatterChunk(rawBytes, offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride = 1, window = null) {
     const view = new DataView(rawBytes.buffer, rawBytes.byteOffset, rawBytes.length);
     const get =
       dclass === 1 ? (elsize === 4 ? (o) => view.getFloat32(o, true) : (o) => view.getFloat64(o, true))
@@ -925,16 +985,28 @@ export class HDF5File {
       const [CH, CW] = chunkDims;
       const r0 = offs[0], c0 = offs[1];
       const outW = Math.ceil(W / stride);
-      // First sampled row/column at or after the chunk's origin.
-      const rStart = stride === 1 ? 0 : (stride - (r0 % stride)) % stride;
-      const cStart = stride === 1 ? 0 : (stride - (c0 % stride)) % stride;
-      const cols = Math.min(CW, W - c0);
+      // First sampled row/column at or after the chunk's origin — the sampling
+      // lattice is anchored to the *array*, so a chunk starts partway into it.
+      let rStart = stride === 1 ? 0 : (stride - (r0 % stride)) % stride;
+      let cStart = stride === 1 ? 0 : (stride - (c0 % stride)) % stride;
+      let rEnd = CH, cols = Math.min(CW, W - c0);
+      // A windowed read visits only the part of the chunk inside the rectangle,
+      // still on that same lattice so the destination indexing is unchanged.
+      if (window) {
+        const skipTo = (start, want) =>
+          (want > start ? start + Math.ceil((want - start) / stride) * stride : start);
+        rStart = skipTo(rStart, window.y - r0);
+        cStart = skipTo(cStart, window.x - c0);
+        rEnd = Math.min(rEnd, window.y1 - r0);
+        cols = Math.min(cols, window.x1 - c0);
+      }
+      if (rStart >= rEnd || cStart >= cols) return;
       // Same walk as below, but indexing a typed view of the chunk rather than
       // calling a DataView getter for each of the millions of samples a band's
       // chunks carry.
       const el = typedView(rawBytes, dclass, signed, elsize);
       if (el) {
-        for (let r = rStart; r < CH; r += stride) {
+        for (let r = rStart; r < rEnd; r += stride) {
           const gr = r0 + r;
           if (gr >= H) break;
           const rowSrc = r * CW;
@@ -943,7 +1015,7 @@ export class HDF5File {
         }
         return;
       }
-      for (let r = rStart; r < CH; r += stride) {
+      for (let r = rStart; r < rEnd; r += stride) {
         const gr = r0 + r;
         if (gr >= H) break;
         const rowSrc = r * CW * elsize;

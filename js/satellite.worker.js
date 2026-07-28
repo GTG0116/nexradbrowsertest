@@ -14,7 +14,7 @@
 // ensureBands only ever *adds* missing bands and never re-reads the ones already
 // sent.
 
-import { loadScene, ensureBands } from './goes.js';
+import { loadScene, ensureBands, bboxKey } from './goes.js';
 
 // LRU of decoded scenes, so ensureBands can add bands without a re-download while
 // keeping memory bounded (each cached GOES scene pins its downloaded file bytes).
@@ -91,7 +91,7 @@ self.onmessage = async (e) => {
     }
     if (type === 'load') {
       const epoch = cacheEpoch;
-      const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim);
+      const scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim, msg.bbox);
       if (epoch === cacheEpoch) remember(msg.key, scene);
       const { slim, transfer } = slimScene(scene, msg.bands, msg.maxDim);
       self.postMessage({ id, ok: true, scene: slim }, transfer);
@@ -101,9 +101,12 @@ self.onmessage = async (e) => {
       const epoch = cacheEpoch;
       let scene = scenes.get(msg.key);
       let added = msg.bands;
+      // A scene decoded for one crop holds nothing outside it, so a request for
+      // a different crop has to re-read the file rather than reuse it.
+      if (scene && (scene._bboxKey || '') !== bboxKey(msg.bbox)) scene = null;
       if (!scene) {
         // Evicted (or this worker never had it): reload just the bands wanted.
-        scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim);
+        scene = await loadScene(msg.satKey, msg.sectorKey, msg.key, msg.bands, progress, msg.maxDim, msg.bbox);
         if (epoch === cacheEpoch) remember(msg.key, scene);
       } else {
         const before = new Set(Object.keys(scene.channels));

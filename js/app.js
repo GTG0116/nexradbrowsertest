@@ -16,7 +16,10 @@ import { applyMapStyle, liftBoundaryLayers, normalizeMapStyle, DEFAULT_MAP_STYLE
 import { OutlookController, OUTLOOKS, OUTLOOK_ORDER, loadOutlookData } from './outlooks.js';
 import { SATELLITES, SECTORS, CONUS_VIEWS, sectorsForSatellite, listScenes, sceneBBox, lonLatToColRow } from './goes.js';
 import { loadSceneAsync, ensureBandsAsync, evictScene, clearSceneCache } from './satClient.js';
-import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS } from './satProducts.js';
+import { SAT_CHANNELS, SAT_RGB, SAT_RGB_ORDER, bandsFor, buildRGBA, WV_BANDS, enhancementGradientCSS,
+  SAT_PRECIP, SAT_PRECIP_ID, precipGradientCSS } from './satProducts.js';
+import { computePrecipRate, flashDensityGrid, PRECIP_GLM_MINUTES } from './satPrecip.js';
+import { loadFlashes } from './glm.js';
 import { createSatelliteLayer, SATELLITE_LAYER_ID } from './satelliteLayer.js';
 import { MIRS_PRODUCTS, MIRS_ORDER, isMirsSat, listMirsScenes, loadMirsGrid, mirsGridBBox } from './mirs.js';
 import { MRMS_PRODUCTS, MRMS_ORDER, MRMS_CATEGORIES, listMrms, loadMrms } from './mrms.js';
@@ -3096,6 +3099,45 @@ function normalizeSatProduct() {
   const mirs = isMirsSat(state.sat.satKey);
   if (mirs && !MIRS_PRODUCTS[state.sat.productId]) state.sat.productId = 'BT89';
   if (!mirs && MIRS_PRODUCTS[state.sat.productId]) state.sat.productId = 'C13';
+  if (state.sat.productId === SAT_PRECIP_ID && !satPrecipAvailable()) state.sat.productId = 'C13';
+}
+
+// The satellite precipitation retrieval is offered on the GOES mesoscale sectors
+// only. They are the sectors it is calibrated on and the ones it makes sense for:
+// a 1-minute refresh over the convection that is actually being watched, small
+// enough that the neighbourhood statistics and the GLM gridding stay cheap, and
+// (for GOES-East/West) inside the MRMS domain the estimate was scored against.
+// Himawari has no lightning mapper in these buckets and no radar to check
+// against, so it is left out.
+function satPrecipAvailable(satKey = state.sat.satKey, sectorKey = state.sat.sectorKey) {
+  const sat = SATELLITES[satKey];
+  return !!sat && (sat.family || 'goes') === 'goes' && (sectorKey === 'meso1' || sectorKey === 'meso2');
+}
+
+// Build (once per scene) the rain-rate field the PRECIP product colours. The
+// infrared part is local work; the lightning part is a short window of GLM
+// granules, and a failure there degrades to an imagery-only estimate rather than
+// failing the product.
+async function ensureSatPrecipField(scene, satKey) {
+  if (!scene || scene.channels.RR) return scene;
+  const end = scene.time || new Date();
+  let density = null;
+  try {
+    const flashes = await loadFlashes(satKey, new Date(end.getTime() - PRECIP_GLM_MINUTES * 60000), end);
+    density = flashDensityGrid(scene, flashes, PRECIP_GLM_MINUTES, lonLatToColRow);
+  } catch (error) {
+    console.warn('GLM lightning unavailable; precip estimate is infrared-only', error);
+  }
+  scene.channels.RR = computePrecipRate(scene, density);
+  return scene;
+}
+
+// Everything a satellite product needs on a scene before it can be rendered: the
+// channels it reads, plus the derived field if it is a derived product.
+async function ensureSatProductData(scene, satKey, sectorKey, productId) {
+  await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(productId));
+  if (productId === SAT_PRECIP_ID) await ensureSatPrecipField(scene, satKey);
+  return scene;
 }
 
 function selectedConusView() {
@@ -3344,7 +3386,10 @@ function initSatSelects() {
     state.sat._bbox = null;
     const v = CONUS_VIEWS[+el.conusViewSelect.value];
     if (v && state.map) state.map.fitBounds([[v[1][0], v[1][1]], [v[1][2], v[1][3]]], { padding: 12, animate: true });
-    if (state.mode === 'satellite' && state.sat.scene) renderSatellite();
+    // The loaded scene only holds the region it was decoded for, so a new region
+    // is a reload rather than a re-render of what is already in memory. It is
+    // also what makes the switch quick: the new region's chunks are all it reads.
+    if (state.mode === 'satellite' && state.sat.sceneKey) loadSatScene(state.sat.sceneKey);
     saveSettings();
     });
   el.irEnhanceToggle.addEventListener('click', () => {
@@ -3413,7 +3458,7 @@ function buildSatProductButtons() {
       if (scene) {
         setStatus(`rendering ${satProviderName()}…`, true);
         try {
-          await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(id));
+          await ensureSatProductData(scene, satKey, sectorKey, id);
           if (!current()) return;
           renderSatellite();
           setStatus(`${satProviderName()} ready`);
@@ -3438,6 +3483,7 @@ function buildSatProductButtons() {
   };
   for (const ch of SAT_CHANNELS) add('C' + p2(ch.band), 'C' + p2(ch.band), `${ch.name} · ${ch.um}µm`);
   for (const id of SAT_RGB_ORDER) add('RGB_' + id, SAT_RGB[id].short, SAT_RGB[id].name + ' RGB');
+  if (satPrecipAvailable()) add(SAT_PRECIP_ID, SAT_PRECIP.short, SAT_PRECIP.name);
 }
 
 function buildSatList() {
@@ -3533,15 +3579,17 @@ async function loadSatScene(key) {
     return;
   }
   try {
+    // Decode only the crop that will be drawn (a CONUS region, a cyclone box);
+    // null asks for the whole sector.
     const scene = await loadSceneAsync(satKey, sectorKey, key, bandsFor(state.sat.productId), (p) => {
       if (current() && ownsLoadChrome(chrome)) el.progress.style.width = Math.round(p * 100) + '%';
-    });
+    }, satCropBBox());
     if (!current()) return; // a newer selection superseded this one
     // A product can change while the base scene is downloading. Ensure the
     // eventual scene carries whichever bands are current before committing it.
     for (;;) {
       const productId = state.sat.productId;
-      await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(productId));
+      await ensureSatProductData(scene, satKey, sectorKey, productId);
       if (!current()) return;
       if (productId === state.sat.productId) break;
     }
@@ -3672,6 +3720,13 @@ function buildSatLegend() {
   if (isMirsSat(state.sat.satKey) && MIRS_PRODUCTS[id]) {
     const p = resolveGridProduct(MIRS_PRODUCTS[id]);
     el.legend.innerHTML = legendHTML(p, p.scale);
+    return;
+  }
+  if (id === SAT_PRECIP_ID) {
+    el.legend.innerHTML = `
+      <div class="legend-title">${SAT_PRECIP.name} <span>(satellite estimate · ${SAT_PRECIP.unit})</span></div>
+      <div class="legend-bar" style="background:${precipGradientCSS()}"></div>
+      <div class="legend-ticks"><span>0.2</span><span>rain rate (mm/hr)</span><span>100+</span></div>`;
     return;
   }
   if (id.startsWith('C')) {
@@ -5015,7 +5070,12 @@ function layerProductOptions(source, layer = null) {
   if (source === 'satellite') {
     const channels = SAT_CHANNELS.map((c) => ({ value: 'C' + p2(c.band), label: `C${p2(c.band)} - ${c.name}` }));
     const rgbs = SAT_RGB_ORDER.map((id) => ({ value: 'RGB_' + id, label: `${SAT_RGB[id].short} - ${SAT_RGB[id].name}` }));
-    return [...channels, ...rgbs];
+    // A layer that hasn't pinned its own satellite/sector yet draws whatever the
+    // main view is on, so that is what decides whether the derived product applies.
+    const derived = satPrecipAvailable((layer && layer.satKey) || state.sat.satKey,
+      (layer && layer.sectorKey) || state.sat.sectorKey)
+      ? [{ value: SAT_PRECIP_ID, label: `${SAT_PRECIP.short} - ${SAT_PRECIP.name}` }] : [];
+    return [...channels, ...rgbs, ...derived];
   }
   if (source === 'mrms') {
     return MRMS_ORDER.filter((id) => MRMS_PRODUCTS[id]).map((id) => ({ value: id, label: `${id} - ${MRMS_PRODUCTS[id].name}` }));
@@ -5114,6 +5174,7 @@ function layerProductName(layer) {
   if (layer.source === 'radar') return radarProduct(layer.productId)?.name || layer.productId;
   if (layer.source === 'satellite') {
     const id = layer.productId;
+    if (id === SAT_PRECIP_ID) return SAT_PRECIP.name;
     if (id.startsWith('C')) return (SAT_CHANNELS[parseInt(id.slice(1), 10) - 1] || {}).name || id;
     return (SAT_RGB[id.replace(/^RGB_/, '')] || {}).name || id;
   }
@@ -5573,7 +5634,7 @@ async function renderSatelliteUserLayer(layer, seq) {
   if (seq !== state.layers.renderSeq) return;
   if (!got || !got.scene) return;
   const { scene, satKey, sectorKey } = got;
-  await ensureBandsAsync(scene, satKey, sectorKey, bandsFor(layer.productId));
+  await ensureSatProductData(scene, satKey, sectorKey, layer.productId);
   if (seq !== state.layers.renderSeq) return;
   // Only borrow the main view's crop (a CONUS region / cyclone box) when the layer
   // is on the very satellite+sector that crop was computed for; otherwise render
@@ -6340,6 +6401,13 @@ function sampleSatAt(lat, lon) {
   const id = state.sat.productId;
   const cr = lonLatToColRow(scene, lat, lon);
   if (!cr) return { out: true };
+  if (id === SAT_PRECIP_ID) {
+    const rr = scene.channels.RR;
+    if (!rr) return { main: 'no data', sub: SAT_PRECIP_ID };
+    const v = rr[Math.round(cr.row) * scene.width + Math.round(cr.col)];
+    if (!Number.isFinite(v)) return { main: 'no data', sub: SAT_PRECIP_ID };
+    return { main: `${v.toFixed(v < 10 ? 1 : 0)} mm/hr`, sub: `${(v * 0.0393700787).toFixed(2)} in/hr · sat. estimate` };
+  }
   if (!id.startsWith('C'))
     return { main: SAT_RGB[id.replace(/^RGB_/, '')].short, sub: 'RGB composite' };
   const band = parseInt(id.slice(1), 10);
@@ -6392,6 +6460,9 @@ function dockInfo() {
     if (isMirsSat(state.sat.satKey) && MIRS_PRODUCTS[id]) {
       prod = id;
       name = MIRS_PRODUCTS[id].name;
+    } else if (id === SAT_PRECIP_ID) {
+      prod = SAT_PRECIP.short;
+      name = SAT_PRECIP.name;
     } else if (id.startsWith('C')) {
       const band = parseInt(id.slice(1), 10);
       const ch = SAT_CHANNELS[band - 1];
@@ -7701,7 +7772,9 @@ async function buildPlaybackProvider(opts = {}) {
       prefetchAhead: 3,
       frames: frames.map((v) => ({ label: v.label, time: v.time, ck: v.key, key: v.key })),
       async load(f) {
-        const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, f.key, bandsFor(state.sat.productId));
+        const scene = await loadSceneAsync(state.sat.satKey, state.sat.sectorKey, f.key,
+          bandsFor(state.sat.productId), null, satCropBBox());
+        if (state.sat.productId === SAT_PRECIP_ID) await ensureSatPrecipField(scene, state.sat.satKey);
         const payload = buildSatPayload(scene);
         // Playback only needs the prebuilt RGBA per frame, not the channels — drop
         // the worker's cached decode so a long loop can't pin many full-disk files.
@@ -8767,6 +8840,8 @@ function setupMapTools() {
     basemapStyleUrl,
     radarSweepFor,
     satPayloadForProduct: buildSatPayloadForProduct,
+    ensureSatProduct: ensureSatProductData,
+    satPrecipAvailable: () => satPrecipAvailable(),
     lonLatToColRow,
     sampleRadarAtProduct,
     sampleGridRaw,
@@ -9277,7 +9352,8 @@ function productCatalog(mode) {
             ...L3_ORDER.map((id) => [`product:${id}`, L3_PRODUCTS[id].name])];
   if (mode === 'satellite')
     return [...SAT_CHANNELS.map((ch) => [`product:C${p2(ch.band)}`, `C${p2(ch.band)} · ${ch.name}`]),
-            ...SAT_RGB_ORDER.map((id) => [`product:RGB_${id}`, `${SAT_RGB[id].name} RGB`])];
+            ...SAT_RGB_ORDER.map((id) => [`product:RGB_${id}`, `${SAT_RGB[id].name} RGB`]),
+            [`product:${SAT_PRECIP_ID}`, SAT_PRECIP.name]];
   if (mode === 'mrms')
     return MRMS_ORDER.filter((id) => MRMS_PRODUCTS[id]).map((id) => [`product:${id}`, MRMS_PRODUCTS[id].name]);
   if (mode === 'models')

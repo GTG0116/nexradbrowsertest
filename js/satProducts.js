@@ -5,6 +5,50 @@
 // the shader only has to handle the geostationary projection.
 
 import { scanToLonLat } from './goes.js';
+import { PRECIP_BANDS } from './satPrecip.js';
+
+// The derived precipitation-rate product (satPrecip.js). It is not an ABI
+// channel or an RGB recipe: the rain-rate field is computed asynchronously from
+// several channels plus GLM lightning and hung on the scene as `channels.RR`,
+// and this module only colours it.
+export const SAT_PRECIP_ID = 'PRECIP';
+export const SAT_PRECIP = {
+  id: SAT_PRECIP_ID,
+  name: 'Satellite Precip Rate',
+  short: 'SatQPE',
+  unit: 'mm/hr',
+  // Deliberately the MRMS PrecipRate ramp, so the two fields can be compared by
+  // eye — in split view, or by flipping between Satellite and MRMS mode.
+  stops: [
+    [0.2, [120, 200, 255]], [2, [0, 120, 240]], [5, [0, 200, 120]],
+    [10, [230, 220, 0]], [25, [255, 120, 0]], [50, [220, 0, 0]], [100, [255, 0, 255]],
+  ],
+};
+
+// Sample the rain-rate ramp (mm/hr → [r,g,b]), interpolating between stops and
+// clamping past the ends.
+export function precipColor(mm) {
+  const st = SAT_PRECIP.stops;
+  if (mm <= st[0][0]) return st[0][1];
+  for (let i = 0; i < st.length - 1; i++) {
+    const a = st[i], b = st[i + 1];
+    if (mm <= b[0]) {
+      const t = (mm - a[0]) / (b[0] - a[0]);
+      return [a[1][0] + (b[1][0] - a[1][0]) * t, a[1][1] + (b[1][1] - a[1][1]) * t,
+        a[1][2] + (b[1][2] - a[1][2]) * t];
+    }
+  }
+  return st[st.length - 1][1];
+}
+
+// CSS gradient for the legend bar, laid out on the same log scale the eye reads
+// rain rates on.
+export function precipGradientCSS() {
+  const st = SAT_PRECIP.stops;
+  const lo = Math.log(st[0][0]), hi = Math.log(st[st.length - 1][0]);
+  return `linear-gradient(90deg,${st.map(([v, c]) =>
+    `rgb(${c[0]},${c[1]},${c[2]}) ${(((Math.log(v) - lo) / (hi - lo)) * 100).toFixed(1)}%`).join(',')})`;
+}
 
 // ---- the 16 ABI channels ----------------------------------------------------
 // type: 'vis' (reflectance factor 0..~1) or 'ir' (brightness temperature, K).
@@ -79,6 +123,7 @@ export const SAT_RGB_ORDER = ['GEOCOLOR', 'TRUECOLOR', 'NATCOLOR', 'DAYCLOUDPHAS
 
 // Which bands a product needs (so we only download/decode those channels).
 export function bandsFor(productId) {
+  if (productId === SAT_PRECIP_ID) return [...PRECIP_BANDS];
   if (productId.startsWith('C')) return [parseInt(productId.slice(1), 10)];
   const recipe = SAT_RGB[productId.replace(/^RGB_/, '')];
   if (!recipe) return [13];
@@ -366,6 +411,30 @@ export function buildRGBA(scene, productId, opts = {}) {
   const crop = normalizeCrop(scene, opts.crop);
   const out = new Uint8Array(crop.width * crop.height * 4);
   const ch = scene.channels;
+
+  // ---- derived precipitation rate ----
+  // The field itself is built by satPrecip.js while the scene loads; a scene
+  // that hasn't got one yet renders empty rather than throwing, the same way a
+  // missing band does.
+  if (productId === SAT_PRECIP_ID) {
+    const rr = ch.RR;
+    if (!rr) return out;
+    const floor = SAT_PRECIP.stops[0][0];
+    for (let row = crop.y; row < crop.y + crop.height; row++) {
+      const srcBase = row * W;
+      const dstBase = (row - crop.y) * crop.width;
+      for (let col = crop.x; col < crop.x + crop.width; col++) {
+        const v = rr[srcBase + col];
+        const o = (dstBase + (col - crop.x)) * 4;
+        // Below the drizzle floor (and off-Earth) is transparent, so the map and
+        // any radar underneath stay visible where nothing is falling.
+        if (!(v >= floor)) { out[o + 3] = 0; continue; }
+        const c = precipColor(v);
+        out[o] = c[0] | 0; out[o + 1] = c[1] | 0; out[o + 2] = c[2] | 0; out[o + 3] = 255;
+      }
+    }
+    return out;
+  }
 
   // ---- single channel ----
   if (productId.startsWith('C')) {

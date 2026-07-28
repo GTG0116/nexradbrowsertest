@@ -107,6 +107,41 @@ function attrRecord(name, dims, elsize, values) {
   assert.deepEqual(Array.from(out2), Array.from(out));
 }
 
+// Windowed scatter: a read restricted to a rectangle must write exactly the
+// cells inside it and leave everything else untouched, both at stride 1 and
+// combined with decimation. This is what lets a regional CONUS view or a cyclone
+// box skip most of a sector's chunks — the cells it never visits stay at the
+// fill value the caller pre-loaded.
+{
+  const h5 = new HDF5File(blankFile());
+  const H = 16, W = 16;
+  const full = new Int16Array(H * W);
+  for (let i = 0; i < full.length; i++) full[i] = i + 1;   // never 0, so "untouched" is visible
+  const raw = new Uint8Array(full.buffer.slice(0));
+
+  for (const stride of [1, 2]) {
+    const outW = W / stride, outH = H / stride;
+    const win = { x: 5, y: 3, x1: 12, y1: 9, width: 7, height: 6 };
+    const out = new Int16Array(outH * outW);
+    // Four chunks, so chunks fully inside, partly inside and fully outside the
+    // window are all exercised.
+    for (const [r0, c0] of [[0, 0], [0, 8], [8, 0], [8, 8]]) {
+      const chunk = new Int16Array(8 * 8);
+      for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) chunk[r * 8 + c] = full[(r0 + r) * W + c0 + c];
+      h5._scatterChunk(new Uint8Array(chunk.buffer), [r0, c0], [H, W], [8, 8], [W, 1], 2,
+        out, 0, true, stride, win);
+    }
+    for (let y = 0; y < outH; y++) {
+      for (let x = 0; x < outW; x++) {
+        const gy = y * stride, gx = x * stride;
+        const inside = gy >= win.y && gy < win.y1 && gx >= win.x && gx < win.x1;
+        assert.equal(out[y * outW + x], inside ? full[gy * W + gx] : 0,
+          `stride ${stride}, cell ${gx},${gy} (${inside ? 'inside' : 'outside'} the window)`);
+      }
+    }
+  }
+}
+
 // The sparse byte source: reads outside the resident window pull the missing
 // span through the loader and resume, and the faulted metadata stays resident so
 // a later band doesn't re-read the same header.
