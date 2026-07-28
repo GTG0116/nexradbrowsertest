@@ -13,7 +13,7 @@
 //
 // Object keys are  PRODUCT/YYYY/DOY/HH/OR_ABI-L2-<sector>-...<start>_..._c....nc
 
-import { HDF5File } from './hdf5.js';
+import { HDF5File, mapLimit } from './hdf5.js';
 import { MIRS_SOURCES } from './mirs.js';
 import { decodeBzip2 } from './bzip2.js';
 
@@ -374,6 +374,17 @@ async function openNetCDF(bucket, key, onProgress) {
   });
 }
 
+// How many bands to decode at once, and how large one coalesced range read may
+// be while that many are in flight. Their product is roughly what a decode holds
+// in compressed bytes at its peak, so the constrained profile (`maxDim` set — a
+// phone, a touch tablet, or a low-memory device) trades a narrower window for a
+// ceiling comfortably inside mobile WebKit's per-process budget.
+function decodeBudget(maxDim, bandCount) {
+  const constrained = maxDim > 0;
+  return [Math.max(1, Math.min(bandCount, constrained ? 2 : 4)),
+    constrained ? 4 * 1024 * 1024 : 8 * 1024 * 1024];
+}
+
 // Read one ABI channel into physical units (reflectance factor for the visible/
 // near-IR bands, brightness temperature K for the IR bands). Fill → NaN.
 // `stride` decimates during the read itself, so a phone never materialises the
@@ -500,6 +511,37 @@ function resampleHsd(hdr, grid, out) {
   }
 }
 
+// How many HSD segments may be downloading (and holding their compressed bytes)
+// at once, across every band of a scene. A full-disk RGB recipe is four bands of
+// ten segments each: firing all forty at once queued them behind one another on
+// the connection anyway, while pinning forty compressed segments — tens of
+// megabytes that a phone does not have to spare. A window wide enough to keep
+// the connection pool busy loads just as fast with a fraction of the peak.
+let segmentSlots = 8;
+let segmentsInFlight = 0;
+const segmentQueue = [];
+
+function releaseSegmentSlot() {
+  segmentsInFlight--;
+  while (segmentsInFlight < segmentSlots && segmentQueue.length) segmentQueue.shift()();
+}
+
+// Run `job` once a slot is free, holding the slot until it settles. The job
+// covers the decode as well as the download, so the queue also throttles how
+// many decompressed segments can exist at once.
+function withSegmentSlot(job) {
+  if (segmentsInFlight < segmentSlots) {
+    segmentsInFlight++;
+    return job().finally(releaseSegmentSlot);
+  }
+  return new Promise((resolve, reject) => {
+    segmentQueue.push(() => {
+      segmentsInFlight++;
+      job().finally(releaseSegmentSlot).then(resolve, reject);
+    });
+  });
+}
+
 // Build one ABI channel by downloading and decoding the sector's HSD segments
 // for this frame. `gridRef.grid` is established lazily from the first segment for
 // regional sectors. Missing segments (a scene still uploading) leave NaN gaps.
@@ -507,32 +549,40 @@ async function himawariChannel(bucket, meta, sector, abiBand, gridRef, onProgres
   const ahi = ABI_TO_AHI[abiBand];
   const alloc = () => new Float32Array(gridRef.grid.W * gridRef.grid.H).fill(NaN);
   if (ahi == null) return { data: gridRef.grid ? alloc() : null, nav: null };
-  // Fetch every segment concurrently. The full disk is 10 vertical strips, and
-  // downloading them one-at-a-time — each its own S3 round-trip before the next
-  // could even start — was the dominant cost of loading a Himawari frame. Firing
-  // all the requests at once lets the browser saturate its connection pool, so
-  // wall-clock load time drops toward that of a single segment. The CPU-bound
-  // bzip2 decode + resample still runs sequentially below (in segment order),
-  // which is what the resample needs anyway.
+  // Decode each segment the moment it lands, rather than holding all ten and
+  // then decompressing them in one blocking sweep. Two things follow: the pure-JS
+  // bzip2 decode of one segment overlaps the download of the next instead of
+  // starting only after the last byte of the last one arrives, and a segment's
+  // compressed bytes become collectable as soon as it has been resampled.
+  //
+  // Segments cover disjoint line ranges of the common grid, so resampling them
+  // in arrival order lands exactly the same image as segment order would.
+  //
+  // The output is still allocated by the first segment that actually decodes
+  // rather than up front: `data: null` is what tells the caller that no segment
+  // arrived at all (see below).
+  let out = null;
+  let nav = null;
   let done = 0;
-  const segFetches = [];
-  for (let s = 1; s <= sector.segments; s++) {
-    segFetches.push(
-      fetchBytesRetry(bucket, himawariSegKey(meta, sector, ahi, s))
-        .catch(() => null)
-        .then((bytes) => { if (onProgress) onProgress(++done / sector.segments); return bytes; })
-    );
-  }
-  const segments = await Promise.all(segFetches);
-  let out = null, nav = null;
-  for (const bytes of segments) {
-    if (!bytes) continue;
+  const decode = (bytes) => {
+    if (!bytes) return;
     const hdr = parseHsdHeader(bytes);
     if (!gridRef.grid) gridRef.grid = sector.grid || deriveGrid(hdr, sector.commonCFAC);
     if (!out) out = alloc();
     resampleHsd(hdr, gridRef.grid, out);
     if (!nav) nav = hdr.nav;
+  };
+  const segments = [];
+  for (let s = 1; s <= sector.segments; s++) {
+    segments.push(withSegmentSlot(() =>
+      fetchBytesRetry(bucket, himawariSegKey(meta, sector, ahi, s))
+        .catch(() => null)
+        .then((bytes) => {
+          if (onProgress) onProgress(++done / sector.segments);
+          decode(bytes);
+        })));
   }
+  await Promise.all(segments);
   // If *no* segment came back (a transient S3 failure — nothing decoded), leave
   // the band absent (data: null) rather than caching an all-NaN array. A cached
   // NaN array reads as "present" forever, so a product switch that needs it would
@@ -563,6 +613,13 @@ function himawariScene(meta, channels, nav, grid, sat, key) {
   };
 }
 
+// Keep the same download/decode window a later ensureBands would need, without
+// re-deriving the device profile: a scene decoded under the constrained budget
+// keeps it when a product switch pulls in more bands.
+function restoreSegmentSlots(scene) {
+  segmentSlots = scene && scene._maxDim > 0 ? 5 : 8;
+}
+
 // Reconstruct a Himawari scene's metadata straight from its key
 // (`HIMAWARI:<sector>:<YYYYMMDDHHMM>:<frame>`). The listing populates an in-memory
 // index for the page, but a decode running in a worker has its own empty module
@@ -581,6 +638,7 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim 
   const meta = HIMAWARI_SCENE_FILES.get(key) || himawariMetaFromKey(key);
   if (!meta) throw new Error('bad Himawari scene key');
   const sector = SECTORS[sectorKey];
+  segmentSlots = maxDim > 0 ? 5 : 8;
   const gridRef = { grid: fitGrid(sector.grid, maxDim) || null };
   // Regional grids come from the headers. Establish the common grid once, up
   // front, from a single segment header (band 13 is always produced) so the
@@ -611,7 +669,9 @@ async function loadHimawariScene(sat, sectorKey, key, bands, onProgress, maxDim 
     if (r.data) channels[b] = r.data;
     if (r.nav && !nav) nav = r.nav;
   }
-  return himawariScene(meta, channels, nav, gridRef.grid, sat, key);
+  const scene = himawariScene(meta, channels, nav, gridRef.grid, sat, key);
+  scene._maxDim = maxDim || 0;
+  return scene;
 }
 
 // Download + decode a scene, reading only the channels requested. Returns the
@@ -639,10 +699,17 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
   // band; a fallback whole-object download already used the first half of it.
   const base = h5.loader ? 0 : 0.5;
   let done = 0;
-  for (const b of bands) {
+  // Decode the requested bands concurrently. Each band is its own series of S3
+  // range reads, so doing them one after another paid the round-trip latency
+  // once per band — with a four-channel recipe like GeoColor that was most of
+  // the load time on a phone, where the latency is highest. The reader keeps
+  // each decode's data buffers private, so overlapping them is safe.
+  const [width, readCap] = decodeBudget(maxDim, bands.length);
+  h5.maxDataRead = readCap;
+  await mapLimit(bands, width, async (b) => {
     channels[b] = await readChannel(h5, b, stride);
     if (onProgress) onProgress(base + (1 - base) * (++done / bands.length));
-  }
+  });
 
   const t = timeForKey(key);
   return {
@@ -662,6 +729,7 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
     key,
     _h5: h5, // kept so more bands can be decoded later without re-downloading
     _stride: stride,
+    _maxDim: maxDim || 0, // so a later ensureBands keeps the same memory budget
   };
 }
 
@@ -671,10 +739,12 @@ export async function loadScene(satKey, sectorKey, key, bands, onProgress, maxDi
 export async function ensureBands(scene, bands) {
   if (scene._himawariMeta) {
     const sector = SECTORS[scene._himawariMeta.sectorKey];
+    restoreSegmentSlots(scene);
     const gridRef = { grid: scene._himawariGrid };
-    // Decode the missing bands concurrently (each also fetches its segments in
-    // parallel), so switching to an RGB product that needs several more channels
-    // doesn't stall band-by-band.
+    // Decode the missing bands concurrently (each also fetches and decodes its
+    // segments as they arrive, within the shared segment window), so switching
+    // to an RGB product that needs several more channels doesn't stall
+    // band-by-band.
     const need = bands.filter((b) => !scene.channels[b]);
     const results = await Promise.all(need.map((b) =>
       himawariChannel(scene._satBucket, scene._himawariMeta, sector, b, gridRef)
@@ -683,9 +753,15 @@ export async function ensureBands(scene, bands) {
     return scene;
   }
   if (!scene._h5) return scene;
-  for (const b of bands) {
-    if (!scene.channels[b]) scene.channels[b] = await readChannel(scene._h5, b, scene._stride || 1);
-  }
+  // Same bounded-concurrency decode as the initial load: switching to an RGB
+  // recipe that needs three more channels reads them together rather than
+  // paying S3's latency three times over.
+  const need = bands.filter((b) => !scene.channels[b]);
+  const [width, readCap] = decodeBudget(scene._maxDim || 0, need.length);
+  scene._h5.maxDataRead = readCap;
+  await mapLimit(need, width, async (b) => {
+    scene.channels[b] = await readChannel(scene._h5, b, scene._stride || 1);
+  });
   return scene;
 }
 

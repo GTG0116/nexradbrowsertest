@@ -94,18 +94,6 @@ export function bandsFor(productId) {
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-// Read one channel sample, tolerating a band that never decoded. A Himawari
-// full-disk band is ten separately-fetched segments; if a segment (or a whole
-// band) fails to load, that channel array can be missing from the scene. Returning
-// NaN — the same "no data" sentinel a real off-disk pixel uses — lets the RGBA
-// build finish and just leave those pixels transparent, instead of throwing on
-// `ch[band][i]` and aborting the whole render (which left the *previous* product
-// frozen on screen — the "Himawari won't switch products" bug).
-function chAt(ch, band, i) {
-  const arr = ch[band];
-  return arr ? arr[i] : NaN;
-}
-
 // Stretch a physical value to 0..1 across [lo,hi] (lo>hi inverts), with gamma.
 function stretch(v, lo, hi, gamma) {
   if (Number.isNaN(v)) return NaN;
@@ -113,6 +101,49 @@ function stretch(v, lo, hi, gamma) {
   t = clamp01(t);
   if (gamma && gamma !== 1) t = Math.pow(t, 1 / gamma);
   return t;
+}
+
+// The gamma curve only ever maps 0..1 → 0..1 and its result is quantised to 8
+// bits, so a 1024-entry table is indistinguishable from the exact value — and
+// far cheaper than a Math.pow per colour component per pixel, which is where a
+// true-colour build spent most of its time.
+const GAMMA_LUTS = new Map();
+function gammaLUT(gamma) {
+  let lut = GAMMA_LUTS.get(gamma);
+  if (!lut) {
+    lut = new Float32Array(1025);
+    for (let i = 0; i <= 1024; i++) lut[i] = Math.pow(i / 1024, 1 / gamma);
+    GAMMA_LUTS.set(gamma, lut);
+  }
+  return lut;
+}
+
+// Precompile one RGB component of a recipe against a scene's channels: the band
+// arrays, the stretch constants and the gamma table are all resolved once per
+// build instead of being looked up per pixel. Returns (i) => 0..1.
+//
+// A band that never decoded yields NaN everywhere rather than throwing. A
+// Himawari full-disk band is ten separately-fetched segments, so a failed
+// segment (or a whole band) can leave that channel absent from the scene; NaN is
+// the same "no data" sentinel a real off-disk pixel uses, which lets the build
+// finish and leave those pixels transparent instead of aborting the render and
+// freezing the *previous* product on screen.
+function makeComp(ch, spec) {
+  if (!spec) return () => 0;
+  const lo = spec.lo;
+  const span = (spec.hi - spec.lo) || 1;
+  const lut = spec.gamma && spec.gamma !== 1 ? gammaLUT(spec.gamma) : null;
+  const shape = lut
+    ? (t) => (t <= 0 ? lut[0] : t >= 1 ? lut[1024] : lut[(t * 1024) | 0])
+    : (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
+  if (spec.diff) {
+    const a = ch[spec.diff[0]], b = ch[spec.diff[1]];
+    if (!a || !b) return () => NaN;
+    return (i) => { const d = a[i] - b[i]; return d === d ? shape((d - lo) / span) : NaN; };
+  }
+  const arr = ch[spec.band];
+  if (!arr) return () => NaN;
+  return (i) => { const v = arr[i]; return v === v ? shape((v - lo) / span) : NaN; };
 }
 
 // Colour enhancements for the IR channels, defined as [Kelvin, r, g, b] knots,
@@ -170,6 +201,32 @@ function rampColor(ramp, k) {
 // Pick the right enhancement ramp for an ABI band.
 const rampForBand = (band) => (WV_BANDS.has(band) ? WV_RAMP : IR_RAMP);
 
+// Bake a ramp into an RGB table spanning its own warm→cold range. Sampling it is
+// an index; the knot walk it replaces cost up to 21 comparisons and an
+// interpolation for every pixel of an enhanced IR image.
+//
+// The size is set by the ramps' steepest knots, not by the eye: the coldest few
+// span 255 colour levels over 3 K, so the table's step is what decides how far a
+// colour boundary can land from its true temperature. Over the ~145 K a ramp
+// covers, 4096 steps put it at ~0.035 K — inside a couple of 8-bit levels even
+// there, and well inside the data's own precision.
+const RAMP_STEPS = 4096;
+const RAMP_LUTS = new WeakMap();
+function rampLUT(ramp) {
+  let lut = RAMP_LUTS.get(ramp);
+  if (!lut) {
+    const warm = ramp[0][0], cold = ramp[ramp.length - 1][0];
+    const rgb = new Uint8Array(RAMP_STEPS * 3);
+    for (let i = 0; i < RAMP_STEPS; i++) {
+      const c = rampColor(ramp, warm - (i / (RAMP_STEPS - 1)) * (warm - cold));
+      rgb[i * 3] = c[0]; rgb[i * 3 + 1] = c[1]; rgb[i * 3 + 2] = c[2];
+    }
+    lut = { rgb, warm, scale: (RAMP_STEPS - 1) / (warm - cold) };
+    RAMP_LUTS.set(ramp, lut);
+  }
+  return lut;
+}
+
 // Build a CSS linear-gradient (warm → cold, left → right) for a band's
 // enhancement, so the legend bar matches the imagery.
 export function enhancementGradientCSS(band) {
@@ -211,22 +268,55 @@ function normalizeCrop(scene, crop) {
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
+// Spacing of the lattice the day/night weight is evaluated on. Solar elevation
+// varies far more smoothly across the disk than the imagery does, so sampling it
+// every 8 px and interpolating is visually identical to solving it per pixel —
+// and skips ~98% of the inverse navigation (a square root and two arctangents
+// each) that dominated a GeoColor build.
+const GEOCOLOR_LATTICE = 8;
+
 // Render GeoColor: daytime true colour crossfaded with a night-time IR cloud
-// rendering by solar elevation, evaluated per pixel from the scene's geostationary
-// navigation and scan time.
+// rendering by solar elevation, evaluated across the scene from its
+// geostationary navigation and scan time.
 function buildGeoColor(scene, recipe, out, crop = null) {
-  const W = scene.width, H = scene.height, ch = scene.channels;
+  const W = scene.width, ch = scene.channels;
   const c = normalizeCrop(scene, crop);
   const CW = c.width;
   const ir = ch[recipe.ir.band];
   const sun = subsolarPoint(scene.time);
   const D2R = Math.PI / 180;
-  const comp = (spec, i) => stretch(chAt(ch, spec.band, i), spec.lo, spec.hi, spec.gamma);
+  const compR = makeComp(ch, recipe.r);
+  const compB = makeComp(ch, recipe.b);
+  const compVeg = makeComp(ch, recipe.veg);
+
+  // Exact solar weight at one grid point; NaN beyond the Earth's limb, where the
+  // navigation has no solution.
+  const dayWeight = (col, row) => {
+    const ll = scanToLonLat(scene.xOffset + col * scene.xScale,
+      scene.yOffset + row * scene.yScale, scene.proj);
+    if (!ll) return NaN;
+    const latR = ll[1] * D2R;
+    const mu = Math.sin(latR) * sun.sinDecl
+      + Math.cos(latR) * sun.cosDecl * Math.cos((ll[0] - sun.subLon) * D2R);
+    return clamp01((mu + 0.10) / 0.20);
+  };
+
+  const step = GEOCOLOR_LATTICE;
+  const nx = Math.ceil(c.width / step) + 1;
+  const ny = Math.ceil(c.height / step) + 1;
+  const lattice = new Float32Array(nx * ny);
+  for (let j = 0; j < ny; j++)
+    for (let i2 = 0; i2 < nx; i2++)
+      lattice[j * nx + i2] = dayWeight(c.x + i2 * step, c.y + j * step);
+
   for (let row = c.y; row < c.y + c.height; row++) {
-    const yy = scene.yOffset + row * scene.yScale;
+    const fy = (row - c.y) / step;
+    const j0 = fy | 0;
+    const ty = fy - j0;
+    const rowA = j0 * nx, rowB = (j0 + 1) * nx;
     for (let col = c.x; col < c.x + c.width; col++) {
       const i = row * W + col, o = ((row - c.y) * CW + (col - c.x)) * 4;
-      const r0 = comp(recipe.r, i), b0 = comp(recipe.b, i);
+      const r0 = compR(i), b0 = compB(i);
       const bt = ir ? ir[i] : NaN;
       if (Number.isNaN(r0) && Number.isNaN(b0) && Number.isNaN(bt)) { out[o + 3] = 0; continue; }
 
@@ -234,7 +324,7 @@ function buildGeoColor(scene, recipe, out, crop = null) {
       // Kept 0 where the visible bands are missing (night side) so a NaN can't
       // poison the blend through the wDay=0 weighting below.
       let dr = 0, dg = 0, db = 0;
-      if (!Number.isNaN(r0)) { dr = r0; db = b0; dg = 0.45 * r0 + 0.45 * b0 + 0.1 * comp(recipe.veg, i); }
+      if (!Number.isNaN(r0)) { dr = r0; db = b0; dg = 0.45 * r0 + 0.45 * b0 + 0.1 * compVeg(i); }
 
       // Night IR: clear scenes a deep navy "earth", cold cloud tops brightening to
       // white, so storms stand out against the dark side.
@@ -242,14 +332,20 @@ function buildGeoColor(scene, recipe, out, crop = null) {
       const nr = 6 + cloud * 224, ng = 14 + cloud * 226, nb = 38 + cloud * 200;
 
       // Crossfade by solar elevation: full day a few degrees above the horizon,
-      // full night a few below, a soft band across the terminator.
-      let wDay = 1;
-      const ll = scanToLonLat(scene.xOffset + col * scene.xScale, yy, scene.proj);
-      if (ll) {
-        const latR = ll[1] * D2R;
-        const mu = Math.sin(latR) * sun.sinDecl
-          + Math.cos(latR) * sun.cosDecl * Math.cos((ll[0] - sun.subLon) * D2R);
-        wDay = clamp01((mu + 0.10) / 0.20);
+      // full night a few below, a soft band across the terminator. Bilinear from
+      // the lattice, except in cells that straddle the limb — where a corner has
+      // no solution, the exact solve still runs for that pixel.
+      const fx = (col - c.x) / step;
+      const i0 = fx | 0;
+      const tx = fx - i0;
+      const g00 = lattice[rowA + i0], g10 = lattice[rowA + i0 + 1];
+      const g01 = lattice[rowB + i0], g11 = lattice[rowB + i0 + 1];
+      let wDay;
+      if (g00 === g00 && g10 === g10 && g01 === g01 && g11 === g11) {
+        wDay = (g00 + (g10 - g00) * tx) * (1 - ty) + (g01 + (g11 - g01) * tx) * ty;
+      } else {
+        wDay = dayWeight(col, row);
+        if (!(wDay === wDay)) wDay = 1; // off the limb entirely — treat as day
       }
       if (Number.isNaN(r0)) wDay = 0;        // no daytime data here — show night
       if (Number.isNaN(bt)) wDay = 1;        // no IR — fall back to day colour
@@ -278,6 +374,7 @@ export function buildRGBA(scene, productId, opts = {}) {
     const data = ch[band];
     const isVis = meta.type === 'vis';
     const enhanceIR = opts.enhanceIR && !isVis;
+    const lut = enhanceIR ? rampLUT(rampForBand(band)) : null;
     for (let row = crop.y; row < crop.y + crop.height; row++) {
       const srcBase = row * W;
       const dstBase = (row - crop.y) * crop.width;
@@ -290,8 +387,11 @@ export function buildRGBA(scene, productId, opts = {}) {
           const g = (t * 255) | 0;
           out[o] = g; out[o + 1] = g; out[o + 2] = g; out[o + 3] = 255;
         } else if (enhanceIR) {
-          const c = rampColor(rampForBand(band), v);
-          out[o] = c[0] | 0; out[o + 1] = c[1] | 0; out[o + 2] = c[2] | 0; out[o + 3] = 255;
+          let k = ((lut.warm - v) * lut.scale) | 0;
+          if (k < 0) k = 0; else if (k >= RAMP_STEPS) k = RAMP_STEPS - 1;
+          const p = k * 3;
+          out[o] = lut.rgb[p]; out[o + 1] = lut.rgb[p + 1]; out[o + 2] = lut.rgb[p + 2];
+          out[o + 3] = 255;
         } else {
           // IR brightness temperature: invert so cold cloud tops are white.
           const t = stretch(v, 313, 183, 1);
@@ -307,32 +407,19 @@ export function buildRGBA(scene, productId, opts = {}) {
   const recipe = SAT_RGB[productId.replace(/^RGB_/, '')];
   if (!recipe) return out;
   if (recipe.geocolor) return buildGeoColor(scene, recipe, out, crop);
-  const comp = (spec, i) => {
-    if (!spec) return 0;
-    if (spec.diff) {
-      const a = chAt(ch, spec.diff[0], i), b = chAt(ch, spec.diff[1], i);
-      return stretch(a - b, spec.lo, spec.hi, spec.gamma);
-    }
-    return stretch(chAt(ch, spec.band, i), spec.lo, spec.hi, spec.gamma);
-  };
+  const synthetic = recipe.green === 'synthetic';
+  const compR = makeComp(ch, recipe.r);
+  const compB = makeComp(ch, recipe.b);
+  const compG = synthetic ? makeComp(ch, recipe.veg) : makeComp(ch, recipe.g);
   for (let row = crop.y; row < crop.y + crop.height; row++) {
     const srcBase = row * W;
     const dstBase = (row - crop.y) * crop.width;
     for (let col = crop.x; col < crop.x + crop.width; col++) {
       const i = srcBase + col;
       const o = (dstBase + (col - crop.x)) * 4;
-      let r, g, b;
-      if (recipe.green === 'synthetic') {
-        r = comp(recipe.r, i);
-        b = comp(recipe.b, i);
-        const veg = comp(recipe.veg, i);
-        // CIMSS true-colour synthetic green.
-        g = 0.45 * r + 0.45 * b + 0.1 * veg;
-      } else {
-        r = comp(recipe.r, i);
-        g = comp(recipe.g, i);
-        b = comp(recipe.b, i);
-      }
+      const r = compR(i), b = compB(i);
+      // CIMSS true-colour synthetic green, or the recipe's own green band.
+      const g = synthetic ? 0.45 * r + 0.45 * b + 0.1 * compG(i) : compG(i);
       if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) { out[o + 3] = 0; continue; }
       out[o] = (clamp01(r) * 255) | 0;
       out[o + 1] = (clamp01(g) * 255) | 0;
