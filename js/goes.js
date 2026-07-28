@@ -362,7 +362,16 @@ async function openNetCDF(bucket, key, onProgress) {
   const m = /\/\s*(\d+)\s*$/.exec(res.headers.get('content-range') || '');
   const size = m ? Number(m[1]) : 0;
   const head = new Uint8Array(await res.arrayBuffer());
-  if (!size || size <= head.length) return new HDF5File(head);
+  // No readable Content-Range (a proxy that drops it, a CORS response that stops
+  // exposing it) means the object's size is unknown. A short body is the whole
+  // object; a full-length one is the first window of something larger, and
+  // treating that as complete leaves every read past it failing with "bytes …
+  // not loaded" — a blank product rather than an error — so download it whole.
+  if (!size) {
+    if (head.length < HDF5_HEAD_BYTES) return new HDF5File(head);
+    return new HDF5File(await fetchBytes(bucket, key, downloadProgress));
+  }
+  if (size <= head.length) return new HDF5File(head);
   return HDF5File.ranged(size, head, async (start, end) => {
     const part = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
     if (!part.ok) {

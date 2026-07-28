@@ -3102,6 +3102,17 @@ function normalizeSatProduct() {
   if (state.sat.productId === SAT_PRECIP_ID && !satPrecipAvailable()) state.sat.productId = 'C13';
 }
 
+// Which products exist depends on the sector as well as the satellite: the
+// derived precipitation retrieval is offered on the mesoscale sectors only. A
+// sector change therefore has to rebuild the product grid (and its legend) the
+// way a satellite change does — otherwise switching to a mesoscale sector never
+// grows a SatQPE button, and switching away from one leaves it selected on a
+// sector that cannot serve it.
+function syncSatProductsForSector() {
+  normalizeSatProduct();
+  if (state.mode === 'satellite') { buildSatProductButtons(); buildSatLegend(); }
+}
+
 // The satellite precipitation retrieval is offered on the GOES mesoscale sectors
 // only. They are the sectors it is calibrated on and the ones it makes sense for:
 // a 1-minute refresh over the convection that is actually being watched, small
@@ -3302,6 +3313,7 @@ function viewCycloneOnSatellite(storm) {
   state.sat._centered = false;
   state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
   clearSatellite();
+  syncSatProductsForSector(); // the storm crop rides the full disk: no SatQPE there
   setStatus(`satellite view: ${storm.name}`);
   if (state.mode !== 'satellite') {
     setMode('satellite'); // loads the scene list itself
@@ -3336,8 +3348,7 @@ function initSatSelects() {
     rebuildSectorSelect();
     // Crossing between the geostationary imagers and the microwave sounders
     // swaps the whole product set (and its legend).
-    normalizeSatProduct();
-    if (state.mode === 'satellite') { buildSatProductButtons(); buildSatLegend(); }
+    syncSatProductsForSector();
     state.sat._centered = false;
     state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
     state.sat.mirsGrid = null;
@@ -3364,6 +3375,7 @@ function initSatSelects() {
       state.sat._centered = false;
       state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
       clearSatellite();
+      syncSatProductsForSector();
       applyModePanels();
       loadSatScenes();
       saveSettings();
@@ -3375,6 +3387,7 @@ function initSatSelects() {
     state.sat._centered = false;
     state.sat.scene = null; state.sat.sceneKey = null; state.sat.scenes = []; state.sat.displayMeta = null; state.sat._bbox = null;
     clearSatellite();
+    syncSatProductsForSector();
     applyModePanels();
     loadSatScenes();
     saveSettings();
