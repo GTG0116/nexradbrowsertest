@@ -69,6 +69,34 @@ async function inflate(bytes) {
   return out;
 }
 
+// Every multi-byte field in these files is little-endian. Where the platform
+// agrees (everything we run on), raw chunk bytes can be read through a typed
+// array instead of a DataView getter per element — several times faster, and the
+// scatter below touches one element per decoded pixel.
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+// A typed view over raw chunk bytes, or null when the platform can't read them
+// directly (big-endian, an unaligned start, or a class/size combination without
+// a matching typed array).
+function typedView(bytes, dclass, signed, elsize) {
+  if (!LITTLE_ENDIAN || bytes.byteOffset % elsize !== 0) return null;
+  const n = (bytes.length / elsize) | 0;
+  const buf = bytes.buffer, off = bytes.byteOffset;
+  if (dclass === 1) {
+    return elsize === 4 ? new Float32Array(buf, off, n)
+      : elsize === 8 ? new Float64Array(buf, off, n) : null;
+  }
+  if (dclass !== 0) return null;
+  if (signed) {
+    return elsize === 1 ? new Int8Array(buf, off, n)
+      : elsize === 2 ? new Int16Array(buf, off, n)
+      : elsize === 4 ? new Int32Array(buf, off, n) : null;
+  }
+  return elsize === 1 ? new Uint8Array(buf, off, n)
+    : elsize === 2 ? new Uint16Array(buf, off, n)
+    : elsize === 4 ? new Uint32Array(buf, off, n) : null;
+}
+
 // Undo the HDF5 byte-shuffle filter (filter id 2): de-interleave the planes of
 // each element back into element order.
 function unshuffle(bytes, elsize) {
@@ -94,13 +122,15 @@ class MissingBytes extends Error {
   }
 }
 
-function makeSegment(start, bytes, pinned) {
+// A resident span of the object. Only metadata is ever held this way: variable
+// data is read into a private buffer that never joins this list (see
+// _fetchRange), so the segments a file keeps stay small and long-lived.
+function makeSegment(start, bytes) {
   return {
     start,
     end: start + bytes.length,
     bytes,
     view: new DataView(bytes.buffer, bytes.byteOffset, bytes.length),
-    pinned: !!pinned,
   };
 }
 
@@ -112,13 +142,33 @@ const COALESCE_GAP = 512 * 1024;
 // Ceiling on one coalesced data read, so a full-disk band streams through in a
 // few bounded pieces instead of one ~20 MB allocation.
 const MAX_DATA_READ = 8 * 1024 * 1024;
+// How many chunks of one coalesced read are inflated at a time. The platform
+// inflate does its work off the JS thread, so overlapping a few hides most of
+// the decompression latency; the cap bounds how much decompressed chunk data is
+// resident at any instant.
+const INFLATE_CONCURRENCY = 4;
+
+// Run `task(item)` over `items` with at most `width` of them in flight.
+export async function mapLimit(items, width, task) {
+  let next = 0;
+  const run = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      await task(items[i], i);
+    }
+  };
+  const lanes = [];
+  for (let k = 0; k < Math.min(width, items.length); k++) lanes.push(run());
+  await Promise.all(lanes);
+}
 
 export class HDF5File {
   // `buffer` is the complete object. For a file read over HTTP range requests
   // use HDF5File.ranged() instead.
   constructor(buffer) {
     const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    this._init(bytes.length, [makeSegment(0, bytes, true)], null);
+    this._init(bytes.length, [makeSegment(0, bytes)], null);
   }
 
   // A file whose bytes are fetched on demand: `head` is the leading slice
@@ -127,7 +177,7 @@ export class HDF5File {
   // variables actually read are ever downloaded.
   static ranged(size, head, loader) {
     const f = Object.create(HDF5File.prototype);
-    f._init(size, [makeSegment(0, head, true)], loader);
+    f._init(size, [makeSegment(0, head)], loader);
     return f;
   }
 
@@ -135,6 +185,10 @@ export class HDF5File {
     this.size = size;
     this.segs = segments;
     this.loader = loader || null;
+    // Callers that decode several variables at once can shrink this so the peak
+    // of (bands in flight × coalesced read) stays within a phone's budget.
+    this.maxDataRead = 0;
+    this._loads = new Map(); // metadata spans currently being fetched
     this._seg = segments[0] || null;
     this._parseSuperblock();
     this._links = null; // name -> object-header address (lazy)
@@ -176,11 +230,10 @@ export class HDF5File {
 
   // Insert a freshly read span, merging it with any overlapping/adjacent
   // segment of the same kind so later multi-byte reads never straddle a seam.
-  _insert(start, bytes, pinned) {
-    let seg = makeSegment(start, bytes, pinned);
+  _insert(start, bytes) {
+    let seg = makeSegment(start, bytes);
     for (;;) {
-      const i = this.segs.findIndex((s) =>
-        s.pinned === seg.pinned && s.start <= seg.end && seg.start <= s.end);
+      const i = this.segs.findIndex((s) => s.start <= seg.end && seg.start <= s.end);
       if (i < 0) break;
       const other = this.segs.splice(i, 1)[0];
       if (other.start <= seg.start && other.end >= seg.end) { seg = other; continue; }
@@ -189,26 +242,44 @@ export class HDF5File {
       const merged = new Uint8Array(end2 - start2);
       merged.set(other.bytes, other.start - start2);
       merged.set(seg.bytes, seg.start - start2); // the newer read wins on overlap
-      seg = makeSegment(start2, merged, seg.pinned);
+      seg = makeSegment(start2, merged);
     }
     this.segs.push(seg);
     this._seg = seg;
     return seg;
   }
 
-  async _load(start, end, pinned) {
+  async _load(start, end) {
     const a = Math.max(0, start);
     const b = Math.min(this.size, end);
     if (b <= a || this._has(a, b)) return;
     if (!this.loader) throw new MissingBytes(a, b);
-    this._insert(a, await this.loader(a, b), pinned);
+    // Bands decode concurrently and fault on the same header windows at the same
+    // moment, so share one request per span instead of pulling it once per band.
+    const key = `${a}:${b}`;
+    let inflight = this._loads.get(key);
+    if (!inflight) {
+      inflight = this.loader(a, b);
+      this._loads.set(key, inflight);
+      inflight.catch(() => {}).then(() => this._loads.delete(key));
+    }
+    this._insert(a, await inflight);
   }
 
-  // Drop every unpinned (data) segment. Metadata stays resident so another band
-  // can be decoded later without re-reading the header.
-  releaseData() {
-    this.segs = this.segs.filter((s) => s.pinned);
-    this._seg = this.segs[0] || null;
+  // Read [start,end) into a private buffer, without publishing it as a shared
+  // segment. Data reads are large and short-lived, and a scene now decodes
+  // several bands at once: when they shared the segment list, one band's decode
+  // could drop the bytes another was midway through reading, so each keeps its
+  // own. Dropping them is then just letting the buffer go out of scope.
+  // Metadata still goes through _load(), where sharing is the whole point.
+  // A fully buffered file returns a view of bytes it already holds — no copy.
+  async _fetchRange(start, end) {
+    const a = Math.max(0, start);
+    const b = Math.min(this.size, end);
+    if (b <= a) return new Uint8Array(0);
+    if (this._has(a, b)) return this.slice(a, b - a);
+    if (!this.loader) throw new MissingBytes(a, b);
+    return this.loader(a, b);
   }
 
   // Run a synchronous parse, pulling in whatever spans it faults on. Metadata
@@ -225,7 +296,7 @@ export class HDF5File {
         if (err.start >= this.size) throw err;
         const start = Math.max(0, Math.floor(err.start / FAULT_WINDOW) * FAULT_WINDOW);
         const end = Math.max(err.end, start + FAULT_WINDOW);
-        await this._load(start, end, true);
+        await this._load(start, end);
       }
     }
     throw new Error('hdf5: header could not be resolved');
@@ -586,13 +657,13 @@ export class HDF5File {
 
     if (contiguousAddr != null && contiguousAddr !== UNDEF) {
       const full = dims.reduce((a, b) => a * b, 1);
-      await this._load(contiguousAddr, contiguousAddr + full * elsize, false);
+      const bytes = await this._fetchRange(contiguousAddr, contiguousAddr + full * elsize);
       if (stride === 1) {
-        this._copyRaw(this.slice(contiguousAddr, full * elsize), out, 0, full);
+        this._copyRaw(bytes, out, 0, full, dclass, signed, elsize);
       } else {
         const [H, W] = dims, [outH, outW] = outDims;
         const src = this._makeTyped(dclass, signed, elsize, full);
-        this._copyRaw(this.slice(contiguousAddr, full * elsize), src, 0, full);
+        this._copyRaw(bytes, src, 0, full, dclass, signed, elsize);
         for (let y = 0; y < outH; y++)
           for (let x = 0; x < outW; x++) out[y * outW + x] = src[y * stride * W + x * stride];
       }
@@ -671,7 +742,14 @@ export class HDF5File {
     return elsize === 1 ? new Uint8Array(n) : elsize === 2 ? new Uint16Array(n) : new Uint32Array(n);
   }
 
-  _copyRaw(srcBytes, out, dstElemOffset, count) {
+  _copyRaw(srcBytes, out, dstElemOffset, count, dclass = null, signed = false, elsize = out.BYTES_PER_ELEMENT) {
+    // When the bytes can be viewed directly as the destination's element type,
+    // the whole copy is one memcpy instead of a getter call per element.
+    const typed = dclass == null ? null : typedView(srcBytes, dclass, signed, elsize);
+    if (typed && typed.constructor === out.constructor) {
+      out.set(count < typed.length ? typed.subarray(0, count) : typed, dstElemOffset);
+      return;
+    }
     const view = new DataView(srcBytes.buffer, srcBytes.byteOffset, srcBytes.length);
     const el = out.BYTES_PER_ELEMENT;
     const get =
@@ -774,36 +852,60 @@ export class HDF5File {
     // Sequential in file order, so the coalesced reads below are sequential too.
     leaves.sort((a, b) => a.addr - b.addr);
 
+    const maxRead = this.maxDataRead || MAX_DATA_READ;
+    const groups = [];
     let group = [];
-    const flush = async () => {
-      if (!group.length) return;
-      const start = group[0].addr;
-      const end = group[group.length - 1].addr + group[group.length - 1].chunkSize;
-      await this._load(start, end, false);
-      for (const lf of group) {
+    for (const lf of leaves) {
+      if (group.length) {
+        const last = group[group.length - 1];
+        const span = lf.addr + lf.chunkSize - group[0].addr;
+        if (lf.addr - (last.addr + last.chunkSize) > COALESCE_GAP || span > maxRead) {
+          groups.push(group);
+          group = [];
+        }
+      }
+      group.push(lf);
+    }
+    if (group.length) groups.push(group);
+
+    const readGroup = (g) => {
+      const p = this._fetchRange(g[0].addr, g[g.length - 1].addr + g[g.length - 1].chunkSize);
+      // The read is awaited on the next turn of the loop. Attaching a sink here
+      // keeps a failure from surfacing as an unhandled rejection if the decode
+      // of the *previous* group throws first; the awaiting side still rejects.
+      p.catch(() => {});
+      return p;
+    };
+
+    // Read one group ahead of the decode, so S3's latency overlaps the inflate
+    // and scatter work instead of alternating with it. Before this, a band's
+    // decode was a strict stall-decode-stall cycle — on a phone's connection
+    // that idle time was most of the wall clock.
+    let pending = groups.length ? readGroup(groups[0]) : null;
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      const buf = await pending;
+      pending = gi + 1 < groups.length ? readGroup(groups[gi + 1]) : null;
+      const base = g[0].addr;
+      // A read clamped by the end of the object leaves the last chunks short.
+      // Fail the way a per-chunk read used to, rather than scattering the
+      // truncated bytes and drawing a quietly corrupt image.
+      const need = g[g.length - 1].addr + g[g.length - 1].chunkSize - base;
+      if (buf.length < need) throw new MissingBytes(base + buf.length, base + need);
+      await mapLimit(g, INFLATE_CONCURRENCY, async (lf) => {
         const applied = (id) => filters.some((f, i) => f.id === id && !(lf.filterMask & (1 << i)));
-        let raw = this.slice(lf.addr, lf.chunkSize);
+        let raw = buf.subarray(lf.addr - base, lf.addr - base + lf.chunkSize);
         // Fletcher32 is stored after the compressed chunk bytes. Chrome's
         // DecompressionStream rejects those valid trailing checksum bytes, so strip
         // them before deflate instead of depending on browser-specific tolerance.
         if (applied(3) && raw.length >= 4) raw = raw.subarray(0, raw.length - 4);
         if (applied(1)) raw = await inflate(raw);
         if (applied(2)) raw = unshuffle(raw, elsize);
+        // Chunks cover disjoint regions of the output, so the scatters below are
+        // independent even though several inflates are in flight.
         this._scatterChunk(raw, lf.offs, dims, chunkDims, rowStride, elsize, out, dclass, signed, stride);
-      }
-      group = [];
-      this.releaseData();
-    };
-
-    for (const lf of leaves) {
-      if (group.length) {
-        const last = group[group.length - 1];
-        const span = lf.addr + lf.chunkSize - group[0].addr;
-        if (lf.addr - (last.addr + last.chunkSize) > COALESCE_GAP || span > MAX_DATA_READ) await flush();
-      }
-      group.push(lf);
+      });
     }
-    await flush();
   }
 
   // `stride` (2-D only) writes just the sampled rows/columns; `out` is then the
@@ -827,6 +929,20 @@ export class HDF5File {
       const rStart = stride === 1 ? 0 : (stride - (r0 % stride)) % stride;
       const cStart = stride === 1 ? 0 : (stride - (c0 % stride)) % stride;
       const cols = Math.min(CW, W - c0);
+      // Same walk as below, but indexing a typed view of the chunk rather than
+      // calling a DataView getter for each of the millions of samples a band's
+      // chunks carry.
+      const el = typedView(rawBytes, dclass, signed, elsize);
+      if (el) {
+        for (let r = rStart; r < CH; r += stride) {
+          const gr = r0 + r;
+          if (gr >= H) break;
+          const rowSrc = r * CW;
+          const dst = (gr / stride) * outW + (c0 + cStart) / stride;
+          for (let c = cStart, k = 0; c < cols; c += stride, k++) out[dst + k] = el[rowSrc + c];
+        }
+        return;
+      }
       for (let r = rStart; r < CH; r += stride) {
         const gr = r0 + r;
         if (gr >= H) break;
