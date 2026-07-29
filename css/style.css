@@ -4054,6 +4054,221 @@ input[type='range']::-moz-range-thumb {
   color: var(--ink-dim);
 }
 
+/* NDBC buoy station plots (buoys.js). The canvas, controls panel and hover
+   tooltip mirror the METAR overlay above; the tap-opened report card is the
+   piece the METAR layer has no equivalent of. */
+.buoy-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 511;
+  pointer-events: none;
+}
+.buoy-panel {
+  position: absolute;
+  left: 14px;
+  bottom: 18px;
+  z-index: 620;
+  display: grid;
+  gap: 5px;
+  min-width: 150px;
+  padding: 8px 9px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--glow);
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  line-height: 1.2;
+}
+/* Docked variant: the same panel rendered inside Settings under its toggle. */
+.buoy-panel.buoy-panel--docked {
+  position: static;
+  inset: auto;
+  left: auto;
+  bottom: auto;
+  z-index: auto;
+  min-width: 0;
+  max-width: none;
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.buoy-controls[hidden] { display: none; }
+.buoy-panel-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.buoy-panel select {
+  width: 74px;
+  height: 24px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  font: 700 10px 'JetBrains Mono', monospace;
+}
+/* Water-temperature key: the dot-fill ramp, cold → warm. */
+.buoy-panel-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-dim);
+  font-weight: 700;
+  font-size: 9px;
+}
+.buoy-key-ramp {
+  flex: 1;
+  min-width: 46px;
+  height: 7px;
+  border-radius: 4px;
+}
+.buoy-key-ends { white-space: nowrap; }
+.buoy-panel-count {
+  color: var(--ink-dim);
+  font-weight: 700;
+}
+.buoy-tooltip {
+  position: absolute;
+  z-index: 1220;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
+  color: var(--ink);
+  pointer-events: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.buoy-tooltip strong {
+  color: var(--accent-ink);
+  font-size: 12px;
+}
+.buoy-tooltip span { color: var(--ink-dim); }
+.buoy-tooltip div {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+.buoy-tooltip .buoy-name,
+.buoy-tooltip .buoy-hint { color: var(--ink-dim); }
+.buoy-tooltip .buoy-hint {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Full station report, opened by tapping a buoy. */
+.buoy-card {
+  position: absolute;
+  z-index: 1230;
+  width: 288px;
+  max-height: calc(100% - 96px);
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--glow-strong);
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.buoy-card[hidden] { display: none; }
+.buoy-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.buoy-card-id {
+  color: var(--accent-ink);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+.buoy-card-kind {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-soft);
+  color: var(--ink-dim);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  vertical-align: middle;
+}
+.buoy-card-name {
+  margin-top: 2px;
+  color: var(--ink-dim);
+  font-size: 10.5px;
+}
+.buoy-card-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.buoy-card-time {
+  margin-top: 4px;
+  color: var(--ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+.buoy-card-rows {
+  margin-top: 8px;
+  display: grid;
+  gap: 3px;
+}
+.buoy-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.buoy-row span { color: var(--ink-dim); }
+.buoy-row b {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.buoy-card-note {
+  margin-top: 8px;
+  color: var(--ink-dim);
+  font-size: 10px;
+}
+.buoy-card-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--accent-ink);
+  font-size: 10px;
+  text-decoration: none;
+}
+.buoy-card-link:hover { text-decoration: underline; }
+/* Narrow maps (phones): the report becomes a bottom sheet instead of a card
+   floating beside a plot that may be under the user's thumb. */
+.buoy-card.buoy-card--sheet {
+  left: 8px;
+  right: 8px;
+  bottom: 96px;
+  top: auto;
+  width: auto;
+  max-height: 52%;
+}
+
 /* Map-tool text labels (measure distances, storm-track ETAs). */
 .mt-label {
   pointer-events: none;
@@ -5647,6 +5862,13 @@ input[type='color']::-moz-color-swatch { border: none; border-radius: 3px; }
   }
 
   .metar-panel {
+    left: 14px;
+    right: auto;
+    bottom: 124px;
+    max-width: min(210px, calc(100vw - 28px));
+  }
+
+  .buoy-panel {
     left: 14px;
     right: auto;
     bottom: 124px;

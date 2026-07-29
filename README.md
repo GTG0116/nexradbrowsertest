@@ -469,6 +469,21 @@ that draw straight onto the scope:
   wind barb with gusts, and progressively more detail as you zoom in. Works at
   any zoom — wide US views collapse to one bulk `country=US` request instead of
   a per-state fan-out. Refreshed every 5 minutes; toggled off by default.
+- **Buoy observations** (`js/buoys.js`) — live NDBC marine reports on a second
+  canvas, in the same station-plot language as the METARs but carrying what a
+  buoy actually measures: significant wave height (ft) and dominant period (s)
+  on the left, water and air temperature on the right, a wind barb with gusts,
+  a short arrow for the wave direction, and a dot filled with the **water
+  temperature** colour ramp. **Tap (or click) any buoy for its full report** —
+  seas, mean period, the swell and wind-wave partitions, wind, water/air/dew
+  point, pressure, position and a link to the station's NDBC page. Two
+  CORS-enabled NOAA sources: the IOOS Sensors ERDDAP (`gov-ndbc-<id>` datasets)
+  supplies the station catalogue in one request and the full per-station
+  reports, which are fetched for the buoys on screen nearest the middle of the
+  view outwards and cached; the NWS `obs/surface_obs` map service pre-fills a
+  whole view's latest GTS marine reports in a single bbox query. (NDBC's own
+  `latest_obs` feed serves no CORS header, so a browser cannot read it.)
+  Refreshed every 5 minutes; toggled off by default.
 - **Draw** — freehand annotation paths (drag to sketch).
 - **Measure** — click vertices to read great-circle distance and, once a shape
   closes, its area (miles and kilometres).
@@ -535,6 +550,8 @@ js/app.js                         controller: UI, state, interaction
  ├─ js/radarLayer.js              custom WebGL layer: polar gates → GPU, per pixel
  ├─ js/renderer.js                sweep range + point-sample helpers
  ├─ js/metars.js                  METAR station plots (IEM current obs, canvas)
+ ├─ js/buoys.js                   NDBC buoy plots + tap-for-report (IOOS/NWS)
+ ├─ js/stationPlot.js             wind barbs + halo text shared by both plots
  ├─ js/maptools.js                draw / measure / storm-track tools
  ├─ js/splitview.js               second synced pane: compare products
  ├─ Mapbox GL JS (CDN)            vector basemap; radar/alerts inserted below labels
@@ -572,6 +589,14 @@ directly because of CORS, point `setProxy()` in `js/s3.js` at a CORS proxy.
 
 NOAA's deep archive bucket `noaa-nexrad-level2` holds data back to 1991 but
 disables anonymous bucket listing, so it cannot be browsed from the client.
+
+For surface and marine observations the constraint is CORS, not archive depth:
+neither aviationweather.gov (METARs) nor www.ndbc.noaa.gov (buoys) sends an
+`access-control-allow-origin` header, so both layers are built on the mirrors
+that do — the IEM current-obs API, the IOOS Sensors ERDDAP, and the NWS
+`obs/surface_obs` map service. How much of the buoy network the NWS service is
+carrying varies hour to hour, which is why the buoy layer treats it as a
+pre-fill and gets its authoritative values from the per-station ERDDAP reports.
 
 ## Validation
 
