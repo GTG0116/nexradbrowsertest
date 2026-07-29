@@ -585,6 +585,14 @@
                of floating over the map) so the controls live in Settings; it is
                revealed only while the overlay is enabled. -->
           <div id="metarControls" class="metar-controls" hidden></div>
+          <div class="toggle-field" id="buoysField">
+            <span>Buoy overlay</span>
+            <button id="buoysToggle" class="alerts-toggle" title="Show NDBC buoy observations (tap a buoy for its full report)">OFF</button>
+          </div>
+          <!-- Host for the buoy station-limit / plot-size / water-temperature
+               key, rendered by BuoyController and revealed only while the
+               overlay is on (same arrangement as the METAR controls above). -->
+          <div id="buoyControls" class="buoy-controls" hidden></div>
           <div class="toggle-field desktop-location-field" id="locationField">
             <span>Live location</span>
             <button id="locationToggle" class="alerts-toggle" type="button" aria-pressed="false" title="Show and follow my live location">OFF</button>

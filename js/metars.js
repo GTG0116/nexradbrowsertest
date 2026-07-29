@@ -22,6 +22,8 @@
 // wind barb with gusts, temperature/dewpoint, and progressively more detail as
 // you zoom in. All colours adapt to the light/dark UI theme.
 
+import { num, clamp, cToF, fToC, text, haloStroke, drawWindBarb, escapeHtml } from './stationPlot.js';
+
 const IEM_URL = 'https://mesonet.agron.iastate.edu/api/1/currents.json';
 
 const REFRESH_MS = 5 * 60 * 1000;
@@ -82,15 +84,6 @@ const PLOT_THEMES = {
     cat: { VFR: '#1e9e50', MVFR: '#2568c8', IFR: '#cc2f2c', LIFR: '#9c3ec4' },
   },
 };
-
-const cToF = (c) => (c == null || Number.isNaN(c) ? null : (c * 9) / 5 + 32);
-const fToC = (f) => (f == null || Number.isNaN(f) ? null : ((f - 32) * 5) / 9);
-const num = (v) => {
-  if (v == null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 function loadLimit() {
   try {
@@ -666,12 +659,6 @@ function agePenalty(ob) {
   return clamp((Date.now() - ob.observedAt) / 60000, 0, MAX_AGE_MIN) * 0.04;
 }
 
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[ch]));
-}
-
 // ---------------------------------------------------------------------------
 // Station plot drawing
 // ---------------------------------------------------------------------------
@@ -740,100 +727,6 @@ function drawStationDot(ctx, ob, t) {
   }
 }
 
-function drawWindBarb(ctx, dir, kt, gust, t) {
-  const degrees = num(dir);
-  const speed = num(kt);
-  if (speed == null) return;
-  if (speed < 1 || degrees == null) {
-    if (speed < 1) {
-      haloStroke(ctx, () => {
-        ctx.beginPath();
-        ctx.arc(0, 0, 11.5, 0, Math.PI * 2);
-        ctx.stroke();
-      }, 1.4, t.barb, t.halo);
-    }
-    return;
-  }
-
-  const r = 8;
-  const len = 32;
-  const rad = (degrees * Math.PI) / 180;
-  const ux = Math.sin(rad);
-  const uy = -Math.cos(rad);
-  const px = -uy;
-  const py = ux;
-  const sx = ux * r;
-  const sy = uy * r;
-  const ex = ux * (r + len);
-  const ey = uy * (r + len);
-  const parts = [];
-
-  parts.push((c) => {
-    c.beginPath();
-    c.moveTo(sx, sy);
-    c.lineTo(ex, ey);
-    c.stroke();
-  });
-
-  let remaining = Math.round((gust || speed) / 5) * 5;
-  let tPos = r + len;
-  const step = 6;
-  const barbLen = 11;
-  const point = () => ({ x: ux * tPos, y: uy * tPos });
-  const pennants = Math.floor(remaining / 50);
-  remaining -= pennants * 50;
-  const fulls = Math.floor(remaining / 10);
-  remaining -= fulls * 10;
-  const halves = Math.floor(remaining / 5);
-
-  for (let i = 0; i < pennants; i++) {
-    const a = point();
-    tPos -= step * 1.45;
-    const b = point();
-    parts.push((c) => {
-      c.beginPath();
-      c.moveTo(a.x, a.y);
-      c.lineTo(a.x + px * barbLen, a.y + py * barbLen);
-      c.lineTo(b.x, b.y);
-      c.closePath();
-      c.fill();
-    });
-  }
-  if (pennants) tPos -= step * 0.4;
-  for (let i = 0; i < fulls; i++) {
-    const a = point();
-    parts.push((c) => {
-      c.beginPath();
-      c.moveTo(a.x, a.y);
-      c.lineTo(a.x + px * barbLen, a.y + py * barbLen);
-      c.stroke();
-    });
-    tPos -= step;
-  }
-  for (let i = 0; i < halves; i++) {
-    if (tPos >= r + len - 0.1) tPos -= step;
-    const a = point();
-    parts.push((c) => {
-      c.beginPath();
-      c.moveTo(a.x, a.y);
-      c.lineTo(a.x + px * barbLen * 0.55, a.y + py * barbLen * 0.55);
-      c.stroke();
-    });
-    tPos -= step;
-  }
-
-  ctx.save();
-  ctx.lineWidth = 4.2;
-  ctx.strokeStyle = t.halo;
-  ctx.fillStyle = t.halo;
-  for (const part of parts) part(ctx);
-  ctx.lineWidth = 1.9;
-  ctx.strokeStyle = t.barb;
-  ctx.fillStyle = t.barb;
-  for (const part of parts) part(ctx);
-  ctx.restore();
-}
-
 function drawLabels(ctx, ob, t, detail) {
   ctx.textBaseline = 'middle';
   if (detail < 1) return;
@@ -850,29 +743,6 @@ function drawLabels(ctx, ob, t, detail) {
   if (ob.gust) text(ctx, `G${Math.round(ob.gust)}`, 13, 13, 'left', t.gust, t.halo, 11.5);
   if (wx) text(ctx, wx.slice(0, 8), -14, 0, 'right', t.wx, t.halo, 10.5);
   if (ob.icaoId) text(ctx, ob.icaoId, 0, 22, 'center', t.dim, t.halo, 9.5);
-}
-
-function text(ctx, value, x, y, align, fill, halo, size = 13) {
-  ctx.save();
-  ctx.font = `700 ${size}px "JetBrains Mono", monospace`;
-  ctx.textAlign = align;
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = halo;
-  ctx.strokeText(String(value), x, y);
-  ctx.fillStyle = fill;
-  ctx.fillText(String(value), x, y);
-  ctx.restore();
-}
-
-function haloStroke(ctx, draw, width, stroke, halo) {
-  ctx.save();
-  ctx.lineWidth = width + 3.4;
-  ctx.strokeStyle = halo;
-  draw();
-  ctx.lineWidth = width;
-  ctx.strokeStyle = stroke;
-  draw();
-  ctx.restore();
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ import { setupModelOverlayLayers, renderModelOverlays, clearModelOverlays,
   prepareModelOverlayData, showPreparedModelOverlays, contourGeoJSON } from './modelOverlays.js';
 import { fetchSoundingNative, drawSkewT, drawHodograph, paramRows, soundingModel } from './sounding.js';
 import { MetarController } from './metars.js';
+import { BuoyController } from './buoys.js';
 import { MapTools } from './maptools.js';
 import { CrossSectionTool } from './xsect.js';
 import { SplitView } from './splitview.js';
@@ -1095,6 +1096,9 @@ const state = {
   // Map-tool controllers (METAR station plots, draw/measure/storm, split view).
   metars: null,
   _metarsOn: false,
+  // NDBC buoy station plots (buoys.js) — same shape as the METAR overlay.
+  buoys: null,
+  _buoysOn: false,
   mapTools: null,
   splitView: null,
   exportTool: null,
@@ -1257,6 +1261,9 @@ function cacheEls() {
   el.lsrPreviewCard = $('#lsrPreviewCard');
   el.metarsField = $('#metarsField') || (el.metarsToggle && el.metarsToggle.closest('.toggle-field'));
   el.metarControls = $('#metarControls');
+  el.buoysToggle = $('#buoysToggle');
+  el.buoysField = $('#buoysField') || (el.buoysToggle && el.buoysToggle.closest('.toggle-field'));
+  el.buoyControls = $('#buoyControls');
   el.locationToggle = $('#locationToggle');
   el.loopField = $('#loopField');
   el.loopBtn = $('#loopBtn');
@@ -7301,6 +7308,8 @@ function layoutQuickSettings() {
     // The METAR overlay's controls (station limit / size / category key) sit
     // directly under their toggle, in Settings, rather than floating on the map.
     el.metarControls,
+    el.buoysField,
+    el.buoyControls,
     el.ringsField
   );
 }
@@ -8731,6 +8740,29 @@ function setupMapTools() {
   }
   if (state._metarsOn) setMetars(true, true);
 
+  // NDBC buoy station plots. Same lifecycle as the METAR overlay above; the
+  // blockClicks guard keeps a tap from opening a buoy report while a tool that
+  // consumes map clicks (draw / measure / storm track / cross section) is armed.
+  state.buoys = new BuoyController(state.map, {
+    panelHost: el.buoyControls,
+    blockClicks: () => clickConsumingToolActive(),
+  });
+  state.buoys.onStatus = (msg) => setStatus(msg);
+  const setBuoys = (on, quiet = false) => {
+    on = !!on;
+    state._buoysOn = on;
+    const enabled = state.buoys.setEnabled(on);
+    setToggleBtn(el.buoysToggle, enabled);
+    if (!enabled && !quiet) setStatus('buoys off');
+    saveSettings();
+    return enabled;
+  };
+  if (el.buoysToggle) {
+    setToggleBtn(el.buoysToggle, state._buoysOn);
+    el.buoysToggle.addEventListener('click', () => setBuoys(!state.buoys.enabled));
+  }
+  if (state._buoysOn) setBuoys(true, true);
+
   // NOTE: the local storm reports (LSR) overlay controller and its toggle are
   // wired once in init(), alongside the other overlay controllers. A second
   // setup here previously attached a competing click handler to the same
@@ -9305,6 +9337,7 @@ const DEFAULT_KEYBINDS = {
     'KeyM': 'tool:measure',
     'KeyD': 'tool:draw',
     'KeyS': 'tool:metars',
+    'KeyB': 'tool:buoys',
     'KeyL': 'tool:locate',
     'KeyE': 'tool:export',
     'Shift+Digit7': 'tool:split',
@@ -9332,13 +9365,13 @@ const DEFAULT_KEYBINDS = {
 const TOOL_ACTION_BTN = {
   inspect: 'inspectBtn',
   storm: 'toolStorm', measure: 'toolMeasure', draw: 'toolDraw',
-  metars: 'metarsToggle', locate: 'toolLocate', xsect: 'toolXsect',
+  metars: 'metarsToggle', buoys: 'buoysToggle', locate: 'toolLocate', xsect: 'toolXsect',
   split: 'toolSplit', export: 'toolExport', clear: 'toolClear',
 };
 const TOOL_ACTIONS = [
   ['tool:inspect', 'Inspect'],
   ['tool:storm', 'Storm track'], ['tool:measure', 'Measure'], ['tool:draw', 'Draw'],
-  ['tool:metars', 'Surface obs'], ['tool:locate', 'Live location'],
+  ['tool:metars', 'Surface obs'], ['tool:buoys', 'Buoys'], ['tool:locate', 'Live location'],
   ['tool:split', 'Split screen'], ['tool:export', 'Export'], ['tool:clear', 'Clear drawings'],
 ];
 const PLAYBACK_ACTIONS = [
@@ -10031,6 +10064,7 @@ function saveSettings() {
         radarLegacyProducts: { ...state.radarLegacyProducts },
         radarOverlay: state.radarOverlay,
         metarsOn: state.metars ? state.metars.enabled : state._metarsOn,
+        buoysOn: state.buoys ? state.buoys.enabled : state._buoysOn,
         lsr: state.lsr
           ? { on:state.lsr.enabled, hours:state.lsr.hours, cats:{ ...state.lsr.cats } }
           : { ...state._lsr, cats:{ ...state._lsr.cats } },
@@ -10165,6 +10199,7 @@ function applyStoredSettings(s) {
     }
   }
   if (typeof s.metarsOn === 'boolean') state._metarsOn = s.metarsOn;
+  if (typeof s.buoysOn === 'boolean') state._buoysOn = s.buoysOn;
   if (typeof s.modelCityValues === 'boolean') state.modelCityValues = s.modelCityValues;
   if (s.cityValuesProducts && typeof s.cityValuesProducts === 'object') {
     state.cityValuesProducts = {};
@@ -10378,6 +10413,7 @@ function reflectStoredControls() {
   }
   setToggleBtn(el.radarOverlayToggle, state.radarOverlay);
   setToggleBtn(el.metarsToggle, state._metarsOn);
+  setToggleBtn(el.buoysToggle, state._buoysOn);
   setToggleBtn(el.modelCityValuesToggle, state.modelCityValues);
   setToggleBtn(el.layeringToggle, state.layers.enabled);
   if (el.layerControls) el.layerControls.hidden = !state.layers.enabled;
